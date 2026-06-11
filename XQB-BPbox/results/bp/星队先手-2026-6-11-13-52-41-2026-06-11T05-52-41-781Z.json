@@ -1,0 +1,310 @@
+{
+  "name": "星队先手 2026/6/11 13:52:41",
+  "flowName": "星队先手",
+  "flowConfig": {
+    "name": "星队先手",
+    "steps": [
+      {
+        "index": 1,
+        "side": "star",
+        "action": "ban",
+        "targetType": "character",
+        "eventName": "aB1",
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 2,
+        "side": "rail",
+        "action": "ban",
+        "targetType": "character",
+        "eventName": "bB1",
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 3,
+        "side": "star",
+        "action": "ban",
+        "targetType": "character",
+        "eventName": "aB2",
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 4,
+        "side": "rail",
+        "action": "ban",
+        "targetType": "character",
+        "eventName": "bB2",
+        "pageChangeName": "视频槽位缩小",
+        "pageChangeIndex": null
+      },
+      {
+        "index": 5,
+        "side": "star",
+        "action": "pick",
+        "targetType": "character",
+        "eventName": null,
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 6,
+        "side": "rail",
+        "action": "pick",
+        "targetType": "character",
+        "eventName": null,
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 7,
+        "side": "rail",
+        "action": "pick",
+        "targetType": "character",
+        "eventName": null,
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 8,
+        "side": "star",
+        "action": "pick",
+        "targetType": "character",
+        "eventName": null,
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 9,
+        "side": "star",
+        "action": "pick",
+        "targetType": "character",
+        "eventName": null,
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 10,
+        "side": "rail",
+        "action": "pick",
+        "targetType": "character",
+        "eventName": null,
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 11,
+        "side": "rail",
+        "action": "pick",
+        "targetType": "character",
+        "eventName": null,
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 12,
+        "side": "star",
+        "action": "pick",
+        "targetType": "character",
+        "eventName": null,
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 13,
+        "side": "rail",
+        "action": "pick",
+        "targetType": "character",
+        "eventName": null,
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 14,
+        "side": "star",
+        "action": "pick",
+        "targetType": "character",
+        "eventName": null,
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 15,
+        "side": "rail",
+        "action": "ban",
+        "targetType": "character",
+        "eventName": null,
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 16,
+        "side": "star",
+        "action": "ban",
+        "targetType": "character",
+        "eventName": null,
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 17,
+        "side": "star",
+        "action": "pick",
+        "targetType": "character",
+        "eventName": null,
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 18,
+        "side": "rail",
+        "action": "pick",
+        "targetType": "character",
+        "eventName": null,
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 19,
+        "side": "rail",
+        "action": "pick",
+        "targetType": "character",
+        "eventName": null,
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 20,
+        "side": "star",
+        "action": "pick",
+        "targetType": "character",
+        "eventName": null,
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 21,
+        "side": "star",
+        "action": "pick",
+        "targetType": "character",
+        "eventName": null,
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 22,
+        "side": "rail",
+        "action": "pick",
+        "targetType": "character",
+        "eventName": null,
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 23,
+        "side": "star",
+        "action": "ban",
+        "targetType": "lightCone",
+        "eventName": null,
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 24,
+        "side": "rail",
+        "action": "ban",
+        "targetType": "lightCone",
+        "eventName": null,
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 25,
+        "side": "star",
+        "action": "protect",
+        "targetType": "character",
+        "eventName": "protect_end",
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 26,
+        "side": "star",
+        "action": "borrow",
+        "targetType": "character",
+        "eventName": "hire_end",
+        "pageChangeName": "租界结束",
+        "pageChangeIndex": null
+      },
+      {
+        "index": 27,
+        "side": "rail",
+        "action": "pick",
+        "targetType": "character",
+        "eventName": null,
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 28,
+        "side": "star",
+        "action": "pick",
+        "targetType": "character",
+        "eventName": null,
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 29,
+        "side": "star",
+        "action": "pick",
+        "targetType": "character",
+        "eventName": null,
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 30,
+        "side": "rail",
+        "action": "pick",
+        "targetType": "character",
+        "eventName": null,
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 31,
+        "side": "rail",
+        "action": "pick",
+        "targetType": "character",
+        "eventName": null,
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      },
+      {
+        "index": 32,
+        "side": "star",
+        "action": "pick",
+        "targetType": "character",
+        "eventName": null,
+        "pageChangeName": null,
+        "pageChangeIndex": null
+      }
+    ]
+  },
+  "createdAt": "2026-06-11T05:52:41.781Z",
+  "upCharacterPvPath": "C:\\project\\XQB-BP\\XQB-BPbox\\assets\\videos\\PV\\PV_00075.mp4",
+  "starTeam": {
+    "name": "左侧队",
+    "picks": [],
+    "bans": []
+  },
+  "railTeam": {
+    "name": "右侧队",
+    "picks": [],
+    "bans": []
+  },
+  "actions": []
+}

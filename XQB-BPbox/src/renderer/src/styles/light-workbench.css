@@ -1,0 +1,209 @@
+:root {
+  --app-bg: #f3f3f3;
+  --panel-bg: #ffffff;
+  --sidebar-bg: #fafafa;
+  --activity-bg: #f5f5f5;
+  --toolbar-bg: #ffffff;
+  --border-color: #e2e3e5;
+  --text-color: #222222;
+  --text-muted: #666666;
+  --accent-color: #0078d4;
+  --accent-hover: #106ebe;
+  --input-bg: #ffffff;
+  --input-border: #c8c8c8;
+  --button-bg: #f3f3f3;
+  --button-hover: #e8e8e8;
+  --danger-color: #d13438;
+  --statusbar-bg: #0078d4;
+  --statusbar-text: #ffffff;
+  --color-bg: var(--app-bg);
+  --color-panel: var(--activity-bg);
+  --color-panel-strong: #eeeeee;
+  --color-border: var(--border-color);
+  --color-text: var(--text-color);
+  --color-muted: var(--text-muted);
+  --color-blue: var(--accent-color);
+  --color-blue-soft: #e8f3ff;
+  --color-red: var(--danger-color);
+  --status-blue: var(--statusbar-bg);
+}
+
+body {
+  background: var(--app-bg);
+}
+
+button {
+  min-height: 28px;
+  border-color: var(--border-color);
+  background: var(--button-bg);
+  color: var(--text-color);
+}
+
+button:hover:not(:disabled) {
+  border-color: #b8c0ca;
+  background: var(--button-hover);
+}
+
+button.primary {
+  border-color: var(--accent-color);
+  background: var(--accent-color);
+  color: #ffffff;
+}
+
+button.primary:hover:not(:disabled) {
+  border-color: var(--accent-hover);
+  background: var(--accent-hover);
+}
+
+button.secondary {
+  border-color: var(--border-color);
+  background: var(--button-bg);
+}
+
+button.danger {
+  border-color: #f1c7c9;
+  background: #fff7f7;
+  color: var(--danger-color);
+}
+
+button.danger:hover:not(:disabled) {
+  border-color: var(--danger-color);
+  background: #fdebec;
+}
+
+input,
+select,
+textarea {
+  min-height: 28px;
+  border-color: var(--input-border);
+  background: var(--input-bg);
+  color: var(--text-color);
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--accent-color);
+  box-shadow: 0 0 0 1px rgba(0, 120, 212, 0.18);
+}
+
+.console-shell {
+  grid-template-columns: 52px 224px 1fr;
+  background: var(--app-bg);
+}
+
+.activity-bar {
+  gap: 6px;
+  padding: 8px 0;
+  background: var(--activity-bg);
+  border-right: 1px solid var(--border-color);
+}
+
+.activity-bar button {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 46px;
+  min-height: 46px;
+  border: 0;
+  background: transparent;
+  opacity: 0.72;
+}
+
+.activity-bar button:hover {
+  background: #ececec;
+  opacity: 1;
+}
+
+.activity-bar button.active {
+  background: #ffffff;
+  opacity: 1;
+  box-shadow: inset 3px 0 0 var(--accent-color);
+}
+
+.activity-bar img {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+  pointer-events: none;
+}
+
+.side-panel {
+  padding: 10px 8px;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--border-color);
+}
+
+.product-title {
+  padding: 4px 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.side-panel nav {
+  gap: 1px;
+}
+
+.side-panel nav button {
+  min-height: 30px;
+  padding: 5px 10px;
+  color: var(--text-color);
+}
+
+.side-panel nav button:hover {
+  background: #eeeeee;
+}
+
+.side-panel nav button.active {
+  background: #e8f3ff;
+  color: var(--accent-color);
+  font-weight: 600;
+}
+
+.side-note {
+  border-color: var(--border-color);
+  background: var(--panel-bg);
+}
+
+.workbench {
+  background: var(--app-bg);
+}
+
+.editor-tabs {
+  display: flex;
+  min-height: 35px;
+  border-bottom: 1px solid var(--border-color);
+  background: #ececec;
+}
+
+.editor-tab {
+  min-width: 180px;
+  min-height: 35px;
+  padding: 0 14px;
+  border: 0;
+  border-right: 1px solid var(--border-color);
+  background: #ececec;
+  color: var(--text-muted);
+  text-align: left;
+}
+
+.editor-tab.active {
+  background: var(--panel-bg);
+  color: var(--text-color);
+  box-shadow: inset 0 2px 0 var(--accent-color);
+}
+
+.status-bar {
+  background: var(--statusbar-bg);
+  color: var(--statusbar-text);
+}
+
+.status-bar span {
+  white-space: nowrap;
+}
+
+.message-line {
+  color: var(--statusbar-text);
+}

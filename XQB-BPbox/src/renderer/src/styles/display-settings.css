@@ -1,0 +1,432 @@
+.display-settings-workbench {
+  background: var(--app-bg);
+}
+
+.display-settings-toolbar {
+  min-height: 48px;
+  padding: 8px 14px;
+  background: var(--toolbar-bg);
+}
+
+.display-settings-title {
+  display: grid;
+  gap: 2px;
+  min-width: 180px;
+}
+
+.display-settings-title .breadcrumb {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.display-settings-title h1 {
+  font-size: 17px;
+  font-weight: 650;
+}
+
+.display-settings-actions {
+  align-items: end;
+  justify-content: flex-end;
+}
+
+.display-settings-actions .display-flow-source {
+  min-width: 230px;
+}
+
+.display-section-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: end;
+}
+
+.display-section-tabs button.active {
+  border-color: var(--accent-color);
+  background: var(--color-blue-soft);
+  color: var(--accent-color);
+  font-weight: 600;
+}
+
+.display-settings-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 360px) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) minmax(240px, 32vh);
+  grid-template-areas:
+    'left preview'
+    'left slots';
+  gap: 10px;
+  min-height: 0;
+  flex: 1;
+  padding: 10px;
+  overflow: hidden;
+  background: var(--app-bg);
+}
+
+.display-settings-layout-effects {
+  grid-template-columns: minmax(360px, 440px) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  grid-template-areas: 'left preview';
+}
+
+.display-settings-column {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  scrollbar-color: #c7c7c7 transparent;
+  scrollbar-width: thin;
+}
+
+.display-settings-left {
+  grid-area: left;
+  overflow: hidden;
+}
+
+.display-settings-right {
+  grid-area: right;
+  overflow: hidden;
+}
+
+.display-settings-column::-webkit-scrollbar,
+.editor-panel::-webkit-scrollbar,
+.display-settings-main::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.display-settings-column::-webkit-scrollbar-thumb,
+.editor-panel::-webkit-scrollbar-thumb,
+.display-settings-main::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  background: #c7c7c7;
+  background-clip: padding-box;
+}
+
+.display-settings-column::-webkit-scrollbar-track,
+.editor-panel::-webkit-scrollbar-track,
+.display-settings-main::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.display-settings-panel {
+  gap: 12px;
+  min-height: auto;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  background: var(--panel-bg);
+  overflow: visible;
+}
+
+.display-settings-panel:hover {
+  border-color: #c8d4e0;
+}
+
+.display-background-panel,
+.display-page-change-panel,
+.display-effects-panel,
+.display-preview-panel,
+.display-video-slot-panel,
+.display-slot-config-panel,
+.display-settings-main {
+  grid-column: auto;
+  grid-row: auto;
+  border-right: 1px solid var(--border-color);
+  border-left: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.display-effects-panel {
+  grid-area: right;
+  align-content: start;
+  min-height: 0;
+  overflow: auto;
+}
+
+.display-settings-layout-effects .display-effects-panel {
+  grid-area: left;
+}
+
+.display-background-panel,
+.display-page-change-panel {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.display-preview-panel {
+  grid-area: preview;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: #0f1115;
+  overflow: hidden;
+}
+
+.display-preview-panel:hover {
+  border-color: transparent;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 32px;
+  margin: -12px -12px 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+  background: #fafafa;
+}
+
+.panel-header > div {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.panel-header span {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.panel-header h2 {
+  overflow: hidden;
+  color: var(--text-color);
+  font-size: 14px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.display-effects-panel.slot-effect-panel {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(235px, 1fr));
+  grid-auto-rows: max-content;
+  gap: 10px;
+}
+
+.display-effects-panel .panel-header {
+  grid-column: 1 / -1;
+}
+
+.slot-effect-card,
+.slot-layout-editor,
+.background-layer-card,
+.page-change-card {
+  border-color: var(--border-color);
+  background: #ffffff;
+  box-shadow: none;
+}
+
+.slot-effect-card:hover,
+.slot-layout-editor:hover,
+.background-layer-card:hover,
+.page-change-card:hover {
+  border-color: #c8d4e0;
+}
+
+.slot-effect-card {
+  padding: 10px;
+}
+
+.slot-effect-card h3,
+.slot-layout-editor header strong,
+.page-change-card header strong {
+  color: var(--text-color);
+  font-size: 13px;
+}
+
+.slot-effect-fields,
+.background-layer-fields,
+.slot-layout-numbers,
+.slot-layout-gap-list,
+.page-change-fields {
+  gap: 8px;
+}
+
+.slot-effect-fields label,
+.event-delay-field,
+.background-layer-fields label,
+.slot-layout-numbers label,
+.slot-layout-gap-list label,
+.page-change-card label,
+.chant-video-change-row label,
+.display-settings-panel label {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.event-delay-field {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 6px;
+}
+
+.event-delay-chips {
+  display: flex;
+  min-height: 26px;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.event-delay-chip {
+  min-height: 24px;
+  padding: 2px 7px;
+  border: 1px solid var(--border-color);
+  background: #f5f7fb;
+  color: var(--text-color);
+  font-size: 12px;
+}
+
+.event-delay-empty {
+  color: var(--text-muted);
+}
+
+.asset-field {
+  border-color: var(--border-color);
+  background: #fafafa;
+}
+
+.asset-field strong {
+  color: var(--text-color);
+}
+
+.background-layer-list,
+.page-change-list,
+.chant-video-change-list {
+  gap: 10px;
+}
+
+.display-background-panel .asset-field.compact {
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+}
+
+.slot-effect-card .asset-field.compact {
+  grid-template-columns: 76px minmax(0, 1fr) repeat(3, auto);
+}
+
+.slot-layout-grid {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.display-video-slot-panel {
+  grid-area: slots;
+  flex: none;
+  min-height: 0;
+  overflow: auto;
+}
+
+.display-slot-config-panel {
+  grid-area: slots;
+  flex: none;
+  min-height: 0;
+  overflow: auto;
+}
+
+.display-page-change-content,
+.display-settings-subsection {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+
+.display-page-change-content {
+  flex: 1;
+}
+
+.display-settings-subsection-header {
+  padding: 2px 0;
+  color: var(--text-color);
+  font-size: 13px;
+}
+
+.display-preview-stage-shell {
+  display: grid;
+  place-items: center;
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: #0f1115;
+}
+
+.display-preview-stage-frame {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border: 0;
+  background: #0f1115;
+}
+
+.display-preview-stage-frame .display-stage {
+  width: 100%;
+  height: 100%;
+}
+
+.chant-video-slot-editor {
+  background: #ffffff;
+}
+
+.chant-video-change-row {
+  grid-template-columns: repeat(3, minmax(120px, 1.1fr)) repeat(5, minmax(62px, 0.78fr)) auto;
+  gap: 8px;
+}
+
+.flow-empty {
+  border-color: #d8d8d8;
+  background: #fbfbfb;
+}
+
+@media (max-width: 1280px) {
+  .display-settings-layout {
+    grid-template-columns: minmax(300px, 340px) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(240px, 34vh);
+    overflow: auto;
+  }
+
+  .display-settings-layout-changes,
+  .display-settings-layout-effects {
+    grid-template-columns: minmax(320px, 380px) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 900px) {
+  .display-settings-layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto;
+    grid-template-areas:
+      'preview'
+      'left'
+      'slots';
+    overflow: auto;
+  }
+
+  .display-settings-layout-effects {
+    grid-template-areas:
+      'left'
+      'preview';
+  }
+
+  .display-settings-column {
+    overflow: visible;
+  }
+
+  .display-settings-left,
+  .display-settings-right {
+    min-height: auto;
+  }
+
+  .display-settings-actions {
+    justify-content: flex-start;
+  }
+}
