@@ -1,7 +1,7 @@
 {
   "name": "xqb-bpbox",
   "productName": "XQB-BPBox",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "description": "An Electron application with React and TypeScript",
   "main": "./out/main/index.js",
   "author": "example.com",

@@ -125,6 +125,7 @@
 
 .display-background-panel,
 .display-page-change-panel,
+.display-audio-volume-panel,
 .display-effects-panel,
 .display-preview-panel,
 .display-video-slot-panel,
@@ -149,10 +150,15 @@
 }
 
 .display-background-panel,
-.display-page-change-panel {
+.display-page-change-panel,
+.display-audio-volume-panel {
   flex: 1;
   min-height: 0;
   overflow: auto;
+}
+
+.display-audio-volume-panel {
+  flex: none;
 }
 
 .display-preview-panel {
@@ -304,6 +310,33 @@
 
 .display-background-panel .asset-field.compact {
   grid-template-columns: 42px minmax(0, 1fr) auto;
+}
+
+.display-volume-list {
+  display: grid;
+  gap: 12px;
+}
+
+.display-volume-control {
+  display: grid;
+  gap: 7px;
+}
+
+.display-volume-control span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.display-volume-control strong {
+  color: var(--text-color);
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+}
+
+.display-volume-control input[type='range'] {
+  width: 100%;
 }
 
 .slot-effect-card .asset-field.compact {

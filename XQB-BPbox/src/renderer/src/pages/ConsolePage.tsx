@@ -43,6 +43,10 @@ import type {
 import type { LightCone, LightConePayload, LightConeRarity } from '../types/lightCone'
 import DisplayCanvas from '../components/display/DisplayCanvas'
 import VoiceTimelinePanel from './VoiceTimelinePanel'
+import {
+  normalizeDisplayAudioVolumePercent,
+  type DisplayAudioVolumeField
+} from '../../../shared/displayAudioVolume'
 
 type ConsoleView =
   | 'characters'
@@ -464,6 +468,9 @@ const emptyDisplaySettings: DisplaySettings = {
   backgroundScale: 1,
   backgroundOpacity: 1,
   backgroundImageUrl: null,
+  bpSoundVolume: 100,
+  characterVoiceVolume: 100,
+  characterEffectVolume: 100,
   backgroundLayers: [],
   pageChanges: [],
   slotLayouts: defaultSlotLayouts,
@@ -3686,6 +3693,35 @@ function mergeLiveDisplaySettings(
   }
 }
 
+function DisplayVolumeControl({
+  label,
+  value,
+  onChange
+}: {
+  label: string
+  value: number
+  onChange: (value: number) => void
+}): React.JSX.Element {
+  const volume = normalizeDisplayAudioVolumePercent(value)
+
+  return (
+    <label className="display-volume-control">
+      <span>
+        {label}
+        <strong>{volume}%</strong>
+      </span>
+      <input
+        type="range"
+        min="0"
+        max="100"
+        step="1"
+        value={volume}
+        onChange={(event) => onChange(Number(event.target.value))}
+      />
+    </label>
+  )
+}
+
 function DisplaySettingsPanel({
   currentFlow,
   activeSection,
@@ -3979,6 +4015,15 @@ function DisplaySettingsPanel({
     updateLive({ ...settings, pageChanges }).catch((error: unknown) =>
       onMessage('error', String(error))
     )
+  }
+
+  const updateAudioVolume = (field: DisplayAudioVolumeField, value: number): void => {
+    const nextSettings: DisplaySettings = {
+      ...settings,
+      [field]: normalizeDisplayAudioVolumePercent(value)
+    }
+
+    updateLive(nextSettings).catch((error: unknown) => onMessage('error', String(error)))
   }
 
   const addPageChange = (): void => {
@@ -4468,6 +4513,31 @@ function DisplaySettingsPanel({
                   当前没有背景图。点击“添加背景图”后，可以分别调整每一层的位置、缩放和透明度。
                 </div>
               ) : null}
+            </section>
+            <section className="editor-panel display-settings-panel display-audio-volume-panel">
+              <header className="panel-header">
+                <div>
+                  <span>Audio Volume</span>
+                  <h2>音量控制</h2>
+                </div>
+              </header>
+              <div className="display-volume-list">
+                <DisplayVolumeControl
+                  label="BP音效音量"
+                  value={settings.bpSoundVolume}
+                  onChange={(value) => updateAudioVolume('bpSoundVolume', value)}
+                />
+                <DisplayVolumeControl
+                  label="角色语音音量"
+                  value={settings.characterVoiceVolume}
+                  onChange={(value) => updateAudioVolume('characterVoiceVolume', value)}
+                />
+                <DisplayVolumeControl
+                  label="角色音效音量"
+                  value={settings.characterEffectVolume}
+                  onChange={(value) => updateAudioVolume('characterEffectVolume', value)}
+                />
+              </div>
             </section>
           </div>
         ) : null}

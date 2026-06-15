@@ -20,6 +20,8 @@ import type {
   VoiceTimelinePlayback
 } from '../types/bp'
 import type { Character } from '../types/character'
+import { playManagedAudio, updateManagedAudioVolume } from '../utils/audioPlayback'
+import { displayAudioGain } from '../../../shared/displayAudioVolume'
 
 const emptyDisplaySettings: DisplaySettings = {
   stageWidth: 1920,
@@ -31,6 +33,9 @@ const emptyDisplaySettings: DisplaySettings = {
   backgroundScale: 1,
   backgroundOpacity: 1,
   backgroundImageUrl: null,
+  bpSoundVolume: 100,
+  characterVoiceVolume: 100,
+  characterEffectVolume: 100,
   backgroundLayers: [],
   pageChanges: [],
   slotLayouts: {
@@ -317,15 +322,6 @@ function supportsChangeEffectMode(action: BpAction): boolean {
 
 function normalizeChangeEffectMode(value: unknown): ChangeEffectMode {
   return value === 'keep' || value === 'next' || value === 'keepNext' ? value : 'clear'
-}
-
-function playAudio(url: string | null | undefined): void {
-  if (!url) {
-    return
-  }
-
-  const audio = new Audio(url)
-  audio.play().catch(() => undefined)
 }
 
 const CHANT_VIDEO_PV_SWITCH_SECONDS = 5
@@ -1011,6 +1007,9 @@ function DisplayPage(): React.JSX.Element {
   const sourceStateRef = useRef<BpRuntimeState>(emptyState)
   const lastPlayedCursorRef = useRef(0)
   const suppressNextClickRef = useRef(false)
+  const bpSoundAudiosRef = useRef<Set<HTMLAudioElement>>(new Set())
+  const characterVoiceAudiosRef = useRef<Set<HTMLAudioElement>>(new Set())
+  const characterEffectAudiosRef = useRef<Set<HTMLAudioElement>>(new Set())
   const voiceTimelineAudioRef = useRef<HTMLAudioElement | null>(null)
   const voiceTimelineClickIndexRef = useRef(0)
   const voiceTimelineClickPointsRef = useRef<VoiceTimelineClickPoint[]>([])
@@ -1032,6 +1031,10 @@ function DisplayPage(): React.JSX.Element {
   const resolvedUpCharacterPvUrlRef = useRef<string | null>(null)
   const pendingUpPvContextRef = useRef<PendingUpPvContext | null>(null)
   const pendingIdleUpPvKeyRef = useRef<string | null>(null)
+  const bpSoundVolume = displayAudioGain(settings, 'bpSoundVolume')
+  const characterVoiceVolume = displayAudioGain(settings, 'characterVoiceVolume')
+  const characterEffectVolume = displayAudioGain(settings, 'characterEffectVolume')
+  const characterVoiceVolumeRef = useRef(characterVoiceVolume)
 
   const clearPreloadedPvVideo = useCallback((): void => {
     setPreloadChantVideo(null)
@@ -1496,6 +1499,22 @@ function DisplayPage(): React.JSX.Element {
   }, [resolvedUpCharacterPvUrl])
 
   useEffect(() => {
+    updateManagedAudioVolume(bpSoundAudiosRef.current, bpSoundVolume)
+  }, [bpSoundVolume])
+
+  useEffect(() => {
+    characterVoiceVolumeRef.current = characterVoiceVolume
+    updateManagedAudioVolume(characterVoiceAudiosRef.current, characterVoiceVolume)
+    if (voiceTimelineAudioRef.current) {
+      voiceTimelineAudioRef.current.volume = characterVoiceVolume
+    }
+  }, [characterVoiceVolume])
+
+  useEffect(() => {
+    updateManagedAudioVolume(characterEffectAudiosRef.current, characterEffectVolume)
+  }, [characterEffectVolume])
+
+  useEffect(() => {
     const pendingKey = pendingIdleUpPvKeyRef.current
 
     if (!pendingKey || !resolvedUpCharacterPvUrl || chantVideoRef.current) {
@@ -1665,7 +1684,11 @@ function DisplayPage(): React.JSX.Element {
     pendingUpPvContextRef.current = null
 
     if (isEffectSoundAction(action.action)) {
-      playAudio(settings.slotEffects?.[action.action]?.selectedSoundUrl)
+      playManagedAudio(
+        settings.slotEffects?.[action.action]?.selectedSoundUrl,
+        bpSoundVolume,
+        bpSoundAudiosRef.current
+      )
     }
 
     if (action.action === 'protect') {
@@ -1715,9 +1738,13 @@ function DisplayPage(): React.JSX.Element {
     const voiceUrl = action.action === 'ban' ? character.ban_voice_url : character.pick_voice_url
 
     if (action.action === 'pick') {
-      playAudio(character.pick_sound_url)
+      playManagedAudio(
+        character.pick_sound_url,
+        characterEffectVolume,
+        characterEffectAudiosRef.current
+      )
     }
-    playAudio(voiceUrl)
+    playManagedAudio(voiceUrl, characterVoiceVolume, characterVoiceAudiosRef.current)
 
     const nextChantVideoUrl = optionalString(character.chant_video_url)
     if (nextChantVideoUrl) {
@@ -1760,6 +1787,9 @@ function DisplayPage(): React.JSX.Element {
     }
   }, [
     characterLookup,
+    bpSoundVolume,
+    characterEffectVolume,
+    characterVoiceVolume,
     replayCursor,
     resolvedUpCharacterPvUrl,
     settings.slotEffects,
@@ -1936,6 +1966,7 @@ function DisplayPage(): React.JSX.Element {
     voiceTimelineSessionKeyRef.current = sessionKey
     const audio = new Audio(voiceTimelinePlayback.audioUrl)
     audio.preload = 'auto'
+    audio.volume = characterVoiceVolumeRef.current
     voiceTimelineAudioRef.current = audio
 
     const handlePlay = (): void => {

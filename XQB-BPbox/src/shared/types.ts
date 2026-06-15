@@ -226,6 +226,9 @@ export interface DisplaySettings {
   backgroundScale: number
   backgroundOpacity: number
   backgroundImageUrl?: string | null
+  bpSoundVolume: number
+  characterVoiceVolume: number
+  characterEffectVolume: number
   backgroundLayers: DisplayBackgroundLayer[]
   pageChanges: DisplayPageChange[]
   slotLayouts: DisplaySlotLayouts

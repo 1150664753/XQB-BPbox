@@ -22,6 +22,8 @@ import type {
 } from '../types/bp'
 import type { Character } from '../types/character'
 import type { LightCone } from '../types/lightCone'
+import { playManagedAudio, updateManagedAudioVolume } from '../utils/audioPlayback'
+import { displayAudioGain } from '../../../shared/displayAudioVolume'
 
 type MessageType = 'info' | 'success' | 'error'
 
@@ -504,14 +506,6 @@ function isEffectSoundAction(action: BpAction): action is 'pick' | 'ban' | 'prot
   return action === 'pick' || action === 'ban' || action === 'protect' || action === 'borrow'
 }
 
-function playAudio(url: string | null | undefined): void {
-  if (!url) {
-    return
-  }
-  const audio = new Audio(url)
-  audio.play().catch(() => undefined)
-}
-
 function normalizePvStartTime(value: unknown): number {
   const numberValue = Number(value)
   return Number.isFinite(numberValue) && numberValue >= 0 ? numberValue : 0
@@ -654,7 +648,14 @@ function VoiceTimelinePanel({
   const [audioUrl, setAudioUrl] = useState<string | null>(null)
   const [audioDuration, setAudioDuration] = useState(0)
   const [previewChantVideo, setPreviewChantVideo] = useState<DisplayChantVideo | null>(null)
+  const bpSoundVolume = displayAudioGain(displaySettings, 'bpSoundVolume')
+  const characterVoiceVolume = displayAudioGain(displaySettings, 'characterVoiceVolume')
+  const characterEffectVolume = displayAudioGain(displaySettings, 'characterEffectVolume')
   const audioRef = useRef<HTMLAudioElement | null>(null)
+  const bpSoundAudiosRef = useRef<Set<HTMLAudioElement>>(new Set())
+  const characterVoiceAudiosRef = useRef<Set<HTMLAudioElement>>(new Set())
+  const characterEffectAudiosRef = useRef<Set<HTMLAudioElement>>(new Set())
+  const characterVoiceVolumeRef = useRef(characterVoiceVolume)
   const currentTimeRef = useRef(0)
   const playbackRateRef = useRef(1)
   const playingRef = useRef(false)
@@ -851,6 +852,22 @@ function VoiceTimelinePanel({
   }, [playing])
 
   useEffect(() => {
+    updateManagedAudioVolume(bpSoundAudiosRef.current, bpSoundVolume)
+  }, [bpSoundVolume])
+
+  useEffect(() => {
+    characterVoiceVolumeRef.current = characterVoiceVolume
+    updateManagedAudioVolume(characterVoiceAudiosRef.current, characterVoiceVolume)
+    if (audioRef.current) {
+      audioRef.current.volume = characterVoiceVolume
+    }
+  }, [characterVoiceVolume])
+
+  useEffect(() => {
+    updateManagedAudioVolume(characterEffectAudiosRef.current, characterEffectVolume)
+  }, [characterEffectVolume])
+
+  useEffect(() => {
     if (!audioUrl) {
       if (audioRef.current) {
         audioRef.current.pause()
@@ -862,6 +879,7 @@ function VoiceTimelinePanel({
 
     const audio = new Audio(audioUrl)
     audio.preload = 'metadata'
+    audio.volume = characterVoiceVolumeRef.current
     audio.playbackRate = playbackRateRef.current
     const initialTime = currentTimeRef.current
     audio.currentTime = Math.min(initialTime, audio.duration || initialTime)
@@ -1084,7 +1102,11 @@ function VoiceTimelinePanel({
     }
 
     if (isEffectSoundAction(action.action)) {
-      playAudio(displaySettings?.slotEffects?.[action.action]?.selectedSoundUrl)
+      playManagedAudio(
+        displaySettings?.slotEffects?.[action.action]?.selectedSoundUrl,
+        bpSoundVolume,
+        bpSoundAudiosRef.current
+      )
     }
 
     if (action.action === 'protect') {
@@ -1119,9 +1141,13 @@ function VoiceTimelinePanel({
     }
     const voiceUrl = action.action === 'ban' ? character.ban_voice_url : character.pick_voice_url
     if (action.action === 'pick') {
-      playAudio(character.pick_sound_url)
+      playManagedAudio(
+        character.pick_sound_url,
+        characterEffectVolume,
+        characterEffectAudiosRef.current
+      )
     }
-    playAudio(voiceUrl)
+    playManagedAudio(voiceUrl, characterVoiceVolume, characterVoiceAudiosRef.current)
 
     const chantVideoUrl = character.chant_video_url
     if (!chantVideoUrl) {
@@ -1150,8 +1176,11 @@ function VoiceTimelinePanel({
       )
     )
   }, [
+    bpSoundVolume,
     cancelPendingPreviewPvSwitch,
+    characterEffectVolume,
     characterLookup,
+    characterVoiceVolume,
     displaySettings?.slotEffects,
     hidePreviewChantVideo,
     previewProgress.cursor,

@@ -19,6 +19,7 @@ import {
 } from '../assets'
 import { notifyProjectFilesChanged } from '../projectFileWatchers'
 import { sendToAllWindows } from '../windows'
+import { normalizeDisplayAudioVolumePercent } from '../../shared/displayAudioVolume'
 import type {
   DisplayBackgroundLayer,
   DisplayPageChange,
@@ -224,6 +225,9 @@ const defaultDisplaySettings: DisplaySettings = {
   backgroundScale: 1,
   backgroundOpacity: 1,
   backgroundImageUrl: null,
+  bpSoundVolume: 100,
+  characterVoiceVolume: 100,
+  characterEffectVolume: 100,
   backgroundLayers: [],
   pageChanges: [],
   slotLayouts: defaultSlotLayouts,
@@ -609,6 +613,9 @@ function withDisplayAsset(settings: DisplaySettings, copyExternalFile: boolean):
     backgroundOpacity:
       firstLayer?.opacity ?? Math.max(0, Math.min(1, Number(settings.backgroundOpacity) || 0)),
     backgroundImageUrl: firstLayer?.imageUrl ?? storedPathToFileUrl(backgroundImage),
+    bpSoundVolume: normalizeDisplayAudioVolumePercent(settings.bpSoundVolume),
+    characterVoiceVolume: normalizeDisplayAudioVolumePercent(settings.characterVoiceVolume),
+    characterEffectVolume: normalizeDisplayAudioVolumePercent(settings.characterEffectVolume),
     backgroundLayers,
     pageChanges: normalizePageChanges(settings.pageChanges),
     slotLayouts: normalizeSlotLayouts(settings.slotLayouts, copyExternalFile),
@@ -645,6 +652,9 @@ function writeSettings(settings: DisplaySettings, fileName?: string): DisplaySet
     backgroundY: normalized.backgroundY,
     backgroundScale: normalized.backgroundScale,
     backgroundOpacity: normalized.backgroundOpacity,
+    bpSoundVolume: normalized.bpSoundVolume,
+    characterVoiceVolume: normalized.characterVoiceVolume,
+    characterEffectVolume: normalized.characterEffectVolume,
     backgroundLayers: normalized.backgroundLayers.map(stripBackgroundLayerUrls),
     pageChanges: normalized.pageChanges.map(stripPageChangeForSave),
     slotLayouts: {
