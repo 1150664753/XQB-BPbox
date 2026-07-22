@@ -456,7 +456,11 @@ function SeamlessChantVideo({
             }}
             onTimeUpdate={(event) =>
               !pausedRef.current
-                ? onTimeUpdate?.(item, event.currentTarget.currentTime, event.currentTarget.duration)
+                ? onTimeUpdate?.(
+                    item,
+                    event.currentTarget.currentTime,
+                    event.currentTarget.duration
+                  )
                 : undefined
             }
             onEnded={() => {
@@ -837,6 +841,7 @@ interface DisplayCanvasProps {
   settings: DisplaySettings
   state: BpRuntimeState
   className?: string
+  pixelExact?: boolean
   showCenterStage?: boolean
   chantVideo?: DisplayChantVideo | null
   preloadChantVideo?: DisplayChantVideo | null
@@ -1461,6 +1466,7 @@ function DisplayCanvas({
   settings,
   state,
   className = '',
+  pixelExact = false,
   showCenterStage = true,
   chantVideo = null,
   preloadChantVideo = null,
@@ -1479,10 +1485,18 @@ function DisplayCanvas({
   completedPageChangeIds
 }: DisplayCanvasProps): React.JSX.Element {
   const stageRef = useRef<HTMLDivElement>(null)
-  const [viewport, setViewport] = useState({ scale: 1, offsetX: 0, offsetY: 0 })
+  const [viewport, setViewport] = useState({
+    scale: 1,
+    offsetX: 0,
+    offsetY: 0,
+    stageWidth: renderStageWidth,
+    stageHeight: renderStageHeight,
+    pixelExactActive: false
+  })
   const [closedEffectGroups, setClosedEffectGroups] = useState<Set<string>>(() => new Set())
-  const [retainedSingleChantVideo, setRetainedSingleChantVideo] =
-    useState<SingleChantVideo | null>(null)
+  const [retainedSingleChantVideo, setRetainedSingleChantVideo] = useState<SingleChantVideo | null>(
+    null
+  )
   const [retainedProtectChantVideo, setRetainedProtectChantVideo] =
     useState<ProtectChantVideo | null>(null)
   const replayPositionRef = useRef({ createdAt: state.createdAt, stepCursor: state.stepCursor })
@@ -1715,19 +1729,32 @@ function DisplayCanvas({
       const deviceScale = Math.max(1, window.devicePixelRatio || 1)
       const pixelAlignedWidth = Math.max(1, Math.floor(rect.width * deviceScale)) / deviceScale
       const pixelAlignedHeight = Math.max(1, Math.floor(rect.height * deviceScale)) / deviceScale
+      const pixelExactActive =
+        pixelExact &&
+        Math.abs(pixelAlignedWidth - renderStageWidth) <= 1 &&
+        Math.abs(pixelAlignedHeight - renderStageHeight) <= 1
       const nextScale = Math.min(
         pixelAlignedWidth / renderStageWidth,
         pixelAlignedHeight / renderStageHeight
       )
-      const safeScale = Number.isFinite(nextScale) && nextScale > 0 ? nextScale : 1
+      const safeScale = pixelExactActive
+        ? 1
+        : Number.isFinite(nextScale) && nextScale > 0
+          ? nextScale
+          : 1
       const scaledWidth = renderStageWidth * safeScale
       const scaledHeight = renderStageHeight * safeScale
       const snapCssPixel = (value: number): number => Math.round(value * deviceScale) / deviceScale
+      const snapDisplayPixel = (value: number): number =>
+        pixelExactActive ? Math.round(value) : snapCssPixel(value)
 
       setViewport({
         scale: safeScale,
-        offsetX: snapCssPixel(Math.max(0, (rect.width - scaledWidth) / 2)),
-        offsetY: snapCssPixel(Math.max(0, (rect.height - scaledHeight) / 2))
+        offsetX: snapDisplayPixel(Math.max(0, (rect.width - scaledWidth) / 2)),
+        offsetY: snapDisplayPixel(Math.max(0, (rect.height - scaledHeight) / 2)),
+        stageWidth: rect.width,
+        stageHeight: rect.height,
+        pixelExactActive
       })
     }
     const observer = new ResizeObserver(updateScale)
@@ -1740,18 +1767,49 @@ function DisplayCanvas({
       observer.disconnect()
       window.removeEventListener('resize', updateScale)
     }
-  }, [])
+  }, [pixelExact])
 
+  const canvasTransform =
+    viewport.scale === 1
+      ? viewport.offsetX === 0 && viewport.offsetY === 0
+        ? 'none'
+        : `translate(${Math.round(viewport.offsetX)}px, ${Math.round(viewport.offsetY)}px)`
+      : `translate(${viewport.offsetX}px, ${viewport.offsetY}px) scale(${viewport.scale})`
   const canvasStyle: CSSProperties = {
     width: `${renderStageWidth}px`,
     height: `${renderStageHeight}px`,
-    transform: `translate(${viewport.offsetX}px, ${viewport.offsetY}px) scale(${viewport.scale})`
+    transform: canvasTransform
   }
   const slotEffectLayerStyle: CSSProperties = {
     width: `${designStageWidth}px`,
     height: `${designStageHeight}px`,
     transform: `scale(${coordinateScaleX}, ${coordinateScaleY})`
   }
+
+  useEffect(() => {
+    if (!import.meta.env.DEV) {
+      return
+    }
+
+    console.info('[DisplayCanvas] viewport', {
+      isLiveDisplay: pixelExact,
+      viewportScale: viewport.scale,
+      stageWidth: viewport.stageWidth,
+      stageHeight: viewport.stageHeight,
+      canvasTransform,
+      pixelExactActive: viewport.pixelExactActive,
+      devicePixelRatio: window.devicePixelRatio
+    })
+  }, [
+    canvasTransform,
+    pixelExact,
+    viewport.offsetX,
+    viewport.offsetY,
+    viewport.pixelExactActive,
+    viewport.scale,
+    viewport.stageHeight,
+    viewport.stageWidth
+  ])
 
   return (
     <div className={`display-stage ${className}`} ref={stageRef}>

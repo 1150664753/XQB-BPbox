@@ -1681,7 +1681,6 @@ function DisplayPage(): React.JSX.Element {
     if (!action) {
       return
     }
-    pendingUpPvContextRef.current = null
 
     if (isEffectSoundAction(action.action)) {
       playManagedAudio(
@@ -1719,6 +1718,10 @@ function DisplayPage(): React.JSX.Element {
             )
           : showIdleUpPv(`idle-protect-${action.stepIndex}`)
       )
+      return
+    }
+
+    if (action.action === 'ban' && action.targetType === 'lightCone') {
       return
     }
 
@@ -2084,6 +2087,7 @@ function DisplayPage(): React.JSX.Element {
         settings={settings}
         state={state}
         className="live-display-stage"
+        pixelExact
         showCenterStage={false}
         chantVideo={chantVideo}
         preloadChantVideo={preloadChantVideo}

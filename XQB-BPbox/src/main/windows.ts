@@ -76,8 +76,20 @@ function setDisplayContentSize(window: BrowserWindow): void {
   window.setContentSize(size.width, size.height)
 }
 
+function applyDisplayWindowZoom(window: BrowserWindow): number {
+  const scaleFactor = targetDisplayScaleFactor(window)
+  const zoomFactor = 1 / Math.max(1, scaleFactor)
+
+  window.webContents.setZoomFactor(zoomFactor)
+  return zoomFactor
+}
+
 function setDisplayWindowContentSize(window: BrowserWindow): void {
-  setDisplayContentSize(window)
+  const size = displayContentDipSize(window)
+
+  window.setMinimumSize(size.minWidth, size.minHeight)
+  window.setContentSize(size.width, size.height)
+  applyDisplayWindowZoom(window)
 }
 
 function correctDisplayWindowContentSize(window: BrowserWindow): void {
@@ -95,6 +107,39 @@ function correctDisplayWindowContentSize(window: BrowserWindow): void {
   }
 
   window.setContentSize(bounds.width + widthDelta, bounds.height + heightDelta)
+  applyDisplayWindowZoom(window)
+}
+
+function logDisplayWindowMetrics(window: BrowserWindow, label: string): void {
+  if (window.isDestroyed()) {
+    return
+  }
+
+  const scaleFactor = targetDisplayScaleFactor(window)
+  const zoomFactor = window.webContents.getZoomFactor()
+  const bounds = window.getBounds()
+  const contentBounds = window.getContentBounds()
+
+  void window.webContents
+    .executeJavaScript(
+      '({ innerWidth: window.innerWidth, innerHeight: window.innerHeight, devicePixelRatio: window.devicePixelRatio })',
+      true
+    )
+    .then((innerSize: { innerWidth: number; innerHeight: number; devicePixelRatio: number }) => {
+      console.info('[DisplayWindow] metrics', {
+        label,
+        scaleFactor,
+        zoomFactor,
+        bounds,
+        contentBounds,
+        innerWidth: innerSize.innerWidth,
+        innerHeight: innerSize.innerHeight,
+        devicePixelRatio: innerSize.devicePixelRatio
+      })
+    })
+    .catch((error: unknown) => {
+      console.warn('[DisplayWindow] metrics failed', error)
+    })
 }
 
 export function createMainWindow(): BrowserWindow {
@@ -152,6 +197,7 @@ export function createDisplayWindow(): BrowserWindow {
       displayWindow.show()
     }
     displayWindow.focus()
+    logDisplayWindowMetrics(displayWindow, 'reuse')
     return displayWindow
   }
 
@@ -177,6 +223,7 @@ export function createDisplayWindow(): BrowserWindow {
   })
 
   configureWindow(displayWindow)
+  applyDisplayWindowZoom(displayWindow)
 
   displayWindow.on('ready-to-show', () => {
     if (displayWindow && !displayWindow.isDestroyed()) {
@@ -184,6 +231,9 @@ export function createDisplayWindow(): BrowserWindow {
       correctDisplayWindowContentSize(displayWindow)
     }
     displayWindow?.show()
+    if (displayWindow && !displayWindow.isDestroyed()) {
+      logDisplayWindowMetrics(displayWindow, 'ready-to-show')
+    }
   })
 
   displayWindow.on('closed', () => {

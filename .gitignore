@@ -1,4 +1,47 @@
 
+# Dependencies
+node_modules/
+
+# Vite / Electron build and packaging output
+dist/
+out/
+release/
+*.exe
+*.msi
+*.msix
+*.appx
+*.blockmap
+latest*.yml
+
+# Local runtime data and large resources
+assets/
+config/
+results/
+
+# Environment files, credentials, and signing keys
+.env
+.env.*
+!.env.example
+!.env.example.*
+*.pem
+*.key
+*.pfx
+*.p12
+*.keystore
+
+# User caches, logs, and temporary files
+.cache/
+.tmp/
+tmp/
+temp/
+*.tmp
+*.temp
+*.log*
+.eslintcache
+.DS_Store
+Thumbs.db
+
+# Local archives
 *.zip
 *.7z
 *.rar
