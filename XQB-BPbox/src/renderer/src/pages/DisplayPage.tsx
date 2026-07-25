@@ -672,13 +672,13 @@ function shouldInterruptVideoForRuntimeUpdate(
     return true
   }
 
-  const appendedLightConeBan =
-    nextAction?.action === 'ban' &&
-    nextAction.targetType === 'lightCone' &&
+  const appendedMediaNeutralAction =
+    ((nextAction?.action === 'ban' && nextAction.targetType === 'lightCone') ||
+      nextAction?.action === 'borrow') &&
     nextState.actions.length === currentState.actions.length + 1 &&
     nextState.stepCursor >= currentState.stepCursor
 
-  if (appendedLightConeBan) {
+  if (appendedMediaNeutralAction) {
     return false
   }
 
@@ -1125,6 +1125,11 @@ function DisplayPage(): React.JSX.Element {
     }
   }, [])
 
+  const commitChantVideo = useCallback((video: DisplayChantVideo | null): void => {
+    chantVideoRef.current = video
+    setChantVideo(video)
+  }, [])
+
   const buildUpPvVideo = useCallback(
     (key: string, url: string): DisplayChantVideo => ({
       kind: 'single',
@@ -1143,8 +1148,8 @@ function DisplayPage(): React.JSX.Element {
     pendingUpPvContextRef.current = null
     pendingIdleUpPvKeyRef.current = null
     currentVideoModeRef.current = null
-    setChantVideo(null)
-  }, [cancelPendingChantPvSwitch])
+    commitChantVideo(null)
+  }, [cancelPendingChantPvSwitch, commitChantVideo])
 
   const applyUpdatedSettings = useCallback((nextSettings: DisplaySettings): void => {
     setSettings(nextSettings)
@@ -1161,7 +1166,7 @@ function DisplayPage(): React.JSX.Element {
       if (!upPvUrl) {
         pendingIdleUpPvKeyRef.current = key
         currentVideoModeRef.current = null
-        setChantVideo(null)
+        commitChantVideo(null)
         return false
       }
 
@@ -1174,10 +1179,10 @@ function DisplayPage(): React.JSX.Element {
 
       pendingIdleUpPvKeyRef.current = null
       currentVideoModeRef.current = 'upPv'
-      setChantVideo(upPvVideo)
+      commitChantVideo(upPvVideo)
       return true
     },
-    [buildUpPvVideo, cancelPendingChantPvSwitch, withVideoInstanceKey]
+    [buildUpPvVideo, cancelPendingChantPvSwitch, commitChantVideo, withVideoInstanceKey]
   )
 
   const rememberUpPvProgress = useCallback(
@@ -1218,10 +1223,10 @@ function DisplayPage(): React.JSX.Element {
         upCharacterPvCurrentTimeRef.current = startTime
       }
       currentVideoModeRef.current = video.mode
-      setChantVideo(replayVideo)
+      commitChantVideo(replayVideo)
       return true
     },
-    [withVideoInstanceKey]
+    [commitChantVideo, withVideoInstanceKey]
   )
 
   const takeQueuedPvVideo = useCallback((): DisplayChantVideo | null => {
@@ -1266,9 +1271,9 @@ function DisplayPage(): React.JSX.Element {
     clearChantVideoSwitchTimeout()
     clearPreloadedPvVideo()
     currentVideoModeRef.current = videoMode(queuedVideo)
-    setChantVideo(queuedVideo)
+    commitChantVideo(queuedVideo)
     return true
-  }, [clearChantVideoSwitchTimeout, clearPreloadedPvVideo, takeQueuedPvVideo])
+  }, [clearChantVideoSwitchTimeout, clearPreloadedPvVideo, commitChantVideo, takeQueuedPvVideo])
 
   const scheduleChantVideoSwitchTimeout = useCallback(
     (videoKey: string | number, timeoutMs: number): void => {
@@ -1298,7 +1303,7 @@ function DisplayPage(): React.JSX.Element {
       pendingIdleUpPvKeyRef.current = null
       queuedChantVideoRef.current = nextQueuedVideo
       currentVideoModeRef.current = videoMode(nextVideo)
-      setChantVideo(nextVideo)
+      commitChantVideo(nextVideo)
       preloadPvVideo(nextQueuedVideo)
 
       if (videoMode(nextVideo) === 'voice') {
@@ -1307,6 +1312,7 @@ function DisplayPage(): React.JSX.Element {
     },
     [
       cancelPendingChantPvSwitch,
+      commitChantVideo,
       preloadPvVideo,
       scheduleChantVideoSwitchTimeout,
       withVideoInstanceKey
@@ -1327,6 +1333,9 @@ function DisplayPage(): React.JSX.Element {
   const handleChantVideoEnded = useCallback(
     (video: DisplayChantVideo, currentTime: number, duration: number): void => {
       rememberUpPvProgress(video, currentTime, duration)
+      if (chantVideoRef.current?.key !== video.key) {
+        return
+      }
 
       if (video.kind === 'protect') {
         if (switchVoiceToQueuedPv()) {
@@ -1353,6 +1362,9 @@ function DisplayPage(): React.JSX.Element {
   const handleChantVideoTimeUpdate = useCallback(
     (video: DisplayChantVideo, currentTime: number, duration: number): void => {
       rememberUpPvProgress(video, currentTime, duration)
+      if (chantVideoRef.current?.key !== video.key) {
+        return
+      }
 
       if (video.kind === 'single' && (video.mode === 'characterPv' || video.mode === 'upPv')) {
         const range = getPvPlaybackRange(duration, video.pvStartTime, video.pvEndTime)
@@ -1388,6 +1400,10 @@ function DisplayPage(): React.JSX.Element {
   const handleChantVideoError = useCallback(
     (video: DisplayChantVideo, currentTime: number, duration: number): void => {
       rememberUpPvProgress(video, currentTime, duration)
+      if (chantVideoRef.current?.key !== video.key) {
+        return
+      }
+
       if (video.kind === 'protect') {
         if (switchVoiceToQueuedPv()) {
           return
@@ -1957,6 +1973,7 @@ function DisplayPage(): React.JSX.Element {
 
   useEffect(() => {
     if (replayCursor <= 0) {
+      lastPlayedCursorRef.current = 0
       return
     }
     if (replayCursor <= lastPlayedCursorRef.current) {
@@ -2003,7 +2020,10 @@ function DisplayPage(): React.JSX.Element {
       return
     }
 
-    if (action.action === 'ban' && action.targetType === 'lightCone') {
+    if (
+      (action.action === 'ban' && action.targetType === 'lightCone') ||
+      action.action === 'borrow'
+    ) {
       return
     }
 
@@ -2339,6 +2359,7 @@ function DisplayPage(): React.JSX.Element {
         setDelayClickProgress(progress.delayClickProgress)
         setDismissedEffectKeys(new Set())
         clearPageChangeCompletionTracking()
+        lastPlayedCursorRef.current = Math.max(progress.cursor - 1, 0)
         setReplayCursor(progress.cursor)
         voiceTimelineClickIndexRef.current = progress.clickIndex
       }

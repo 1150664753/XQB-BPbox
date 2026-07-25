@@ -227,7 +227,7 @@ function logVideoLoadFailure(label: string, src: string): void {
   console.warn(`[DisplayPage] ${label} video load failed: ${src}`)
 }
 
-const PENDING_VIDEO_LOAD_TIMEOUT_MS = 4000
+const PENDING_VIDEO_LOAD_TIMEOUT_MS = 7000
 const PROTECT_VIDEO_READY_TIMEOUT_MS = 1200
 
 function releaseVideoElement(element: HTMLVideoElement): void {
@@ -562,6 +562,31 @@ function SeamlessChantVideo({
     cleanupTimersRef.current.add(fallbackTimer)
   }
 
+  const handleVideoReady = (
+    event: SyntheticEvent<HTMLVideoElement>,
+    item: SingleChantVideo
+  ): void => {
+    if (
+      item.key !== activeKeyRef.current &&
+      item.key === requestedVideoKeyRef.current &&
+      !preloadKeysRef.current.has(item.key) &&
+      !singleVideoNeedsSeek(item)
+    ) {
+      activateVideo(item)
+    }
+    if (item.key !== activeKeyRef.current) {
+      return
+    }
+
+    onActiveReadyRef.current?.(item)
+    if (pausedRef.current) {
+      event.currentTarget.pause()
+      return
+    }
+
+    event.currentTarget.play().catch((error: unknown) => logVideoPlayFailure('Chant/PV', error))
+  }
+
   return (
     <>
       {renderedVideos.map((item) => {
@@ -589,27 +614,8 @@ function SeamlessChantVideo({
             playsInline
             preload="auto"
             onLoadedMetadata={(event) => preparePendingVideo(event, item)}
-            onLoadedData={(event) => {
-              if (
-                item.key !== activeKeyRef.current &&
-                item.key === requestedVideoKeyRef.current &&
-                !preloadKeysRef.current.has(item.key) &&
-                !singleVideoNeedsSeek(item)
-              ) {
-                activateVideo(item)
-              }
-              if (item.key === activeKeyRef.current) {
-                onActiveReadyRef.current?.(item)
-                if (pausedRef.current) {
-                  event.currentTarget.pause()
-                  return
-                }
-
-                event.currentTarget
-                  .play()
-                  .catch((error: unknown) => logVideoPlayFailure('Chant/PV', error))
-              }
-            }}
+            onLoadedData={(event) => handleVideoReady(event, item)}
+            onCanPlay={(event) => handleVideoReady(event, item)}
             onTimeUpdate={(event) =>
               !pausedRef.current && activeKeyRef.current === item.key
                 ? onTimeUpdate?.(
