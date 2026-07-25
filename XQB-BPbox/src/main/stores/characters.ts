@@ -8,6 +8,7 @@ import type {
   CharacterResourceTableRow,
   CharacterRarity
 } from '../../shared/types'
+import { normalizePvEndTime, normalizePvStartTime } from '../../shared/pvPlayback'
 import {
   ensureProjectDirectories,
   getConfigPath,
@@ -78,11 +79,6 @@ function normalizeAssetPath(value: unknown): string | null {
   return text || null
 }
 
-function normalizeStartTime(value: unknown): number {
-  const numberValue = Number(value)
-  return Number.isFinite(numberValue) && numberValue >= 0 ? numberValue : 0
-}
-
 function emptyCharacterStore(): StoredCharacter[] {
   return []
 }
@@ -119,7 +115,8 @@ function normalizeStoredCharacter(value: unknown, index: number): StoredCharacte
     right_head_image: normalizeAssetPath(raw.right_head_image),
     chant_video: normalizeAssetPath(raw.chant_video),
     pv: normalizeAssetPath(raw.pv),
-    pv_start_time: normalizeStartTime(raw.pv_start_time),
+    pv_start_time: normalizePvStartTime(raw.pv_start_time),
+    pv_end_time: normalizePvEndTime(raw.pv_end_time ?? raw.pvEndTime),
     avatar_small_image: normalizeAssetPath(raw.avatar_small_image),
     full_body_image: normalizeAssetPath(raw.full_body_image),
     ban_voice: normalizeAssetPath(raw.ban_voice),
@@ -250,7 +247,8 @@ function basicFieldsChanged(left: StoredCharacter, right: StoredCharacter): bool
     left.rarity !== right.rarity ||
     left.element !== right.element ||
     left.path !== right.path ||
-    left.pv_start_time !== right.pv_start_time
+    left.pv_start_time !== right.pv_start_time ||
+    left.pv_end_time !== right.pv_end_time
   )
 }
 
@@ -309,7 +307,8 @@ export function createCharacter(payload: CharacterPayload): Character {
     element: payload.element.trim(),
     path: payload.path.trim(),
     ...assets,
-    pv_start_time: normalizeStartTime(payload.pv_start_time),
+    pv_start_time: normalizePvStartTime(payload.pv_start_time),
+    pv_end_time: normalizePvEndTime(payload.pv_end_time),
     created_at: timestamp,
     updated_at: timestamp
   }
@@ -338,7 +337,8 @@ export function updateCharacter(id: number, payload: CharacterPayload): Characte
     element: payload.element.trim(),
     path: payload.path.trim(),
     ...assets,
-    pv_start_time: normalizeStartTime(payload.pv_start_time),
+    pv_start_time: normalizePvStartTime(payload.pv_start_time),
+    pv_end_time: normalizePvEndTime(payload.pv_end_time),
     updated_at: nowIso()
   }
   const nextCharacters = [...characters]
@@ -373,7 +373,8 @@ export function syncCharacterBasicsFromResourceRows(rows: CharacterResourceTable
       rarity: row.rarity === 4 || row.rarity === 5 ? row.rarity : existing.rarity,
       element: stringOrEmpty(row.element),
       path: stringOrEmpty(row.path),
-      pv_start_time: normalizeStartTime(row.pv_start_time)
+      pv_start_time: normalizePvStartTime(row.pv_start_time),
+      pv_end_time: normalizePvEndTime(row.pv_end_time)
     }
 
     if (!basicFieldsChanged(existing, updated)) {

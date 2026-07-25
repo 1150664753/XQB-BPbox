@@ -34,6 +34,7 @@ import type {
   SavedFileResult,
   VoiceTimelinePlayback
 } from '../../shared/types'
+import { normalizePvEndTime, normalizePvStartTime } from '../../shared/pvPlayback'
 
 let latestRuntimeState: BpRuntimeState | null = null
 let latestPreviewState: BpRuntimeState | null = null
@@ -72,6 +73,8 @@ function normalizeResult(result: Partial<BpResult>, fallbackName: string): BpRes
     ...(optionalString(result.upCharacterPvPath)
       ? { upCharacterPvPath: optionalString(result.upCharacterPvPath) }
       : {}),
+    upCharacterPvStartTime: normalizePvStartTime(result.upCharacterPvStartTime),
+    upCharacterPvEndTime: normalizePvEndTime(result.upCharacterPvEndTime),
     starTeam: result.starTeam ?? {
       name: '左侧队',
       picks: [],

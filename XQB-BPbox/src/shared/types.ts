@@ -79,6 +79,7 @@ export interface CharacterPayload {
   chant_video?: string | null
   pv?: string | null
   pv_start_time?: number
+  pv_end_time?: number
   avatar_small_image?: string | null
   full_body_image?: string | null
   ban_voice?: string | null
@@ -99,6 +100,7 @@ export interface CharacterResourceTableRow {
   chant_video?: string | null
   pv?: string | null
   pv_start_time?: number
+  pv_end_time?: number
   avatar_small_image?: string | null
   full_body_image?: string | null
   ban_voice?: string | null
@@ -128,6 +130,7 @@ export interface Character extends CharacterPayload {
   chant_video: string | null
   pv: string | null
   pv_start_time: number
+  pv_end_time: number
   avatar_small_image: string | null
   full_body_image: string | null
   ban_voice: string | null
@@ -412,6 +415,8 @@ export interface BpRuntimeState {
   playbackMode?: BpPlaybackMode
   upCharacterPvPath?: string | null
   upCharacterPvUrl?: string | null
+  upCharacterPvStartTime?: number
+  upCharacterPvEndTime?: number
   stepCursor: number
   status: 'idle' | 'running' | 'complete'
   currentStep: FlowStep | null
@@ -432,6 +437,8 @@ export interface BpResult {
   flowConfig?: FlowConfig
   createdAt: string
   upCharacterPvPath?: string | null
+  upCharacterPvStartTime?: number
+  upCharacterPvEndTime?: number
   starTeam: TeamBpState
   railTeam: TeamBpState
   actions: BpActionRecord[]

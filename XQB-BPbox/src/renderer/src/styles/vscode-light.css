@@ -438,6 +438,10 @@ p {
   gap: 8px;
 }
 
+.form-row.pv-time-row {
+  grid-template-columns: 1fr 1fr;
+}
+
 .asset-fields {
   display: grid;
   gap: 8px;
@@ -602,12 +606,13 @@ p {
   /* 批量管理列宽变量：后续手动微调优先改这里。 */
   --number-manager-width: min(1480px, 98vw);
   --number-manager-max-height: min(860px, 96vh);
-  --number-table-min-width: 1280px;
+  --number-table-min-width: 1352px;
   --number-col-code: 76px;
   --number-col-chinese-name: 170px;
   --number-col-english-name: 210px;
   --number-col-short-select: 78px;
   --number-col-pv-start: 72px;
+  --number-col-pv-end: 72px;
   --number-col-resource-status: 370px;
   --number-col-row-status: 180px;
   --number-col-actions: 144px;
@@ -696,16 +701,21 @@ p {
 
 .number-manager-table th:nth-child(8),
 .number-manager-table td:nth-child(8) {
-  width: var(--number-col-resource-status);
+  width: var(--number-col-pv-end);
 }
 
 .number-manager-table th:nth-child(9),
 .number-manager-table td:nth-child(9) {
-  width: var(--number-col-row-status);
+  width: var(--number-col-resource-status);
 }
 
 .number-manager-table th:nth-child(10),
 .number-manager-table td:nth-child(10) {
+  width: var(--number-col-row-status);
+}
+
+.number-manager-table th:nth-child(11),
+.number-manager-table td:nth-child(11) {
   width: var(--number-col-actions);
 }
 
@@ -1463,6 +1473,10 @@ button.bp-slot {
   font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.bp-up-pv-time-field input {
+  min-width: 72px;
 }
 
 .bp-controls {

@@ -47,6 +47,12 @@ import {
   normalizeDisplayAudioVolumePercent,
   type DisplayAudioVolumeField
 } from '../../../shared/displayAudioVolume'
+import {
+  DEFAULT_PV_END_TIME,
+  DEFAULT_PV_START_TIME,
+  normalizePvEndTime,
+  normalizePvStartTime
+} from '../../../shared/pvPlayback'
 
 type ConsoleView =
   | 'characters'
@@ -498,7 +504,8 @@ function emptyCharacterForm(): CharacterPayload {
     right_head_image: '',
     chant_video: '',
     pv: '',
-    pv_start_time: 0,
+    pv_start_time: DEFAULT_PV_START_TIME,
+    pv_end_time: DEFAULT_PV_END_TIME,
     avatar_small_image: '',
     full_body_image: '',
     ban_voice: '',
@@ -520,6 +527,7 @@ function characterToFormPayload(character: Character): CharacterPayload {
     chant_video: character.chant_video,
     pv: character.pv,
     pv_start_time: character.pv_start_time,
+    pv_end_time: character.pv_end_time,
     avatar_small_image: character.avatar_small_image,
     full_body_image: character.full_body_image,
     ban_voice: character.ban_voice,
@@ -561,6 +569,8 @@ function createRuntime(flow: FlowConfig): BpRuntimeState {
     },
     upCharacterPvPath: null,
     upCharacterPvUrl: null,
+    upCharacterPvStartTime: DEFAULT_PV_START_TIME,
+    upCharacterPvEndTime: DEFAULT_PV_END_TIME,
     actions: [],
     playbackMode: 'manual',
     eventHistory: [],
@@ -729,7 +739,8 @@ function createCharacterNumberImportRow(
     element: '',
     path: '',
     rarity: null,
-    pv_start_time: 0,
+    pv_start_time: DEFAULT_PV_START_TIME,
+    pv_end_time: DEFAULT_PV_END_TIME,
     left_head_image: null,
     right_head_image: null,
     chant_video: null,
@@ -836,7 +847,8 @@ function buildNumberImportPayload(
     element: row.element.trim() || existing?.element || '',
     path: row.path.trim() || existing?.path || '',
     ...resolvedResources,
-    pv_start_time: row.pv_start_time ?? existing?.pv_start_time ?? 0
+    pv_start_time: normalizePvStartTime(row.pv_start_time ?? existing?.pv_start_time),
+    pv_end_time: normalizePvEndTime(row.pv_end_time ?? existing?.pv_end_time)
   }
 }
 
@@ -900,12 +912,17 @@ function withFollowingStep(runtime: BpRuntimeState, flow: FlowConfig): BpRuntime
 
 function withUpCharacterPv(
   runtime: BpRuntimeState,
-  source: Pick<BpRuntimeState, 'upCharacterPvPath' | 'upCharacterPvUrl'>
+  source: Pick<
+    BpRuntimeState,
+    'upCharacterPvPath' | 'upCharacterPvUrl' | 'upCharacterPvStartTime' | 'upCharacterPvEndTime'
+  >
 ): BpRuntimeState {
   return {
     ...runtime,
     upCharacterPvPath: cleanOptionalPath(source.upCharacterPvPath),
-    upCharacterPvUrl: cleanOptionalPath(source.upCharacterPvUrl)
+    upCharacterPvUrl: cleanOptionalPath(source.upCharacterPvUrl),
+    upCharacterPvStartTime: normalizePvStartTime(source.upCharacterPvStartTime),
+    upCharacterPvEndTime: normalizePvEndTime(source.upCharacterPvEndTime)
   }
 }
 
@@ -1123,6 +1140,9 @@ function buildBpResultPayload(runtime: BpRuntimeState, flow: FlowConfig, name: s
   }
   const upCharacterPvPath = cleanOptionalPath(runtime.upCharacterPvPath)
 
+  result.upCharacterPvStartTime = normalizePvStartTime(runtime.upCharacterPvStartTime)
+  result.upCharacterPvEndTime = normalizePvEndTime(runtime.upCharacterPvEndTime)
+
   if (upCharacterPvPath) {
     result.upCharacterPvPath = upCharacterPvPath
   }
@@ -1172,6 +1192,8 @@ function createRuntimeFromResult(
   runtime.actions = result.actions
   runtime.upCharacterPvPath = cleanOptionalPath(result.upCharacterPvPath)
   runtime.upCharacterPvUrl = null
+  runtime.upCharacterPvStartTime = normalizePvStartTime(result.upCharacterPvStartTime)
+  runtime.upCharacterPvEndTime = normalizePvEndTime(result.upCharacterPvEndTime)
 
   return { flow, runtime }
 }
@@ -1647,6 +1669,7 @@ function CharacterNumberManager({
             chant_video: savedCharacter.chant_video,
             pv: savedCharacter.pv,
             pv_start_time: savedCharacter.pv_start_time,
+            pv_end_time: savedCharacter.pv_end_time,
             avatar_small_image: savedCharacter.avatar_small_image,
             full_body_image: savedCharacter.full_body_image,
             ban_voice: savedCharacter.ban_voice,
@@ -1733,6 +1756,7 @@ function CharacterNumberManager({
                 <th>命途</th>
                 <th>星级</th>
                 <th>PV开始时间</th>
+                <th>PV结束时间</th>
                 <th>资源状态</th>
                 <th>状态</th>
                 <th>操作</th>
@@ -1741,7 +1765,7 @@ function CharacterNumberManager({
             <tbody>
               {loadingTable ? (
                 <tr>
-                  <td colSpan={10}>正在加载批量管理表</td>
+                  <td colSpan={11}>正在加载批量管理表</td>
                 </tr>
               ) : null}
               {!loadingTable &&
@@ -1826,12 +1850,27 @@ function CharacterNumberManager({
                           type="number"
                           min={0}
                           step="0.1"
-                          value={row.pv_start_time ?? 0}
+                          value={row.pv_start_time ?? DEFAULT_PV_START_TIME}
                           onChange={(event) =>
                             updateRow(
                               row.row_id,
                               'pv_start_time',
-                              Math.max(0, Number(event.target.value) || 0)
+                              normalizePvStartTime(event.target.value)
+                            )
+                          }
+                        />
+                      </td>
+                      <td>
+                        <input
+                          type="number"
+                          min={0}
+                          step="0.1"
+                          value={row.pv_end_time ?? DEFAULT_PV_END_TIME}
+                          onChange={(event) =>
+                            updateRow(
+                              row.row_id,
+                              'pv_end_time',
+                              normalizePvEndTime(event.target.value)
                             )
                           }
                         />
@@ -1908,32 +1947,35 @@ function CharacterManager({
   const [numberManagerOpen, setNumberManagerOpen] = useState(false)
   const [loading, setLoading] = useState(false)
 
-  const loadCharacters = useCallback(async (syncEditingForm = false) => {
-    const rarity = filters.rarity ? (Number(filters.rarity) as CharacterRarity) : undefined
-    const rows = await window.bpAPI.characters.list({
-      search: filters.search || undefined,
-      element: filters.element || undefined,
-      path: filters.path || undefined,
-      rarity
-    })
-    setCharacters(rows)
-    setEditingId((current) => {
-      if (!current) {
-        return current
-      }
-
-      const editingCharacter = rows.find((character) => character.id === current)
-      if (editingCharacter) {
-        if (syncEditingForm) {
-          setForm(characterToFormPayload(editingCharacter))
+  const loadCharacters = useCallback(
+    async (syncEditingForm = false) => {
+      const rarity = filters.rarity ? (Number(filters.rarity) as CharacterRarity) : undefined
+      const rows = await window.bpAPI.characters.list({
+        search: filters.search || undefined,
+        element: filters.element || undefined,
+        path: filters.path || undefined,
+        rarity
+      })
+      setCharacters(rows)
+      setEditingId((current) => {
+        if (!current) {
+          return current
         }
-        return current
-      }
 
-      setForm(emptyCharacterForm())
-      return null
-    })
-  }, [filters])
+        const editingCharacter = rows.find((character) => character.id === current)
+        if (editingCharacter) {
+          if (syncEditingForm) {
+            setForm(characterToFormPayload(editingCharacter))
+          }
+          return current
+        }
+
+        setForm(emptyCharacterForm())
+        return null
+      })
+    },
+    [filters]
+  )
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -2020,6 +2062,7 @@ function CharacterManager({
         chant_video: character.chant_video,
         pv: character.pv,
         pv_start_time: character.pv_start_time,
+        pv_end_time: character.pv_end_time,
         avatar_small_image: character.avatar_small_image,
         full_body_image: character.full_body_image,
         ban_voice: character.ban_voice,
@@ -2146,18 +2189,30 @@ function CharacterManager({
         ))}
       </div>
 
-      <label>
-        PV开始时间
-        <input
-          type="number"
-          min={0}
-          step="0.1"
-          value={form.pv_start_time ?? 0}
-          onChange={(event) =>
-            updateForm('pv_start_time', Math.max(0, Number(event.target.value) || 0))
-          }
-        />
-      </label>
+      <div className="form-row pv-time-row">
+        <label>
+          PV开始时间
+          <input
+            type="number"
+            min={0}
+            step="0.1"
+            value={form.pv_start_time ?? DEFAULT_PV_START_TIME}
+            onChange={(event) =>
+              updateForm('pv_start_time', normalizePvStartTime(event.target.value))
+            }
+          />
+        </label>
+        <label>
+          PV结束时间
+          <input
+            type="number"
+            min={0}
+            step="0.1"
+            value={form.pv_end_time ?? DEFAULT_PV_END_TIME}
+            onChange={(event) => updateForm('pv_end_time', normalizePvEndTime(event.target.value))}
+          />
+        </label>
+      </div>
 
       <div className="form-actions">
         <button type="submit" disabled={loading}>
@@ -5024,6 +5079,8 @@ function StartBpPanel({
       ...withFollowingStep(nextRuntime, flow),
       upCharacterPvPath,
       upCharacterPvUrl,
+      upCharacterPvStartTime: normalizePvStartTime(nextRuntime.upCharacterPvStartTime),
+      upCharacterPvEndTime: normalizePvEndTime(nextRuntime.upCharacterPvEndTime),
       playbackMode: mode
     }
     setRuntime(runtimeWithMode)
@@ -5412,6 +5469,23 @@ function StartBpPanel({
     onMessage('success', `已导入当前UP角色PV：${result.fileName ?? fileName(upCharacterPvPath)}`)
   }
 
+  const updateUpCharacterPvTime = async (
+    field: 'upCharacterPvStartTime' | 'upCharacterPvEndTime',
+    value: string
+  ): Promise<void> => {
+    const normalizedValue =
+      field === 'upCharacterPvStartTime' ? normalizePvStartTime(value) : normalizePvEndTime(value)
+
+    try {
+      await syncRuntime({
+        ...runtime,
+        [field]: normalizedValue
+      })
+    } catch (error) {
+      onMessage('error', error instanceof Error ? error.message : String(error))
+    }
+  }
+
   const loadSelectedResult = async (): Promise<void> => {
     if (!selectedResultFile) {
       onMessage('error', '请先选择一个已保存结果')
@@ -5558,6 +5632,30 @@ function StartBpPanel({
             <span>当前UP角色PV</span>
             <strong>{fileName(runtime.upCharacterPvPath)}</strong>
           </div>
+          <label className="bp-up-pv-time-field">
+            UP PV开始时间
+            <input
+              type="number"
+              min={0}
+              step="0.1"
+              value={runtime.upCharacterPvStartTime ?? DEFAULT_PV_START_TIME}
+              onChange={(event) =>
+                void updateUpCharacterPvTime('upCharacterPvStartTime', event.target.value)
+              }
+            />
+          </label>
+          <label className="bp-up-pv-time-field">
+            UP PV结束时间
+            <input
+              type="number"
+              min={0}
+              step="0.1"
+              value={runtime.upCharacterPvEndTime ?? DEFAULT_PV_END_TIME}
+              onChange={(event) =>
+                void updateUpCharacterPvTime('upCharacterPvEndTime', event.target.value)
+              }
+            />
+          </label>
         </div>
 
         <div className="bp-controls">

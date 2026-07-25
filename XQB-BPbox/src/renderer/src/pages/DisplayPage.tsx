@@ -22,6 +22,14 @@ import type {
 import type { Character } from '../types/character'
 import { playManagedAudio, updateManagedAudioVolume } from '../utils/audioPlayback'
 import { displayAudioGain } from '../../../shared/displayAudioVolume'
+import {
+  DEFAULT_PV_END_TIME,
+  DEFAULT_PV_START_TIME,
+  getPvPlaybackRange,
+  normalizePvEndTime,
+  normalizePvStartTime,
+  shouldRestartPv
+} from '../../../shared/pvPlayback'
 
 const emptyDisplaySettings: DisplaySettings = {
   stageWidth: 1920,
@@ -254,6 +262,8 @@ const emptyState: BpRuntimeState = {
   actions: [],
   upCharacterPvPath: null,
   upCharacterPvUrl: null,
+  upCharacterPvStartTime: DEFAULT_PV_START_TIME,
+  upCharacterPvEndTime: DEFAULT_PV_END_TIME,
   playbackMode: 'manual',
   eventHistory: [],
   currentEvents: [],
@@ -327,11 +337,6 @@ function normalizeChangeEffectMode(value: unknown): ChangeEffectMode {
 const CHANT_VIDEO_PV_SWITCH_SECONDS = 5
 const PROTECT_VIDEO_END_SWITCH_LEAD_SECONDS = 0.12
 
-function normalizePvStartTime(value: unknown): number {
-  const numberValue = Number(value)
-  return Number.isFinite(numberValue) && numberValue >= 0 ? numberValue : 0
-}
-
 function optionalString(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null
 }
@@ -342,10 +347,6 @@ function videoMode(video: DisplayChantVideo | null): CurrentVideoMode | null {
   }
 
   return video.kind === 'single' ? (video.mode ?? 'voice') : 'voice'
-}
-
-function reachedVideoEnd(currentTime: number, duration: number): boolean {
-  return Number.isFinite(duration) && duration > 0 && currentTime >= Math.max(0, duration - 0.05)
 }
 
 function protectVideoPvSwitchTime(duration: number): number {
@@ -651,6 +652,30 @@ function shouldResetDelayTracking(
   )
 }
 
+function shouldInterruptVideoForRuntimeUpdate(
+  currentState: BpRuntimeState,
+  nextState: BpRuntimeState
+): boolean {
+  const currentAction = currentState.actions.at(-1)
+  const nextAction = nextState.actions.at(-1)
+
+  return (
+    currentState.createdAt !== nextState.createdAt ||
+    currentState.playbackMode !== nextState.playbackMode ||
+    currentState.stepCursor !== nextState.stepCursor ||
+    currentState.actions.length !== nextState.actions.length ||
+    currentAction?.stepIndex !== nextAction?.stepIndex ||
+    currentAction?.action !== nextAction?.action ||
+    currentAction?.targetId !== nextAction?.targetId ||
+    currentAction?.starTargetId !== nextAction?.starTargetId ||
+    currentAction?.railTargetId !== nextAction?.railTargetId ||
+    currentState.upCharacterPvPath !== nextState.upCharacterPvPath ||
+    currentState.upCharacterPvUrl !== nextState.upCharacterPvUrl ||
+    currentState.upCharacterPvStartTime !== nextState.upCharacterPvStartTime ||
+    currentState.upCharacterPvEndTime !== nextState.upCharacterPvEndTime
+  )
+}
+
 function normalizeStep(step: FlowStep | null | undefined): FlowStep | null {
   if (!step) {
     return null
@@ -725,6 +750,8 @@ function normalizeRuntimeState(state: BpRuntimeState | null): BpRuntimeState {
     playbackMode: normalizePlaybackMode(state.playbackMode),
     upCharacterPvPath: optionalString(state.upCharacterPvPath),
     upCharacterPvUrl: optionalString(state.upCharacterPvUrl),
+    upCharacterPvStartTime: normalizePvStartTime(state.upCharacterPvStartTime),
+    upCharacterPvEndTime: normalizePvEndTime(state.upCharacterPvEndTime),
     currentStep: normalizeStep(state.currentStep),
     followingStep: normalizeStep(state.followingStep),
     slotCounts: {
@@ -997,6 +1024,7 @@ function DisplayPage(): React.JSX.Element {
   const [voiceTimelinePlayback, setVoiceTimelinePlayback] = useState<VoiceTimelinePlayback | null>(
     null
   )
+  const [voiceTimelinePlaybackReady, setVoiceTimelinePlaybackReady] = useState(false)
   const [characterLookup, setCharacterLookup] = useState<Map<number, Character>>(() => new Map())
   const [resolvedUpCharacterPvUrl, setResolvedUpCharacterPvUrl] = useState<string | null>(null)
   const completedDelayedChangeKeysRef = useRef<Set<string>>(new Set())
@@ -1028,9 +1056,18 @@ function DisplayPage(): React.JSX.Element {
   const currentVideoModeRef = useRef<CurrentVideoMode | null>(null)
   const upCharacterPvCurrentTimeRef = useRef(0)
   const upCharacterPvPathRef = useRef<string | null>(null)
+  const upCharacterPvStartTimeRef = useRef(DEFAULT_PV_START_TIME)
   const resolvedUpCharacterPvUrlRef = useRef<string | null>(null)
+  const pvRestartedVideoKeyRef = useRef<string | number | null>(null)
   const pendingUpPvContextRef = useRef<PendingUpPvContext | null>(null)
   const pendingIdleUpPvKeyRef = useRef<string | null>(null)
+  const openingUpPvSessionRef = useRef({
+    contextKey: '',
+    hasPlayedFirstAction: false,
+    lastReplayCursor: 0,
+    started: false
+  })
+  const openingUpPvResetPendingRef = useRef(false)
   const bpSoundVolume = displayAudioGain(settings, 'bpSoundVolume')
   const characterVoiceVolume = displayAudioGain(settings, 'characterVoiceVolume')
   const characterEffectVolume = displayAudioGain(settings, 'characterEffectVolume')
@@ -1061,6 +1098,19 @@ function DisplayPage(): React.JSX.Element {
       key: `${video.key}-${chantVideoInstanceRef.current}`
     }
   }, [])
+
+  const buildUpPvVideo = useCallback(
+    (key: string, url: string): DisplayChantVideo => ({
+      kind: 'single',
+      key,
+      url,
+      startTime: upCharacterPvCurrentTimeRef.current,
+      pvStartTime: normalizePvStartTime(sourceStateRef.current.upCharacterPvStartTime),
+      pvEndTime: normalizePvEndTime(sourceStateRef.current.upCharacterPvEndTime),
+      mode: 'upPv'
+    }),
+    []
+  )
 
   const hideChantVideo = useCallback((): void => {
     cancelPendingChantPvSwitch()
@@ -1108,20 +1158,14 @@ function DisplayPage(): React.JSX.Element {
         return true
       }
 
-      const upPvVideo = withVideoInstanceKey({
-        kind: 'single',
-        key: `${key}-${upPvUrl}`,
-        url: upPvUrl,
-        startTime: upCharacterPvCurrentTimeRef.current,
-        mode: 'upPv'
-      })
+      const upPvVideo = withVideoInstanceKey(buildUpPvVideo(`${key}-${upPvUrl}`, upPvUrl))
 
       pendingIdleUpPvKeyRef.current = null
       currentVideoModeRef.current = 'upPv'
       setChantVideo(upPvVideo)
       return true
     },
-    [cancelPendingChantPvSwitch, withVideoInstanceKey]
+    [buildUpPvVideo, cancelPendingChantPvSwitch, withVideoInstanceKey]
   )
 
   const rememberUpPvProgress = useCallback(
@@ -1130,11 +1174,42 @@ function DisplayPage(): React.JSX.Element {
         return
       }
 
-      upCharacterPvCurrentTimeRef.current = reachedVideoEnd(currentTime, duration)
-        ? 0
-        : Math.max(0, currentTime)
+      const range = getPvPlaybackRange(duration, video.pvStartTime, video.pvEndTime)
+      upCharacterPvCurrentTimeRef.current = shouldRestartPv(currentTime, range)
+        ? (range?.startTime ?? normalizePvStartTime(video.pvStartTime))
+        : Number.isFinite(currentTime)
+          ? Math.max(0, currentTime)
+          : upCharacterPvCurrentTimeRef.current
     },
     []
+  )
+
+  const restartPvFromConfiguredStart = useCallback(
+    (video: DisplayChantVideo, duration: number): boolean => {
+      if (video.kind !== 'single' || (video.mode !== 'characterPv' && video.mode !== 'upPv')) {
+        return false
+      }
+
+      if (pvRestartedVideoKeyRef.current === video.key) {
+        return true
+      }
+
+      const range = getPvPlaybackRange(duration, video.pvStartTime, video.pvEndTime)
+      const startTime = range?.startTime ?? normalizePvStartTime(video.pvStartTime)
+      const replayVideo = withVideoInstanceKey({
+        ...video,
+        startTime
+      })
+
+      pvRestartedVideoKeyRef.current = video.key
+      if (video.mode === 'upPv') {
+        upCharacterPvCurrentTimeRef.current = startTime
+      }
+      currentVideoModeRef.current = video.mode
+      setChantVideo(replayVideo)
+      return true
+    },
+    [withVideoInstanceKey]
   )
 
   const takeQueuedPvVideo = useCallback((): DisplayChantVideo | null => {
@@ -1162,14 +1237,8 @@ function DisplayPage(): React.JSX.Element {
     }
 
     pendingUpPvContextRef.current = null
-    return withVideoInstanceKey({
-      kind: 'single',
-      key: `${pendingUpPvContext.key}-${upPvUrl}`,
-      url: upPvUrl,
-      startTime: upCharacterPvCurrentTimeRef.current,
-      mode: 'upPv'
-    })
-  }, [withVideoInstanceKey])
+    return withVideoInstanceKey(buildUpPvVideo(`${pendingUpPvContext.key}-${upPvUrl}`, upPvUrl))
+  }, [buildUpPvVideo, withVideoInstanceKey])
 
   const switchVoiceToQueuedPv = useCallback((): boolean => {
     if (currentVideoModeRef.current !== 'voice') {
@@ -1200,19 +1269,7 @@ function DisplayPage(): React.JSX.Element {
         return
       }
 
-      if (video.kind === 'single' && video.mode === 'characterPv') {
-        const replayVideo = withVideoInstanceKey({
-          ...video,
-          startTime: normalizePvStartTime(video.startTime)
-        })
-        currentVideoModeRef.current = 'characterPv'
-        setChantVideo(replayVideo)
-        return
-      }
-
-      if (video.kind === 'single' && video.mode === 'upPv') {
-        upCharacterPvCurrentTimeRef.current = 0
-        showIdleUpPv(`idle-up-pv-loop-${video.key}`, true)
+      if (restartPvFromConfiguredStart(video, duration)) {
         return
       }
 
@@ -1222,12 +1279,20 @@ function DisplayPage(): React.JSX.Element {
 
       showIdleUpPv(`idle-after-video-${String(video.key)}`)
     },
-    [rememberUpPvProgress, showIdleUpPv, switchVoiceToQueuedPv, withVideoInstanceKey]
+    [rememberUpPvProgress, restartPvFromConfiguredStart, showIdleUpPv, switchVoiceToQueuedPv]
   )
 
   const handleChantVideoTimeUpdate = useCallback(
     (video: DisplayChantVideo, currentTime: number, duration: number): void => {
       rememberUpPvProgress(video, currentTime, duration)
+
+      if (video.kind === 'single' && (video.mode === 'characterPv' || video.mode === 'upPv')) {
+        const range = getPvPlaybackRange(duration, video.pvStartTime, video.pvEndTime)
+        if (shouldRestartPv(currentTime, range)) {
+          restartPvFromConfiguredStart(video, duration)
+        }
+        return
+      }
 
       if (videoMode(video) !== 'voice') {
         return
@@ -1242,7 +1307,7 @@ function DisplayPage(): React.JSX.Element {
         switchVoiceToQueuedPv()
       }
     },
-    [rememberUpPvProgress, switchVoiceToQueuedPv]
+    [rememberUpPvProgress, restartPvFromConfiguredStart, switchVoiceToQueuedPv]
   )
 
   const handleChantVideoInterrupted = useCallback(
@@ -1265,7 +1330,7 @@ function DisplayPage(): React.JSX.Element {
       }
 
       if (video.kind === 'single' && video.mode === 'upPv') {
-        upCharacterPvCurrentTimeRef.current = 0
+        upCharacterPvCurrentTimeRef.current = normalizePvStartTime(video.pvStartTime)
         hideChantVideo()
         return
       }
@@ -1365,6 +1430,28 @@ function DisplayPage(): React.JSX.Element {
     () => buildReplayState(sourceState, replayCursor),
     [replayCursor, sourceState]
   )
+  const voiceTimelineLinked = voiceTimelinePlayback?.mode === 'voice_timeline_linked'
+  const voiceTimelineSessionKey = voiceTimelineLinked
+    ? `${voiceTimelinePlayback.timelineId}::${voiceTimelinePlayback.audioUrl ?? ''}::${
+        voiceTimelinePlayback.sessionId ?? ''
+      }`
+    : null
+  const voiceTimelineCursorAtSyncedTime = useMemo(() => {
+    if (voiceTimelinePlayback?.mode !== 'voice_timeline_linked') {
+      return null
+    }
+
+    const playbackTime = Number(voiceTimelinePlayback.currentTime)
+    return buildTimelineReplayProgress(
+      sourceState,
+      settings.pageChanges,
+      normalizeTimelineClickPoints(voiceTimelinePlayback.clickPoints),
+      Number.isFinite(playbackTime) && playbackTime >= 0 ? playbackTime : 0
+    ).cursor
+  }, [settings.pageChanges, sourceState, voiceTimelinePlayback])
+  const openingUpPvContextKey = voiceTimelineSessionKey
+    ? `${sourceState.createdAt}::voice-timeline::${voiceTimelineSessionKey}`
+    : `${sourceState.createdAt}::${sourceState.playbackMode ?? 'manual'}`
   const eventState = useMemo(
     () =>
       resolveRuntimeEvents(
@@ -1428,7 +1515,12 @@ function DisplayPage(): React.JSX.Element {
   const resetReplay = useCallback(
     (nextState: BpRuntimeState): void => {
       const shouldResetDelays = shouldResetDelayTracking(sourceStateRef.current, nextState)
+      const shouldInterruptVideo = shouldInterruptVideoForRuntimeUpdate(
+        sourceStateRef.current,
+        nextState
+      )
       const liveMode = nextState.playbackMode === 'live'
+
       sourceStateRef.current = nextState
       setSourceState(nextState)
       setReplayCursor((current) =>
@@ -1438,7 +1530,9 @@ function DisplayPage(): React.JSX.Element {
             ? 0
             : Math.min(current, nextState.actions.length)
       )
-      hideChantVideo()
+      if (shouldInterruptVideo) {
+        hideChantVideo()
+      }
       if (shouldResetDelays) {
         completedDelayedChangeKeysRef.current = new Set()
         delayClickProgressRef.current = {}
@@ -1453,6 +1547,11 @@ function DisplayPage(): React.JSX.Element {
     },
     [clearPageChangeCompletionTracking, hideChantVideo]
   )
+
+  const applyVoiceTimelinePlayback = useCallback((playback: VoiceTimelinePlayback | null): void => {
+    setVoiceTimelinePlayback(playback)
+    setVoiceTimelinePlaybackReady(true)
+  }, [])
 
   useEffect(() => {
     window.bpAPI.displaySettings.get().then(setSettings)
@@ -1481,14 +1580,14 @@ function DisplayPage(): React.JSX.Element {
   useEffect(() => {
     window.bpAPI.bp
       .getVoiceTimelinePlayback()
-      .then(setVoiceTimelinePlayback)
-      .catch(() => setVoiceTimelinePlayback(null))
-    const stopVoiceTimeline = window.bpAPI.bp.onVoiceTimelinePlayback(setVoiceTimelinePlayback)
+      .then(applyVoiceTimelinePlayback)
+      .catch(() => applyVoiceTimelinePlayback(null))
+    const stopVoiceTimeline = window.bpAPI.bp.onVoiceTimelinePlayback(applyVoiceTimelinePlayback)
 
     return () => {
       stopVoiceTimeline()
     }
-  }, [])
+  }, [applyVoiceTimelinePlayback])
 
   useEffect(() => {
     chantVideoRef.current = chantVideo
@@ -1531,17 +1630,22 @@ function DisplayPage(): React.JSX.Element {
   useEffect(() => {
     const runtimeUrl = optionalString(sourceState.upCharacterPvUrl)
     const runtimePath = optionalString(sourceState.upCharacterPvPath)
+    const runtimeStartTime = normalizePvStartTime(sourceState.upCharacterPvStartTime)
     let disposed = false
 
-    if (upCharacterPvPathRef.current !== runtimePath) {
+    if (
+      upCharacterPvPathRef.current !== runtimePath ||
+      upCharacterPvStartTimeRef.current !== runtimeStartTime
+    ) {
       upCharacterPvPathRef.current = runtimePath
-      upCharacterPvCurrentTimeRef.current = 0
+      upCharacterPvStartTimeRef.current = runtimeStartTime
+      upCharacterPvCurrentTimeRef.current = runtimeStartTime
     }
 
     if (runtimeUrl || !runtimePath) {
+      resolvedUpCharacterPvUrlRef.current = runtimeUrl
       queueMicrotask(() => {
         if (!disposed) {
-          resolvedUpCharacterPvUrlRef.current = runtimeUrl
           setResolvedUpCharacterPvUrl(runtimeUrl)
         }
       })
@@ -1550,6 +1654,7 @@ function DisplayPage(): React.JSX.Element {
       }
     }
 
+    resolvedUpCharacterPvUrlRef.current = null
     window.bpAPI.files
       .toFileUrl(runtimePath)
       .then((url) => {
@@ -1568,7 +1673,119 @@ function DisplayPage(): React.JSX.Element {
     return () => {
       disposed = true
     }
-  }, [sourceState.upCharacterPvPath, sourceState.upCharacterPvUrl])
+  }, [
+    sourceState.upCharacterPvEndTime,
+    sourceState.upCharacterPvPath,
+    sourceState.upCharacterPvStartTime,
+    sourceState.upCharacterPvUrl
+  ])
+
+  useEffect(() => {
+    if (!voiceTimelinePlaybackReady) {
+      return
+    }
+
+    const effectiveReplayCursor = Math.max(
+      replayCursor,
+      sourceState.playbackMode === 'live' ? sourceState.actions.length : 0,
+      voiceTimelineCursorAtSyncedTime ?? 0
+    )
+    let openingUpPvSession = openingUpPvSessionRef.current
+
+    const scheduleVideoReset = (): boolean => {
+      if (!chantVideoRef.current && !currentVideoModeRef.current) {
+        return false
+      }
+
+      if (!openingUpPvResetPendingRef.current) {
+        openingUpPvResetPendingRef.current = true
+        queueMicrotask(() => {
+          openingUpPvResetPendingRef.current = false
+          if (openingUpPvSessionRef.current.contextKey === openingUpPvContextKey) {
+            hideChantVideo()
+          }
+        })
+      }
+
+      return true
+    }
+
+    if (openingUpPvSession.contextKey !== openingUpPvContextKey) {
+      openingUpPvSession = {
+        contextKey: openingUpPvContextKey,
+        hasPlayedFirstAction: effectiveReplayCursor > 0,
+        lastReplayCursor: effectiveReplayCursor,
+        started: false
+      }
+      openingUpPvSessionRef.current = openingUpPvSession
+
+      if (scheduleVideoReset()) {
+        return
+      }
+    }
+
+    if (effectiveReplayCursor > 0) {
+      openingUpPvSession.hasPlayedFirstAction = true
+      openingUpPvSession.lastReplayCursor = effectiveReplayCursor
+      return
+    }
+
+    const returnedToVoiceTimelineOpening =
+      voiceTimelineLinked && openingUpPvSession.lastReplayCursor > 0
+    openingUpPvSession.lastReplayCursor = 0
+
+    if (returnedToVoiceTimelineOpening) {
+      openingUpPvSession.hasPlayedFirstAction = false
+      openingUpPvSession.started = false
+
+      if (scheduleVideoReset()) {
+        return
+      }
+    }
+
+    if (
+      openingUpPvSession.hasPlayedFirstAction ||
+      openingUpPvSession.started ||
+      !resolvedUpCharacterPvUrl ||
+      chantVideo ||
+      chantVideoRef.current ||
+      currentVideoModeRef.current
+    ) {
+      return
+    }
+
+    const upPvUrl = resolvedUpCharacterPvUrl
+
+    queueMicrotask(() => {
+      const currentSession = openingUpPvSessionRef.current
+
+      if (
+        currentSession.contextKey !== openingUpPvContextKey ||
+        currentSession.hasPlayedFirstAction ||
+        currentSession.started ||
+        currentSession.lastReplayCursor !== 0 ||
+        resolvedUpCharacterPvUrlRef.current !== upPvUrl ||
+        chantVideoRef.current ||
+        currentVideoModeRef.current
+      ) {
+        return
+      }
+
+      currentSession.started = showIdleUpPv(`opening-up-pv-${openingUpPvContextKey}`)
+    })
+  }, [
+    chantVideo,
+    hideChantVideo,
+    openingUpPvContextKey,
+    replayCursor,
+    resolvedUpCharacterPvUrl,
+    showIdleUpPv,
+    sourceState.actions.length,
+    sourceState.playbackMode,
+    voiceTimelineCursorAtSyncedTime,
+    voiceTimelineLinked,
+    voiceTimelinePlaybackReady
+  ])
 
   useEffect(() => {
     const timers = pageChangeCompletionTimersRef.current
@@ -1596,14 +1813,13 @@ function DisplayPage(): React.JSX.Element {
       return
     }
 
-    preloadPvVideo({
-      kind: 'single',
-      key: `${pendingUpPvContext.key}-${resolvedUpCharacterPvUrl}`,
-      url: resolvedUpCharacterPvUrl,
-      startTime: upCharacterPvCurrentTimeRef.current,
-      mode: 'upPv'
-    })
-  }, [preloadPvVideo, resolvedUpCharacterPvUrl])
+    preloadPvVideo(
+      buildUpPvVideo(
+        `${pendingUpPvContext.key}-${resolvedUpCharacterPvUrl}`,
+        resolvedUpCharacterPvUrl
+      )
+    )
+  }, [buildUpPvVideo, preloadPvVideo, resolvedUpCharacterPvUrl])
 
   useEffect(() => {
     const currentPageChangeIds = state.currentPageChangeIds ?? []
@@ -1696,13 +1912,7 @@ function DisplayPage(): React.JSX.Element {
       const upPvKey = `up-pv-protect-${action.stepIndex}`
       pendingUpPvContextRef.current = { key: upPvKey }
       const upPvVideo = resolvedUpCharacterPvUrl
-        ? {
-            kind: 'single' as const,
-            key: `${upPvKey}-${resolvedUpCharacterPvUrl}`,
-            url: resolvedUpCharacterPvUrl,
-            startTime: upCharacterPvCurrentTimeRef.current,
-            mode: 'upPv' as const
-          }
+        ? buildUpPvVideo(`${upPvKey}-${resolvedUpCharacterPvUrl}`, resolvedUpCharacterPvUrl)
         : null
 
       queueMicrotask(() =>
@@ -1758,6 +1968,8 @@ function DisplayPage(): React.JSX.Element {
             key: `pv-${action.action}-${action.stepIndex}-${character.id}-${characterPvUrl}`,
             url: characterPvUrl,
             startTime: normalizePvStartTime(character.pv_start_time),
+            pvStartTime: normalizePvStartTime(character.pv_start_time),
+            pvEndTime: normalizePvEndTime(character.pv_end_time),
             mode: 'characterPv' as const
           }
         : null
@@ -1765,13 +1977,7 @@ function DisplayPage(): React.JSX.Element {
       pendingUpPvContextRef.current = !characterPvVideo ? { key: upPvKey } : null
       const upPvVideo =
         !characterPvVideo && resolvedUpCharacterPvUrl
-          ? {
-              kind: 'single' as const,
-              key: `${upPvKey}-${resolvedUpCharacterPvUrl}`,
-              url: resolvedUpCharacterPvUrl,
-              startTime: upCharacterPvCurrentTimeRef.current,
-              mode: 'upPv' as const
-            }
+          ? buildUpPvVideo(`${upPvKey}-${resolvedUpCharacterPvUrl}`, resolvedUpCharacterPvUrl)
           : null
 
       queueMicrotask(() =>
@@ -1791,6 +1997,7 @@ function DisplayPage(): React.JSX.Element {
   }, [
     characterLookup,
     bpSoundVolume,
+    buildUpPvVideo,
     characterEffectVolume,
     characterVoiceVolume,
     replayCursor,

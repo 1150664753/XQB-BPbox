@@ -24,6 +24,12 @@ import type { Character } from '../types/character'
 import type { LightCone } from '../types/lightCone'
 import { playManagedAudio, updateManagedAudioVolume } from '../utils/audioPlayback'
 import { displayAudioGain } from '../../../shared/displayAudioVolume'
+import {
+  getPvPlaybackRange,
+  normalizePvEndTime,
+  normalizePvStartTime,
+  shouldRestartPv
+} from '../../../shared/pvPlayback'
 
 type MessageType = 'info' | 'success' | 'error'
 
@@ -506,11 +512,6 @@ function isEffectSoundAction(action: BpAction): action is 'pick' | 'ban' | 'prot
   return action === 'pick' || action === 'ban' || action === 'protect' || action === 'borrow'
 }
 
-function normalizePvStartTime(value: unknown): number {
-  const numberValue = Number(value)
-  return Number.isFinite(numberValue) && numberValue >= 0 ? numberValue : 0
-}
-
 function isCharacterTarget(value: unknown): value is Character {
   return Boolean(
     value &&
@@ -662,6 +663,8 @@ function VoiceTimelinePanel({
   const previewCursorRef = useRef(0)
   const previewPvSwitchTimerRef = useRef<number | null>(null)
   const previewPvSessionRef = useRef(0)
+  const previewPvInstanceRef = useRef(0)
+  const previewPvRestartedKeyRef = useRef<string | number | null>(null)
   const displaySessionIdRef = useRef('')
   const trackRef = useRef<HTMLDivElement>(null)
   const pointIdSerialRef = useRef(0)
@@ -682,6 +685,52 @@ function VoiceTimelinePanel({
     cancelPendingPreviewPvSwitch()
     setPreviewChantVideo(null)
   }, [cancelPendingPreviewPvSwitch])
+
+  const restartPreviewPvFromConfiguredStart = useCallback(
+    (video: DisplayChantVideo, duration: number): boolean => {
+      if (video.kind !== 'single' || video.mode !== 'characterPv') {
+        return false
+      }
+
+      if (previewPvRestartedKeyRef.current === video.key) {
+        return true
+      }
+
+      const range = getPvPlaybackRange(duration, video.pvStartTime, video.pvEndTime)
+      previewPvInstanceRef.current += 1
+      previewPvRestartedKeyRef.current = video.key
+      setPreviewChantVideo({
+        ...video,
+        key: `${video.key}-loop-${previewPvInstanceRef.current}`,
+        startTime: range?.startTime ?? normalizePvStartTime(video.pvStartTime)
+      })
+      return true
+    },
+    []
+  )
+
+  const handlePreviewChantVideoEnded = useCallback(
+    (video: DisplayChantVideo, _currentTime: number, duration: number): void => {
+      if (!restartPreviewPvFromConfiguredStart(video, duration)) {
+        hidePreviewChantVideo()
+      }
+    },
+    [hidePreviewChantVideo, restartPreviewPvFromConfiguredStart]
+  )
+
+  const handlePreviewChantVideoTimeUpdate = useCallback(
+    (video: DisplayChantVideo, currentTime: number, duration: number): void => {
+      if (video.kind !== 'single' || video.mode !== 'characterPv') {
+        return
+      }
+
+      const range = getPvPlaybackRange(duration, video.pvStartTime, video.pvEndTime)
+      if (shouldRestartPv(currentTime, range)) {
+        restartPreviewPvFromConfiguredStart(video, duration)
+      }
+    },
+    [restartPreviewPvFromConfiguredStart]
+  )
 
   const showPreviewChantVideo = useCallback(
     (video: DisplayChantVideo, pvVideo: DisplayChantVideo | null = null): void => {
@@ -938,7 +987,9 @@ function VoiceTimelinePanel({
     return {
       ...buildRuntimeFromActions(flowForPreview, selectedResult.actions),
       upCharacterPvPath: selectedResult.upCharacterPvPath ?? null,
-      upCharacterPvUrl: null
+      upCharacterPvUrl: null,
+      upCharacterPvStartTime: selectedResult.upCharacterPvStartTime,
+      upCharacterPvEndTime: selectedResult.upCharacterPvEndTime
     }
   }, [flowForPreview, selectedResult])
 
@@ -1161,7 +1212,10 @@ function VoiceTimelinePanel({
             kind: 'single' as const,
             key: `pv-${action.action}-${action.stepIndex}-${character.id}-${character.pv_url}`,
             url: character.pv_url,
-            startTime: normalizePvStartTime(character.pv_start_time)
+            startTime: normalizePvStartTime(character.pv_start_time),
+            pvStartTime: normalizePvStartTime(character.pv_start_time),
+            pvEndTime: normalizePvEndTime(character.pv_end_time),
+            mode: 'characterPv' as const
           }
         : null
 
@@ -1561,7 +1615,8 @@ function VoiceTimelinePanel({
                   className="voice-preview-canvas live-display-stage"
                   showCenterStage={false}
                   chantVideo={previewChantVideo}
-                  onChantVideoEnded={hidePreviewChantVideo}
+                  onChantVideoEnded={handlePreviewChantVideoEnded}
+                  onChantVideoTimeUpdate={handlePreviewChantVideoTimeUpdate}
                   muteChantVideo
                   nextAction={sourceRuntime.actions[previewProgress.cursor] ?? null}
                   followingAction={sourceRuntime.actions[previewProgress.cursor + 1] ?? null}

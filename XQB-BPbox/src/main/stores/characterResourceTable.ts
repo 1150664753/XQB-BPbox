@@ -18,6 +18,11 @@ import type {
   LocalAssetFile
 } from '../../shared/types'
 import {
+  DEFAULT_PV_END_TIME,
+  normalizePvEndTime,
+  normalizePvStartTime
+} from '../../shared/pvPlayback'
+import {
   ensureProjectDirectories,
   getConfigPath,
   normalizeStoredPath,
@@ -88,11 +93,6 @@ function normalizeRarity(value: unknown): CharacterRarity | null {
   }
 
   return null
-}
-
-function normalizeStartTime(value: unknown): number {
-  const numberValue = Number(value)
-  return Number.isFinite(numberValue) && numberValue >= 0 ? numberValue : 0
 }
 
 function firstString(...values: unknown[]): string {
@@ -195,6 +195,7 @@ function emptyTableRow(patch: Partial<CharacterResourceTableRow> = {}): Characte
     chant_video: null,
     pv: null,
     pv_start_time: 0,
+    pv_end_time: DEFAULT_PV_END_TIME,
     avatar_small_image: null,
     full_body_image: null,
     ban_voice: null,
@@ -228,7 +229,8 @@ function normalizeResourceTableRow(value: unknown, index: number): CharacterReso
     right_head_image: firstAsset(raw.right_head_image, raw.characterRightImage),
     chant_video: firstAsset(raw.chant_video, raw.callNameVideo),
     pv: firstAsset(raw.pv),
-    pv_start_time: normalizeStartTime(raw.pv_start_time ?? raw.pvStartTime),
+    pv_start_time: normalizePvStartTime(raw.pv_start_time ?? raw.pvStartTime),
+    pv_end_time: normalizePvEndTime(raw.pv_end_time ?? raw.pvEndTime),
     avatar_small_image: firstAsset(raw.avatar_small_image, raw.characterSmallImage),
     full_body_image: firstAsset(raw.full_body_image, raw.characterBigImage),
     ban_voice: firstAsset(raw.ban_voice, raw.banAudio),
@@ -375,6 +377,7 @@ function rowFromCharacter(character: Character): CharacterResourceTableRow {
     chant_video: character.chant_video,
     pv: character.pv,
     pv_start_time: character.pv_start_time,
+    pv_end_time: character.pv_end_time,
     avatar_small_image: character.avatar_small_image,
     full_body_image: character.full_body_image,
     ban_voice: character.ban_voice,

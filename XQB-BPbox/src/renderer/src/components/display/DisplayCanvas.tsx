@@ -24,6 +24,7 @@ import type {
   DisplaySlotLayout,
   DisplayVideoSlotLayout
 } from '../../types/bp'
+import { getPvPlaybackSeekTime } from '../../../../shared/pvPlayback'
 
 const defaultChantVideoSlot = {
   x: 645,
@@ -137,6 +138,8 @@ export type DisplayChantVideo =
       key: string | number
       url: string
       startTime?: number
+      pvStartTime?: number
+      pvEndTime?: number
       mode?: CurrentVideoMode
     }
   | {
@@ -177,17 +180,28 @@ interface TopSlotEffectVideoProps {
   onFinished?: () => void
 }
 
-function seekVideoStartTime(video: HTMLVideoElement, startTime: number | null | undefined): void {
+function seekVideoStartTime(
+  video: HTMLVideoElement,
+  startTime: number | null | undefined,
+  pvStartTime?: number,
+  pvEndTime?: number
+): void {
   const requestedTime = Number(startTime)
-  if (!Number.isFinite(requestedTime) || requestedTime <= 0) {
+  const hasPvPlaybackRange = pvStartTime !== undefined || pvEndTime !== undefined
+  if ((!Number.isFinite(requestedTime) || requestedTime <= 0) && !hasPvPlaybackRange) {
     return
   }
 
   const duration = video.duration
-  const nextTime =
-    Number.isFinite(duration) && duration > 0
+  const nextTime = hasPvPlaybackRange
+    ? getPvPlaybackSeekTime(duration, requestedTime, pvStartTime, pvEndTime)
+    : Number.isFinite(duration) && duration > 0
       ? Math.min(requestedTime, Math.max(0, duration - 0.05))
       : requestedTime
+
+  if (!Number.isFinite(nextTime) || nextTime <= 0) {
+    return
+  }
 
   try {
     video.currentTime = nextTime
@@ -199,6 +213,10 @@ function seekVideoStartTime(video: HTMLVideoElement, startTime: number | null | 
 function hasPositiveStartTime(value: number | null | undefined): boolean {
   const numberValue = Number(value)
   return Number.isFinite(numberValue) && numberValue > 0
+}
+
+function singleVideoNeedsSeek(video: SingleChantVideo): boolean {
+  return hasPositiveStartTime(video.startTime) || hasPositiveStartTime(video.pvStartTime)
 }
 
 function logVideoPlayFailure(label: string, error: unknown): void {
@@ -379,16 +397,16 @@ function SeamlessChantVideo({
   ): void => {
     const element = event.currentTarget
     if (item.key === activeKey) {
-      seekVideoStartTime(element, item.startTime)
+      seekVideoStartTime(element, item.startTime, item.pvStartTime, item.pvEndTime)
       return
     }
 
     if (preloadKeysRef.current.has(item.key)) {
-      seekVideoStartTime(element, item.startTime)
+      seekVideoStartTime(element, item.startTime, item.pvStartTime, item.pvEndTime)
       return
     }
 
-    if (!hasPositiveStartTime(item.startTime)) {
+    if (!singleVideoNeedsSeek(item)) {
       return
     }
 
@@ -402,7 +420,7 @@ function SeamlessChantVideo({
     }
 
     element.addEventListener('seeked', activateOnce, { once: true })
-    seekVideoStartTime(element, item.startTime)
+    seekVideoStartTime(element, item.startTime, item.pvStartTime, item.pvEndTime)
     const fallbackTimer = window.setTimeout(activateOnce, 220)
     cleanupTimersRef.current.push(fallbackTimer)
   }
@@ -438,7 +456,7 @@ function SeamlessChantVideo({
               if (
                 item.key !== activeKey &&
                 !preloadKeysRef.current.has(item.key) &&
-                !hasPositiveStartTime(item.startTime)
+                !singleVideoNeedsSeek(item)
               ) {
                 activateVideo(item)
               }
@@ -492,7 +510,9 @@ function HiddenChantVideoPreloader({ video }: { video: SingleChantVideo }): Reac
       muted
       playsInline
       preload="auto"
-      onLoadedMetadata={(event) => seekVideoStartTime(event.currentTarget, video.startTime)}
+      onLoadedMetadata={(event) =>
+        seekVideoStartTime(event.currentTarget, video.startTime, video.pvStartTime, video.pvEndTime)
+      }
       style={hiddenChantVideoPreloaderStyle}
     />
   )
