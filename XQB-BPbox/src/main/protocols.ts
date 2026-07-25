@@ -1,6 +1,8 @@
 import { protocol } from 'electron'
-import { readFile, stat } from 'node:fs/promises'
+import { createReadStream } from 'node:fs'
+import { stat } from 'node:fs/promises'
 import { extname } from 'node:path'
+import { Readable } from 'node:stream'
 
 import { assetProtocol, resolveStoredPath } from './assets'
 
@@ -75,6 +77,25 @@ function parseRangeHeader(rangeHeader: string | null, size: number): RangeResult
   }
 }
 
+function createAssetBody(resolvedPath: string, signal: AbortSignal, range?: RangeResult): BodyInit {
+  const fileStream = createReadStream(
+    resolvedPath,
+    range ? { start: range.start, end: range.end } : undefined
+  )
+  const abortStream = (): void => {
+    fileStream.destroy()
+  }
+
+  if (signal.aborted) {
+    abortStream()
+  } else {
+    signal.addEventListener('abort', abortStream, { once: true })
+    fileStream.once('close', () => signal.removeEventListener('abort', abortStream))
+  }
+
+  return Readable.toWeb(fileStream) as unknown as BodyInit
+}
+
 export function registerAssetProtocolScheme(): void {
   protocol.registerSchemesAsPrivileged([
     {
@@ -108,24 +129,21 @@ export function registerAssetProtocol(): void {
       const range = parseRangeHeader(request.headers.get('range'), fileStat.size)
 
       if (range) {
-        const data = await readFile(resolvedPath)
-        const chunk = data.subarray(range.start, range.end + 1)
+        const contentLength = range.end - range.start + 1
 
-        return new Response(chunk, {
+        return new Response(createAssetBody(resolvedPath, request.signal, range), {
           status: 206,
           headers: {
             'Accept-Ranges': 'bytes',
             'Cache-Control': 'no-store',
-            'Content-Length': String(chunk.byteLength),
+            'Content-Length': String(contentLength),
             'Content-Range': `bytes ${range.start}-${range.end}/${fileStat.size}`,
             'Content-Type': contentType
           }
         })
       }
 
-      const data = await readFile(resolvedPath)
-
-      return new Response(data, {
+      return new Response(createAssetBody(resolvedPath, request.signal), {
         headers: {
           'Accept-Ranges': 'bytes',
           'Cache-Control': 'no-store',

@@ -335,6 +335,8 @@ function normalizeChangeEffectMode(value: unknown): ChangeEffectMode {
 }
 
 const CHANT_VIDEO_PV_SWITCH_SECONDS = 5
+const CHANT_VIDEO_REQUEST_TIMEOUT_MS = 8000
+const CHANT_VIDEO_ACTIVE_TIMEOUT_MS = 6500
 const PROTECT_VIDEO_END_SWITCH_LEAD_SECONDS = 0.12
 
 function optionalString(value: unknown): string | null {
@@ -1054,6 +1056,7 @@ function DisplayPage(): React.JSX.Element {
   const chantVideoRef = useRef<DisplayChantVideo | null>(null)
   const chantVideoInstanceRef = useRef(0)
   const currentVideoModeRef = useRef<CurrentVideoMode | null>(null)
+  const chantVideoSwitchTimeoutRef = useRef<number | null>(null)
   const upCharacterPvCurrentTimeRef = useRef(0)
   const upCharacterPvPathRef = useRef<string | null>(null)
   const upCharacterPvStartTimeRef = useRef(DEFAULT_PV_START_TIME)
@@ -1077,6 +1080,13 @@ function DisplayPage(): React.JSX.Element {
     setPreloadChantVideo(null)
   }, [])
 
+  const clearChantVideoSwitchTimeout = useCallback((): void => {
+    if (chantVideoSwitchTimeoutRef.current !== null) {
+      window.clearTimeout(chantVideoSwitchTimeoutRef.current)
+      chantVideoSwitchTimeoutRef.current = null
+    }
+  }, [])
+
   const preloadPvVideo = useCallback((video: DisplayChantVideo | null): void => {
     if (video?.kind !== 'single' || video.mode === 'voice') {
       setPreloadChantVideo(null)
@@ -1087,9 +1097,10 @@ function DisplayPage(): React.JSX.Element {
   }, [])
 
   const cancelPendingChantPvSwitch = useCallback((): void => {
+    clearChantVideoSwitchTimeout()
     queuedChantVideoRef.current = null
     clearPreloadedPvVideo()
-  }, [clearPreloadedPvVideo])
+  }, [clearChantVideoSwitchTimeout, clearPreloadedPvVideo])
 
   const withVideoInstanceKey = useCallback((video: DisplayChantVideo): DisplayChantVideo => {
     chantVideoInstanceRef.current += 1
@@ -1119,20 +1130,6 @@ function DisplayPage(): React.JSX.Element {
     currentVideoModeRef.current = null
     setChantVideo(null)
   }, [cancelPendingChantPvSwitch])
-
-  const showChantVideo = useCallback(
-    (video: DisplayChantVideo, pvVideo: DisplayChantVideo | null = null): void => {
-      cancelPendingChantPvSwitch()
-      const nextVideo = withVideoInstanceKey(video)
-      const nextQueuedVideo = pvVideo ? withVideoInstanceKey(pvVideo) : null
-      pendingIdleUpPvKeyRef.current = null
-      queuedChantVideoRef.current = nextQueuedVideo
-      currentVideoModeRef.current = videoMode(nextVideo)
-      setChantVideo(nextVideo)
-      preloadPvVideo(nextQueuedVideo)
-    },
-    [cancelPendingChantPvSwitch, preloadPvVideo, withVideoInstanceKey]
-  )
 
   const applyUpdatedSettings = useCallback((nextSettings: DisplaySettings): void => {
     setSettings(nextSettings)
@@ -1251,10 +1248,66 @@ function DisplayPage(): React.JSX.Element {
       return false
     }
 
+    clearChantVideoSwitchTimeout()
+    clearPreloadedPvVideo()
     currentVideoModeRef.current = videoMode(queuedVideo)
     setChantVideo(queuedVideo)
     return true
-  }, [takeQueuedPvVideo])
+  }, [clearChantVideoSwitchTimeout, clearPreloadedPvVideo, takeQueuedPvVideo])
+
+  const scheduleChantVideoSwitchTimeout = useCallback(
+    (videoKey: string | number, timeoutMs: number): void => {
+      clearChantVideoSwitchTimeout()
+      chantVideoSwitchTimeoutRef.current = window.setTimeout(() => {
+        chantVideoSwitchTimeoutRef.current = null
+
+        if (currentVideoModeRef.current !== 'voice' || chantVideoRef.current?.key !== videoKey) {
+          return
+        }
+
+        if (switchVoiceToQueuedPv()) {
+          return
+        }
+
+        showIdleUpPv(`idle-after-voice-timeout-${String(videoKey)}`)
+      }, timeoutMs)
+    },
+    [clearChantVideoSwitchTimeout, showIdleUpPv, switchVoiceToQueuedPv]
+  )
+
+  const showChantVideo = useCallback(
+    (video: DisplayChantVideo, pvVideo: DisplayChantVideo | null = null): void => {
+      cancelPendingChantPvSwitch()
+      const nextVideo = withVideoInstanceKey(video)
+      const nextQueuedVideo = pvVideo ? withVideoInstanceKey(pvVideo) : null
+      pendingIdleUpPvKeyRef.current = null
+      queuedChantVideoRef.current = nextQueuedVideo
+      currentVideoModeRef.current = videoMode(nextVideo)
+      setChantVideo(nextVideo)
+      preloadPvVideo(nextQueuedVideo)
+
+      if (videoMode(nextVideo) === 'voice') {
+        scheduleChantVideoSwitchTimeout(nextVideo.key, CHANT_VIDEO_REQUEST_TIMEOUT_MS)
+      }
+    },
+    [
+      cancelPendingChantPvSwitch,
+      preloadPvVideo,
+      scheduleChantVideoSwitchTimeout,
+      withVideoInstanceKey
+    ]
+  )
+
+  const handleChantVideoReady = useCallback(
+    (video: DisplayChantVideo): void => {
+      if (videoMode(video) !== 'voice' || currentVideoModeRef.current !== 'voice') {
+        return
+      }
+
+      scheduleChantVideoSwitchTimeout(video.key, CHANT_VIDEO_ACTIVE_TIMEOUT_MS)
+    },
+    [scheduleChantVideoSwitchTimeout]
+  )
 
   const handleChantVideoEnded = useCallback(
     (video: DisplayChantVideo, currentTime: number, duration: number): void => {
@@ -1332,6 +1385,10 @@ function DisplayPage(): React.JSX.Element {
       if (video.kind === 'single' && video.mode === 'upPv') {
         upCharacterPvCurrentTimeRef.current = normalizePvStartTime(video.pvStartTime)
         hideChantVideo()
+        return
+      }
+
+      if (videoMode(video) === 'voice' && switchVoiceToQueuedPv()) {
         return
       }
 
@@ -2298,6 +2355,7 @@ function DisplayPage(): React.JSX.Element {
         showCenterStage={false}
         chantVideo={chantVideo}
         preloadChantVideo={preloadChantVideo}
+        onChantVideoReady={handleChantVideoReady}
         onChantVideoEnded={handleChantVideoEnded}
         onChantVideoTimeUpdate={handleChantVideoTimeUpdate}
         onChantVideoInterrupted={handleChantVideoInterrupted}

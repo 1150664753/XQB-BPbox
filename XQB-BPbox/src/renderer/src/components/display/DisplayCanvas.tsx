@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, SyntheticEvent } from 'react'
 
 import DisplayBackground from './DisplayBackground'
@@ -227,6 +227,14 @@ function logVideoLoadFailure(label: string, src: string): void {
   console.warn(`[DisplayPage] ${label} video load failed: ${src}`)
 }
 
+const PENDING_VIDEO_LOAD_TIMEOUT_MS = 4000
+
+function releaseVideoElement(element: HTMLVideoElement): void {
+  element.pause()
+  element.removeAttribute('src')
+  element.load()
+}
+
 function SeamlessChantVideo({
   video,
   preloadVideo,
@@ -258,13 +266,20 @@ function SeamlessChantVideo({
   const preloadKeysRef = useRef<Set<string | number>>(new Set())
   const onInterruptedRef = useRef<typeof onInterrupted>(onInterrupted)
   const onActiveReadyRef = useRef<typeof onActiveReady>(onActiveReady)
+  const onErrorRef = useRef<typeof onError>(onError)
   const pausedRef = useRef(paused)
   const videoRefs = useRef<Map<string | number, HTMLVideoElement>>(new Map())
-  const cleanupTimersRef = useRef<number[]>([])
+  const cleanupTimersRef = useRef<Set<number>>(new Set())
+  const pendingLoadTimersRef = useRef<Map<string | number, number>>(new Map())
+  const requestedVideoKeyRef = useRef<string | number>(video.key)
 
   useEffect(() => {
     renderedVideosRef.current = renderedVideos
   }, [renderedVideos])
+
+  useLayoutEffect(() => {
+    requestedVideoKeyRef.current = video.key
+  }, [video.key])
 
   useEffect(() => {
     activeKeyRef.current = activeKey
@@ -277,6 +292,62 @@ function SeamlessChantVideo({
   useEffect(() => {
     onActiveReadyRef.current = onActiveReady
   }, [onActiveReady])
+
+  useEffect(() => {
+    onErrorRef.current = onError
+  }, [onError])
+
+  const clearPendingLoadTimer = useCallback((key: string | number): void => {
+    const timer = pendingLoadTimersRef.current.get(key)
+    if (timer !== undefined) {
+      window.clearTimeout(timer)
+      pendingLoadTimersRef.current.delete(key)
+    }
+  }, [])
+
+  const releaseRenderedVideo = useCallback(
+    (key: string | number): void => {
+      clearPendingLoadTimer(key)
+      const element = videoRefs.current.get(key)
+      if (element) {
+        releaseVideoElement(element)
+        videoRefs.current.delete(key)
+      }
+    },
+    [clearPendingLoadTimer]
+  )
+
+  const commitRenderedVideos = useCallback((nextVideos: SingleChantVideo[]): void => {
+    renderedVideosRef.current = nextVideos
+    renderedKeysRef.current = new Set(nextVideos.map((item) => item.key))
+    setRenderedVideos(nextVideos)
+  }, [])
+
+  const discardRenderedVideo = useCallback(
+    (key: string | number): void => {
+      if (activeKeyRef.current === key) {
+        return
+      }
+
+      releaseRenderedVideo(key)
+      preloadKeysRef.current.delete(key)
+      commitRenderedVideos(renderedVideosRef.current.filter((item) => item.key !== key))
+    },
+    [commitRenderedVideos, releaseRenderedVideo]
+  )
+
+  const pruneRenderedVideos = useCallback(
+    (keepKeys: Set<string | number>): void => {
+      const removedVideos = renderedVideosRef.current.filter((item) => !keepKeys.has(item.key))
+      if (removedVideos.length === 0) {
+        return
+      }
+
+      removedVideos.forEach((item) => releaseRenderedVideo(item.key))
+      commitRenderedVideos(renderedVideosRef.current.filter((item) => keepKeys.has(item.key)))
+    },
+    [commitRenderedVideos, releaseRenderedVideo]
+  )
 
   const reportActiveInterrupted = useCallback((): void => {
     const previousKey = activeKeyRef.current
@@ -311,32 +382,45 @@ function SeamlessChantVideo({
   }, [paused, reportActiveInterrupted])
 
   useEffect(() => {
+    const cleanupTimers = cleanupTimersRef.current
+    const pendingLoadTimers = pendingLoadTimersRef.current
+    const mountedVideoRefs = videoRefs.current
+
     return () => {
       reportActiveInterrupted()
-      cleanupTimersRef.current.forEach((timer) => window.clearTimeout(timer))
-      cleanupTimersRef.current = []
+      cleanupTimers.forEach((timer) => window.clearTimeout(timer))
+      cleanupTimers.clear()
+      pendingLoadTimers.forEach((timer) => window.clearTimeout(timer))
+      pendingLoadTimers.clear()
+      mountedVideoRefs.forEach((element) => releaseVideoElement(element))
+      mountedVideoRefs.clear()
     }
   }, [reportActiveInterrupted])
 
-  const addRenderedVideo = useCallback((nextVideo: SingleChantVideo): void => {
-    if (renderedKeysRef.current.has(nextVideo.key)) {
-      setRenderedVideos((current) =>
-        current.map((item) => (item.key === nextVideo.key ? nextVideo : item))
-      )
-      return
-    }
+  const addRenderedVideo = useCallback(
+    (nextVideo: SingleChantVideo): void => {
+      if (renderedKeysRef.current.has(nextVideo.key)) {
+        commitRenderedVideos(
+          renderedVideosRef.current.map((item) => (item.key === nextVideo.key ? nextVideo : item))
+        )
+        return
+      }
 
-    renderedKeysRef.current.add(nextVideo.key)
-    queueMicrotask(() =>
-      setRenderedVideos((current) => [
-        ...current.filter((item) => item.key !== nextVideo.key),
+      commitRenderedVideos([
+        ...renderedVideosRef.current.filter((item) => item.key !== nextVideo.key),
         nextVideo
       ])
-    )
-  }, [])
+    },
+    [commitRenderedVideos]
+  )
 
   const activateVideo = useCallback(
     (nextVideo: SingleChantVideo): void => {
+      if (requestedVideoKeyRef.current !== nextVideo.key) {
+        return
+      }
+
+      clearPendingLoadTimer(nextVideo.key)
       if (activeKeyRef.current !== nextVideo.key) {
         reportActiveInterrupted()
       }
@@ -354,23 +438,28 @@ function SeamlessChantVideo({
       }
 
       const cleanupTimer = window.setTimeout(() => {
-        setRenderedVideos((current) =>
-          current.filter(
-            (item) => item.key === nextVideo.key || preloadKeysRef.current.has(item.key)
-          )
-        )
-        renderedKeysRef.current = new Set([nextVideo.key, ...preloadKeysRef.current])
+        cleanupTimersRef.current.delete(cleanupTimer)
+        if (activeKeyRef.current !== nextVideo.key) {
+          return
+        }
+        pruneRenderedVideos(new Set([nextVideo.key, ...preloadKeysRef.current]))
       }, 120)
-      cleanupTimersRef.current.push(cleanupTimer)
+      cleanupTimersRef.current.add(cleanupTimer)
     },
-    [reportActiveInterrupted]
+    [clearPendingLoadTimer, pruneRenderedVideos, reportActiveInterrupted]
   )
 
   useEffect(() => {
-    if (activeKeyRef.current !== video.key) {
-      videoRefs.current.get(activeKeyRef.current)?.pause()
+    const previousActiveKey = activeKeyRef.current
+    if (previousActiveKey !== video.key) {
+      videoRefs.current.get(previousActiveKey)?.pause()
     }
 
+    const keepKeys = new Set<string | number>([previousActiveKey, video.key])
+    if (preloadVideo?.kind === 'single') {
+      keepKeys.add(preloadVideo.key)
+    }
+    pruneRenderedVideos(keepKeys)
     addRenderedVideo(video)
     queueMicrotask(() => {
       const element = videoRefs.current.get(video.key)
@@ -379,30 +468,59 @@ function SeamlessChantVideo({
         activateVideo(video)
       }
     })
-  }, [activateVideo, addRenderedVideo, video])
+
+    clearPendingLoadTimer(video.key)
+    const pendingTimer = window.setTimeout(() => {
+      pendingLoadTimersRef.current.delete(video.key)
+      if (requestedVideoKeyRef.current !== video.key || activeKeyRef.current === video.key) {
+        return
+      }
+
+      const element = videoRefs.current.get(video.key)
+      onErrorRef.current?.(video, element?.currentTime ?? 0, element?.duration ?? Number.NaN)
+      discardRenderedVideo(video.key)
+    }, PENDING_VIDEO_LOAD_TIMEOUT_MS)
+    pendingLoadTimersRef.current.set(video.key, pendingTimer)
+
+    return () => clearPendingLoadTimer(video.key)
+  }, [
+    activateVideo,
+    addRenderedVideo,
+    clearPendingLoadTimer,
+    discardRenderedVideo,
+    preloadVideo,
+    pruneRenderedVideos,
+    video
+  ])
 
   useEffect(() => {
     if (!preloadVideo || preloadVideo.key === video.key) {
       preloadKeysRef.current.clear()
+      pruneRenderedVideos(new Set([activeKeyRef.current, video.key]))
       return
     }
 
     preloadKeysRef.current = new Set([preloadVideo.key])
+    pruneRenderedVideos(new Set([activeKeyRef.current, video.key, preloadVideo.key]))
     addRenderedVideo(preloadVideo)
-  }, [addRenderedVideo, preloadVideo, video.key])
+  }, [addRenderedVideo, preloadVideo, pruneRenderedVideos, video.key])
 
   const preparePendingVideo = (
     event: SyntheticEvent<HTMLVideoElement>,
     item: SingleChantVideo
   ): void => {
     const element = event.currentTarget
-    if (item.key === activeKey) {
+    if (item.key === activeKeyRef.current) {
       seekVideoStartTime(element, item.startTime, item.pvStartTime, item.pvEndTime)
       return
     }
 
     if (preloadKeysRef.current.has(item.key)) {
       seekVideoStartTime(element, item.startTime, item.pvStartTime, item.pvEndTime)
+      return
+    }
+
+    if (requestedVideoKeyRef.current !== item.key) {
       return
     }
 
@@ -415,14 +533,20 @@ function SeamlessChantVideo({
       if (activated) {
         return
       }
+      if (requestedVideoKeyRef.current !== item.key) {
+        return
+      }
       activated = true
       activateVideo(item)
     }
 
     element.addEventListener('seeked', activateOnce, { once: true })
     seekVideoStartTime(element, item.startTime, item.pvStartTime, item.pvEndTime)
-    const fallbackTimer = window.setTimeout(activateOnce, 220)
-    cleanupTimersRef.current.push(fallbackTimer)
+    const fallbackTimer = window.setTimeout(() => {
+      cleanupTimersRef.current.delete(fallbackTimer)
+      activateOnce()
+    }, 220)
+    cleanupTimersRef.current.add(fallbackTimer)
   }
 
   return (
@@ -454,13 +578,14 @@ function SeamlessChantVideo({
             onLoadedMetadata={(event) => preparePendingVideo(event, item)}
             onLoadedData={(event) => {
               if (
-                item.key !== activeKey &&
+                item.key !== activeKeyRef.current &&
+                item.key === requestedVideoKeyRef.current &&
                 !preloadKeysRef.current.has(item.key) &&
                 !singleVideoNeedsSeek(item)
               ) {
                 activateVideo(item)
               }
-              if (item.key === activeKey) {
+              if (item.key === activeKeyRef.current) {
                 onActiveReadyRef.current?.(item)
                 if (pausedRef.current) {
                   event.currentTarget.pause()
@@ -473,7 +598,7 @@ function SeamlessChantVideo({
               }
             }}
             onTimeUpdate={(event) =>
-              !pausedRef.current
+              !pausedRef.current && activeKeyRef.current === item.key
                 ? onTimeUpdate?.(
                     item,
                     event.currentTarget.currentTime,
@@ -482,15 +607,20 @@ function SeamlessChantVideo({
                 : undefined
             }
             onEnded={() => {
-              if (active) {
+              if (activeKeyRef.current === item.key) {
                 const element = videoRefs.current.get(item.key)
                 onEnded?.(item, element?.currentTime ?? 0, element?.duration ?? Number.NaN)
               }
             }}
             onError={(event) => {
               logVideoLoadFailure('Chant/PV', event.currentTarget.currentSrc || item.url)
-              if (active) {
+              clearPendingLoadTimer(item.key)
+              const isActive = activeKeyRef.current === item.key
+              if (isActive || requestedVideoKeyRef.current === item.key) {
                 onError?.(item, event.currentTarget.currentTime, event.currentTarget.duration)
+              }
+              if (!isActive) {
+                discardRenderedVideo(item.key)
               }
             }}
             style={videoStyle}
@@ -502,8 +632,20 @@ function SeamlessChantVideo({
 }
 
 function HiddenChantVideoPreloader({ video }: { video: SingleChantVideo }): React.JSX.Element {
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+
+  useEffect(() => {
+    const mountedVideo = videoRef.current
+    return () => {
+      if (mountedVideo) {
+        releaseVideoElement(mountedVideo)
+      }
+    }
+  }, [])
+
   return (
     <video
+      ref={videoRef}
       aria-hidden="true"
       key={video.key}
       src={video.url}
@@ -550,6 +692,19 @@ function ProtectChantVideoLayer({
     left: !video.leftUrl,
     right: !video.rightUrl
   })
+
+  useEffect(() => {
+    const mountedLeftVideo = leftVideoRef.current
+    const mountedRightVideo = rightVideoRef.current
+    return () => {
+      if (mountedLeftVideo) {
+        releaseVideoElement(mountedLeftVideo)
+      }
+      if (mountedRightVideo) {
+        releaseVideoElement(mountedRightVideo)
+      }
+    }
+  }, [])
 
   useEffect(() => {
     if (active) {
@@ -865,6 +1020,7 @@ interface DisplayCanvasProps {
   showCenterStage?: boolean
   chantVideo?: DisplayChantVideo | null
   preloadChantVideo?: DisplayChantVideo | null
+  onChantVideoReady?: (video: DisplayChantVideo) => void
   onChantVideoEnded?: (video: DisplayChantVideo, currentTime: number, duration: number) => void
   onChantVideoTimeUpdate?: (video: DisplayChantVideo, currentTime: number, duration: number) => void
   onChantVideoInterrupted?: (
@@ -1490,6 +1646,7 @@ function DisplayCanvas({
   showCenterStage = true,
   chantVideo = null,
   preloadChantVideo = null,
+  onChantVideoReady,
   onChantVideoEnded,
   onChantVideoTimeUpdate,
   onChantVideoInterrupted,
@@ -1577,6 +1734,18 @@ function DisplayCanvas({
     return clearProtectRetentionTimer
   }, [clearProtectRetentionTimer, currentProtectChantVideo, displayedProtectChantVideo])
 
+  useEffect(() => {
+    if (currentSingleChantVideo || currentProtectChantVideo || !retainedSingleChantVideo) {
+      return undefined
+    }
+
+    const releaseTimer = window.setTimeout(() => {
+      setRetainedSingleChantVideo(null)
+    }, 120)
+
+    return () => window.clearTimeout(releaseTimer)
+  }, [currentProtectChantVideo, currentSingleChantVideo, retainedSingleChantVideo])
+
   const handleSingleChantVideoReady = useCallback(
     (video: SingleChantVideo): void => {
       if (!currentSingleChantVideo || currentSingleChantVideo.key !== video.key) {
@@ -1585,8 +1754,9 @@ function DisplayCanvas({
 
       clearProtectRetentionTimer()
       setRetainedProtectChantVideo(null)
+      onChantVideoReady?.(video)
     },
-    [clearProtectRetentionTimer, currentSingleChantVideo]
+    [clearProtectRetentionTimer, currentSingleChantVideo, onChantVideoReady]
   )
 
   let activeEffectInstances = reachedReplayEnd ? [] : effectInstancesFromActions(state, slotEffects)
@@ -1901,7 +2071,7 @@ function DisplayCanvas({
         {currentProtectChantVideo &&
         !displayedSingleChantVideo &&
         preloadChantVideo?.kind === 'single' ? (
-          <HiddenChantVideoPreloader video={preloadChantVideo} />
+          <HiddenChantVideoPreloader key={preloadChantVideo.key} video={preloadChantVideo} />
         ) : null}
         <div className="display-slot-effect-layer" style={slotEffectLayerStyle}>
           {topSlotEffects}

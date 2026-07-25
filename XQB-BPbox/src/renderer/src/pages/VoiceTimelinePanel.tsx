@@ -33,6 +33,15 @@ import {
 
 type MessageType = 'info' | 'success' | 'error'
 
+function releaseManagedAudios(activeAudios: Set<HTMLAudioElement>): void {
+  activeAudios.forEach((audio) => {
+    audio.pause()
+    audio.removeAttribute('src')
+    audio.load()
+  })
+  activeAudios.clear()
+}
+
 function fileChangeIncludes(
   event: ProjectFileChangeEvent,
   ...areas: ProjectFileChangeArea[]
@@ -889,6 +898,17 @@ function VoiceTimelinePanel({
   }, [cancelPendingPreviewPvSwitch])
 
   useEffect(() => {
+    if (!displayLinked) {
+      return
+    }
+
+    queueMicrotask(hidePreviewChantVideo)
+    releaseManagedAudios(bpSoundAudiosRef.current)
+    releaseManagedAudios(characterVoiceAudiosRef.current)
+    releaseManagedAudios(characterEffectAudiosRef.current)
+  }, [displayLinked, hidePreviewChantVideo])
+
+  useEffect(() => {
     currentTimeRef.current = currentTime
   }, [currentTime])
 
@@ -1138,6 +1158,11 @@ function VoiceTimelinePanel({
     const nextCursor = previewProgress.cursor
     const previousCursor = previewCursorRef.current
 
+    if (displayLinked) {
+      previewCursorRef.current = nextCursor
+      return
+    }
+
     if (nextCursor < previousCursor) {
       queueMicrotask(hidePreviewChantVideo)
     }
@@ -1235,6 +1260,7 @@ function VoiceTimelinePanel({
     characterEffectVolume,
     characterLookup,
     characterVoiceVolume,
+    displayLinked,
     displaySettings?.slotEffects,
     hidePreviewChantVideo,
     previewProgress.cursor,
@@ -1608,7 +1634,11 @@ function VoiceTimelinePanel({
         <div className="voice-preview-panel">
           <div className="voice-preview-stage">
             <div className="voice-preview-wrapper">
-              {displaySettings ? (
+              {displayLinked ? (
+                <div className="voice-empty">
+                  独立展示页联动中，控制台媒体预览已停用，以降低录制时的解码与渲染负载。
+                </div>
+              ) : displaySettings ? (
                 <DisplayCanvas
                   settings={displaySettings}
                   state={previewRuntime}
