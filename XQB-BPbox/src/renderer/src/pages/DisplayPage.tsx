@@ -1153,7 +1153,14 @@ function DisplayPage(): React.JSX.Element {
 
   const applyUpdatedSettings = useCallback((nextSettings: DisplaySettings): void => {
     setSettings(nextSettings)
-    setDismissedEffectKeys(new Set(pairedEffectKeysFromActions(sourceStateRef.current.actions)))
+    const source = sourceStateRef.current
+    const appliedActionCount =
+      source.playbackMode === 'live'
+        ? source.actions.length
+        : Math.min(lastPlayedCursorRef.current, source.actions.length)
+    setDismissedEffectKeys(
+      new Set(pairedEffectKeysFromActions(source.actions.slice(0, appliedActionCount)))
+    )
   }, [])
 
   const showIdleUpPv = useCallback(
