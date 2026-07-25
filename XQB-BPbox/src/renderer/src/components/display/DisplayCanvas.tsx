@@ -236,6 +236,18 @@ function releaseVideoElement(element: HTMLVideoElement): void {
   element.load()
 }
 
+function restoreVideoElementSource(
+  element: HTMLVideoElement,
+  src: string | null | undefined
+): void {
+  if (!src || element.getAttribute('src') === src) {
+    return
+  }
+
+  element.setAttribute('src', src)
+  element.load()
+}
+
 function SeamlessChantVideo({
   video,
   preloadVideo,
@@ -704,6 +716,14 @@ function ProtectChantVideoLayer({
   useEffect(() => {
     const mountedLeftVideo = leftVideoRef.current
     const mountedRightVideo = rightVideoRef.current
+
+    if (mountedLeftVideo) {
+      restoreVideoElementSource(mountedLeftVideo, video.leftUrl)
+    }
+    if (mountedRightVideo) {
+      restoreVideoElementSource(mountedRightVideo, video.rightUrl)
+    }
+
     return () => {
       if (mountedLeftVideo) {
         releaseVideoElement(mountedLeftVideo)
@@ -712,7 +732,7 @@ function ProtectChantVideoLayer({
         releaseVideoElement(mountedRightVideo)
       }
     }
-  }, [])
+  }, [video.leftUrl, video.rightUrl])
 
   useEffect(() => {
     const leftVideo = leftVideoRef.current
