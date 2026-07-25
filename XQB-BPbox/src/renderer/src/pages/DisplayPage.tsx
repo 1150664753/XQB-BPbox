@@ -660,21 +660,36 @@ function shouldInterruptVideoForRuntimeUpdate(
 ): boolean {
   const currentAction = currentState.actions.at(-1)
   const nextAction = nextState.actions.at(-1)
-
-  return (
+  const mediaContextChanged =
     currentState.createdAt !== nextState.createdAt ||
     currentState.playbackMode !== nextState.playbackMode ||
+    currentState.upCharacterPvPath !== nextState.upCharacterPvPath ||
+    currentState.upCharacterPvUrl !== nextState.upCharacterPvUrl ||
+    currentState.upCharacterPvStartTime !== nextState.upCharacterPvStartTime ||
+    currentState.upCharacterPvEndTime !== nextState.upCharacterPvEndTime
+
+  if (mediaContextChanged) {
+    return true
+  }
+
+  const appendedLightConeBan =
+    nextAction?.action === 'ban' &&
+    nextAction.targetType === 'lightCone' &&
+    nextState.actions.length === currentState.actions.length + 1 &&
+    nextState.stepCursor >= currentState.stepCursor
+
+  if (appendedLightConeBan) {
+    return false
+  }
+
+  return (
     currentState.stepCursor !== nextState.stepCursor ||
     currentState.actions.length !== nextState.actions.length ||
     currentAction?.stepIndex !== nextAction?.stepIndex ||
     currentAction?.action !== nextAction?.action ||
     currentAction?.targetId !== nextAction?.targetId ||
     currentAction?.starTargetId !== nextAction?.starTargetId ||
-    currentAction?.railTargetId !== nextAction?.railTargetId ||
-    currentState.upCharacterPvPath !== nextState.upCharacterPvPath ||
-    currentState.upCharacterPvUrl !== nextState.upCharacterPvUrl ||
-    currentState.upCharacterPvStartTime !== nextState.upCharacterPvStartTime ||
-    currentState.upCharacterPvEndTime !== nextState.upCharacterPvEndTime
+    currentAction?.railTargetId !== nextAction?.railTargetId
   )
 }
 

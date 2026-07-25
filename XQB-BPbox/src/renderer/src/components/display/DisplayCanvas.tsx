@@ -666,6 +666,7 @@ function ProtectChantVideoLayer({
   holdUntilReady,
   style,
   muted,
+  onReady,
   onEnded,
   onTimeUpdate,
   onError
@@ -675,6 +676,7 @@ function ProtectChantVideoLayer({
   holdUntilReady: boolean
   style: CSSProperties
   muted: boolean
+  onReady?: (video: DisplayChantVideo) => void
   onEnded?: (video: DisplayChantVideo, currentTime: number, duration: number) => void
   onTimeUpdate?: (video: DisplayChantVideo, currentTime: number, duration: number) => void
   onError?: (video: DisplayChantVideo, currentTime: number, duration: number) => void
@@ -687,11 +689,13 @@ function ProtectChantVideoLayer({
     right: false,
     reported: false
   })
+  const readyReportedKeyRef = useRef<string | number | null>(null)
   const [readyState, setReadyState] = useState({
     key: video.key,
     left: !video.leftUrl,
     right: !video.rightUrl
   })
+  const ready = readyState.key === video.key && readyState.left && readyState.right
 
   useEffect(() => {
     const mountedLeftVideo = leftVideoRef.current
@@ -707,13 +711,23 @@ function ProtectChantVideoLayer({
   }, [])
 
   useEffect(() => {
-    if (active) {
+    const leftVideo = leftVideoRef.current
+    const rightVideo = rightVideoRef.current
+
+    if (!active || !ready) {
+      leftVideo?.pause()
+      rightVideo?.pause()
       return
     }
 
-    leftVideoRef.current?.pause()
-    rightVideoRef.current?.pause()
-  }, [active])
+    if (readyReportedKeyRef.current !== video.key) {
+      readyReportedKeyRef.current = video.key
+      onReady?.(video)
+    }
+
+    leftVideo?.play().catch((error: unknown) => logVideoPlayFailure('Protect left', error))
+    rightVideo?.play().catch((error: unknown) => logVideoPlayFailure('Protect right', error))
+  }, [active, onReady, ready, video])
 
   const markReady = (side: ProtectChantVideoSide): void => {
     setReadyState((current) => {
@@ -770,7 +784,6 @@ function ProtectChantVideoLayer({
     callback?.(video, currentTime, duration)
   }
 
-  const ready = readyState.key === video.key && readyState.left && readyState.right
   const layerStyle: CSSProperties = {
     ...style,
     opacity: !active || ready || !holdUntilReady ? style.opacity : 0
@@ -789,7 +802,6 @@ function ProtectChantVideoLayer({
               ref={leftVideoRef}
               className="display-chant-video-source display-chant-video-source-mirror"
               src={video.leftUrl}
-              autoPlay={active}
               muted={muted}
               playsInline
               preload="auto"
@@ -834,7 +846,6 @@ function ProtectChantVideoLayer({
               ref={rightVideoRef}
               className="display-chant-video-source"
               src={video.rightUrl}
-              autoPlay={active}
               muted={muted}
               playsInline
               preload="auto"
@@ -2063,6 +2074,7 @@ function DisplayCanvas({
             holdUntilReady={Boolean(displayedSingleChantVideo)}
             style={protectChantVideoSlotStyle}
             muted={muteChantVideo}
+            onReady={onChantVideoReady}
             onEnded={onChantVideoEnded}
             onTimeUpdate={onChantVideoTimeUpdate}
             onError={onChantVideoError ?? onChantVideoEnded}
