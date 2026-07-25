@@ -675,6 +675,7 @@ function VoiceTimelinePanel({
   const previewPvInstanceRef = useRef(0)
   const previewPvRestartedKeyRef = useRef<string | number | null>(null)
   const displaySessionIdRef = useRef('')
+  const displayLinkedRef = useRef(false)
   const trackRef = useRef<HTMLDivElement>(null)
   const pointIdSerialRef = useRef(0)
   const characterLookup = useMemo(
@@ -1299,6 +1300,48 @@ function VoiceTimelinePanel({
     [buildPlaybackPayload, displayLinked, onMessage]
   )
 
+  const restoreConsolePreview = useCallback((): void => {
+    if (!displayLinkedRef.current) {
+      return
+    }
+
+    displayLinkedRef.current = false
+    displaySessionIdRef.current = ''
+    setDisplayLinked(false)
+    window.bpAPI.bp.setVoiceTimelinePlayback(null).catch((error: unknown) => {
+      onMessage('error', error instanceof Error ? error.message : String(error))
+    })
+    onMessage('info', '独立展示页已关闭，控制台媒体预览已恢复')
+  }, [onMessage])
+
+  useEffect(() => {
+    if (!active) {
+      return undefined
+    }
+
+    let disposed = false
+    const handleDisplayStatus = (online: boolean): void => {
+      if (!disposed && !online) {
+        restoreConsolePreview()
+      }
+    }
+    const stopDisplayStatus = window.bpAPI.bp.onDisplayStatus(handleDisplayStatus)
+
+    window.bpAPI.bp
+      .getDisplayStatus()
+      .then(handleDisplayStatus)
+      .catch((error: unknown) => {
+        if (!disposed) {
+          onMessage('error', error instanceof Error ? error.message : String(error))
+        }
+      })
+
+    return () => {
+      disposed = true
+      stopDisplayStatus()
+    }
+  }, [active, onMessage, restoreConsolePreview])
+
   useEffect(() => {
     syncDisplayPlayback({ playing, currentTime: currentTimeRef.current })
   }, [playing, syncDisplayPlayback])
@@ -1488,6 +1531,7 @@ function VoiceTimelinePanel({
         return
       }
 
+      displayLinkedRef.current = true
       setDisplayLinked(true)
       if (audio) {
         await audio.play().catch(() => undefined)

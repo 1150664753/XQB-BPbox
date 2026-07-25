@@ -71,6 +71,11 @@ const bpAPI: BpAPI = {
     renameResult: (fileName, nextName) =>
       ipcRenderer.invoke('bp:rename-result', fileName, nextName),
     getDisplayStatus: () => ipcRenderer.invoke('bp:get-display-status'),
+    onDisplayStatus: (callback): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, online): void => callback(online)
+      ipcRenderer.on('bp:display-status', listener)
+      return () => ipcRenderer.removeListener('bp:display-status', listener)
+    },
     openResultsFolder: () => ipcRenderer.invoke('bp:open-results-folder'),
     openDisplayWindow: () => ipcRenderer.invoke('bp:open-display-window'),
     sendDisplayReplayClick: (clickType) =>

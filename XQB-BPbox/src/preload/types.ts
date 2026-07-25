@@ -89,6 +89,7 @@ export interface BpAPI {
     deleteResult: (fileName: string) => Promise<boolean>
     renameResult: (fileName: string, nextName: string) => Promise<SavedFileResult>
     getDisplayStatus: () => Promise<boolean>
+    onDisplayStatus: (callback: (online: boolean) => void) => () => void
     openResultsFolder: () => Promise<boolean>
     openDisplayWindow: () => Promise<boolean>
     sendDisplayReplayClick: (clickType: BpDisplayReplayClickType) => Promise<boolean>

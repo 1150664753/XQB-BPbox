@@ -197,6 +197,7 @@ export function createDisplayWindow(): BrowserWindow {
       displayWindow.show()
     }
     displayWindow.focus()
+    sendToAllWindows('bp:display-status', true)
     logDisplayWindowMetrics(displayWindow, 'reuse')
     return displayWindow
   }
@@ -238,9 +239,11 @@ export function createDisplayWindow(): BrowserWindow {
 
   displayWindow.on('closed', () => {
     displayWindow = null
+    sendToAllWindows('bp:display-status', false)
   })
 
   loadRendererRoute(displayWindow, '/display')
+  sendToAllWindows('bp:display-status', true)
 
   return displayWindow
 }
