@@ -228,6 +228,7 @@ function logVideoLoadFailure(label: string, src: string): void {
 }
 
 const PENDING_VIDEO_LOAD_TIMEOUT_MS = 4000
+const PROTECT_VIDEO_READY_TIMEOUT_MS = 1200
 
 function releaseVideoElement(element: HTMLVideoElement): void {
   element.pause()
@@ -663,7 +664,6 @@ function HiddenChantVideoPreloader({ video }: { video: SingleChantVideo }): Reac
 function ProtectChantVideoLayer({
   video,
   active,
-  holdUntilReady,
   style,
   muted,
   onReady,
@@ -673,10 +673,9 @@ function ProtectChantVideoLayer({
 }: {
   video: ProtectChantVideo
   active: boolean
-  holdUntilReady: boolean
   style: CSSProperties
   muted: boolean
-  onReady?: (video: DisplayChantVideo) => void
+  onReady?: (video: ProtectChantVideo) => void
   onEnded?: (video: DisplayChantVideo, currentTime: number, duration: number) => void
   onTimeUpdate?: (video: DisplayChantVideo, currentTime: number, duration: number) => void
   onError?: (video: DisplayChantVideo, currentTime: number, duration: number) => void
@@ -690,12 +689,17 @@ function ProtectChantVideoLayer({
     reported: false
   })
   const readyReportedKeyRef = useRef<string | number | null>(null)
+  const playRequestedKeyRef = useRef<string | number | null>(null)
   const [readyState, setReadyState] = useState({
     key: video.key,
     left: !video.leftUrl,
     right: !video.rightUrl
   })
+  const [forceStart, setForceStart] = useState(false)
   const ready = readyState.key === video.key && readyState.left && readyState.right
+  const hasReadyVideo =
+    readyState.key === video.key &&
+    ((Boolean(video.leftUrl) && readyState.left) || (Boolean(video.rightUrl) && readyState.right))
 
   useEffect(() => {
     const mountedLeftVideo = leftVideoRef.current
@@ -714,20 +718,50 @@ function ProtectChantVideoLayer({
     const leftVideo = leftVideoRef.current
     const rightVideo = rightVideoRef.current
 
-    if (!active || !ready) {
+    if (!active) {
       leftVideo?.pause()
       rightVideo?.pause()
       return
     }
 
-    if (readyReportedKeyRef.current !== video.key) {
+    if (leftVideo?.networkState === HTMLMediaElement.NETWORK_EMPTY) {
+      leftVideo.load()
+    }
+    if (rightVideo?.networkState === HTMLMediaElement.NETWORK_EMPTY) {
+      rightVideo.load()
+    }
+
+    if (ready) {
+      return
+    }
+
+    const timeout = window.setTimeout(() => {
+      setForceStart(true)
+    }, PROTECT_VIDEO_READY_TIMEOUT_MS)
+
+    return () => window.clearTimeout(timeout)
+  }, [active, ready])
+
+  useEffect(() => {
+    if (!active || (!ready && !forceStart)) {
+      return
+    }
+
+    if (playRequestedKeyRef.current !== video.key) {
+      playRequestedKeyRef.current = video.key
+      leftVideoRef.current
+        ?.play()
+        .catch((error: unknown) => logVideoPlayFailure('Protect left', error))
+      rightVideoRef.current
+        ?.play()
+        .catch((error: unknown) => logVideoPlayFailure('Protect right', error))
+    }
+
+    if (hasReadyVideo && readyReportedKeyRef.current !== video.key) {
       readyReportedKeyRef.current = video.key
       onReady?.(video)
     }
-
-    leftVideo?.play().catch((error: unknown) => logVideoPlayFailure('Protect left', error))
-    rightVideo?.play().catch((error: unknown) => logVideoPlayFailure('Protect right', error))
-  }, [active, onReady, ready, video])
+  }, [active, forceStart, hasReadyVideo, onReady, ready, video])
 
   const markReady = (side: ProtectChantVideoSide): void => {
     setReadyState((current) => {
@@ -786,7 +820,7 @@ function ProtectChantVideoLayer({
 
   const layerStyle: CSSProperties = {
     ...style,
-    opacity: !active || ready || !holdUntilReady ? style.opacity : 0
+    opacity: active ? style.opacity : 0
   }
 
   return (
@@ -809,6 +843,7 @@ function ProtectChantVideoLayer({
                 seekVideoStartTime(event.currentTarget, video.leftStartTime)
               }
               onLoadedData={() => markReady('left')}
+              onCanPlay={() => markReady('left')}
               onTimeUpdate={(event) =>
                 active
                   ? onTimeUpdate?.(
@@ -853,6 +888,7 @@ function ProtectChantVideoLayer({
                 seekVideoStartTime(event.currentTarget, video.rightStartTime)
               }
               onLoadedData={() => markReady('right')}
+              onCanPlay={() => markReady('right')}
               onTimeUpdate={(event) =>
                 active
                   ? onTimeUpdate?.(
@@ -1687,6 +1723,9 @@ function DisplayCanvas({
   )
   const [retainedProtectChantVideo, setRetainedProtectChantVideo] =
     useState<ProtectChantVideo | null>(null)
+  const [protectPlaybackStartedKey, setProtectPlaybackStartedKey] = useState<
+    string | number | null
+  >(null)
   const replayPositionRef = useRef({ createdAt: state.createdAt, stepCursor: state.stepCursor })
   const protectRetentionTimerRef = useRef<number | null>(null)
   const { layout: chantVideoSlot, activeResizeChange } = resolveChantVideoSlot(settings, state)
@@ -1768,6 +1807,17 @@ function DisplayCanvas({
       onChantVideoReady?.(video)
     },
     [clearProtectRetentionTimer, currentSingleChantVideo, onChantVideoReady]
+  )
+  const handleProtectChantVideoReady = useCallback(
+    (video: ProtectChantVideo): void => {
+      if (!currentProtectChantVideo || currentProtectChantVideo.key !== video.key) {
+        return
+      }
+
+      setProtectPlaybackStartedKey(video.key)
+      onChantVideoReady?.(video)
+    },
+    [currentProtectChantVideo, onChantVideoReady]
   )
 
   let activeEffectInstances = reachedReplayEnd ? [] : effectInstancesFromActions(state, slotEffects)
@@ -2058,7 +2108,9 @@ function DisplayCanvas({
             preloadVideo={preloadChantVideo?.kind === 'single' ? preloadChantVideo : null}
             style={chantVideoSlotStyle}
             muted={muteChantVideo}
-            paused={Boolean(currentProtectChantVideo)}
+            paused={Boolean(
+              currentProtectChantVideo && protectPlaybackStartedKey === currentProtectChantVideo.key
+            )}
             onEnded={onChantVideoEnded}
             onError={onChantVideoError ?? onChantVideoEnded}
             onTimeUpdate={onChantVideoTimeUpdate}
@@ -2071,10 +2123,9 @@ function DisplayCanvas({
             key={displayedProtectChantVideo.key}
             video={displayedProtectChantVideo}
             active={Boolean(currentProtectChantVideo)}
-            holdUntilReady={Boolean(displayedSingleChantVideo)}
             style={protectChantVideoSlotStyle}
             muted={muteChantVideo}
-            onReady={onChantVideoReady}
+            onReady={handleProtectChantVideoReady}
             onEnded={onChantVideoEnded}
             onTimeUpdate={onChantVideoTimeUpdate}
             onError={onChantVideoError ?? onChantVideoEnded}
