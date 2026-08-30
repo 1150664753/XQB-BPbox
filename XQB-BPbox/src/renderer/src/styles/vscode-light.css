@@ -1969,6 +1969,7 @@ button.bp-slot {
 
 .status-bar {
   grid-column: 2 / 4;
+  grid-row: 2;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -1985,6 +1986,20 @@ button.bp-slot {
   border-color: rgba(255, 255, 255, 0.38);
   background: rgba(255, 255, 255, 0.12);
   color: #ffffff;
+}
+
+.status-bar button:disabled {
+  cursor: default;
+  opacity: 0.62;
+}
+
+.update-status-bar {
+  gap: 8px;
+}
+
+.update-actions {
+  display: flex;
+  gap: 6px;
 }
 
 .message-line {

@@ -4,6 +4,17 @@ import type { BpAPI } from './types'
 import type { ProjectFileChangeEvent } from '../shared/types'
 
 const bpAPI: BpAPI = {
+  updater: {
+    getState: () => ipcRenderer.invoke('updater:get-state'),
+    checkForUpdates: () => ipcRenderer.invoke('updater:check'),
+    downloadUpdate: () => ipcRenderer.invoke('updater:download'),
+    installUpdate: () => ipcRenderer.invoke('updater:install'),
+    onState: (callback): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, state): void => callback(state)
+      ipcRenderer.on('updater:state', listener)
+      return () => ipcRenderer.removeListener('updater:state', listener)
+    }
+  },
   characters: {
     list: (filters) => ipcRenderer.invoke('characters:list', filters),
     create: (payload) => ipcRenderer.invoke('characters:create', payload),

@@ -25,8 +25,16 @@ import type {
   VoiceTimelineListItem,
   VoiceTimelinePlayback
 } from '../shared/types'
+import type { UpdateState } from '../shared/updater'
 
 export interface BpAPI {
+  updater: {
+    getState: () => Promise<UpdateState>
+    checkForUpdates: () => Promise<UpdateState>
+    downloadUpdate: () => Promise<UpdateState>
+    installUpdate: () => Promise<boolean>
+    onState: (callback: (state: UpdateState) => void) => () => void
+  }
   characters: {
     list: (filters?: CharacterFilters) => Promise<Character[]>
     create: (payload: CharacterPayload) => Promise<Character>

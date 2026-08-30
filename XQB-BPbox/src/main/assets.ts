@@ -23,7 +23,7 @@ export function getProjectRootPath(): string {
   }
 
   if (app.isPackaged) {
-    return dirname(app.getPath('exe'))
+    return app.getPath('userData')
   }
 
   return resolve(process.cwd())
@@ -45,8 +45,9 @@ export function getResultsPath(...parts: string[]): string {
   return getProjectPath('results', ...parts)
 }
 
-export function getLegacyUserDataPath(...parts: string[]): string {
-  return join(app.getPath('userData'), ...parts)
+function getLegacyProjectPath(...parts: string[]): string {
+  const legacyRoot = app.isPackaged ? dirname(app.getPath('exe')) : app.getPath('userData')
+  return join(legacyRoot, ...parts)
 }
 
 export function ensureProjectDirectories(): void {
@@ -110,7 +111,7 @@ export function resolveStoredPath(storedPath: string | null | undefined): string
     return projectPath
   }
 
-  const legacyPath = getLegacyUserDataPath(...storedPath.split(/[\\/]/))
+  const legacyPath = getLegacyProjectPath(...storedPath.split(/[\\/]/))
   return existsSync(legacyPath) ? legacyPath : projectPath
 }
 

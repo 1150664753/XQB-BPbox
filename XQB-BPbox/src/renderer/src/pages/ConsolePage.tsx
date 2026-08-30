@@ -42,6 +42,7 @@ import type {
 } from '../types/character'
 import type { LightCone, LightConePayload, LightConeRarity } from '../types/lightCone'
 import DisplayCanvas from '../components/display/DisplayCanvas'
+import UpdateStatusBar from '../components/UpdateStatusBar'
 import VoiceTimelinePanel from './VoiceTimelinePanel'
 import {
   normalizeDisplayAudioVolumePercent,
@@ -6388,6 +6389,7 @@ function ConsolePage(): React.JSX.Element {
           />
         </div>
       </main>
+      <UpdateStatusBar />
     </div>
   )
 }

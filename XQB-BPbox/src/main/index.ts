@@ -10,6 +10,7 @@ import { registerLightConeIpc } from './ipc/lightCones'
 import { registerVoiceTimelineIpc } from './ipc/voiceTimelines'
 import { startProjectFileWatchers } from './projectFileWatchers'
 import { registerAssetProtocol, registerAssetProtocolScheme } from './protocols'
+import { initializeUpdater, registerUpdaterIpc } from './updater'
 import { createDisplayWindow, createMainWindow } from './windows'
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
@@ -24,6 +25,7 @@ function registerIpcHandlers(): void {
   registerDisplaySettingsIpc()
   registerVoiceTimelineIpc()
   registerBpIpc()
+  registerUpdaterIpc()
 }
 
 // This method will be called when Electron has finished
@@ -57,6 +59,7 @@ app.whenReady().then(() => {
 
   createMainWindow()
   createDisplayWindow()
+  initializeUpdater()
 
   app.on('activate', function () {
     // On macOS it's common to re-create a window in the app when the
