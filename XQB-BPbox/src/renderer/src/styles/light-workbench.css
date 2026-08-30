@@ -194,16 +194,3 @@ textarea:focus {
   color: var(--text-color);
   box-shadow: inset 0 2px 0 var(--accent-color);
 }
-
-.status-bar {
-  background: var(--statusbar-bg);
-  color: var(--statusbar-text);
-}
-
-.status-bar span {
-  white-space: nowrap;
-}
-
-.message-line {
-  color: var(--statusbar-text);
-}

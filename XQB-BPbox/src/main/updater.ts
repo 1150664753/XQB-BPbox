@@ -45,11 +45,14 @@ function setState(
 }
 
 function errorMessage(error: unknown): string {
-  if (error instanceof Error && error.message.trim()) {
-    return error.message
+  const rawMessage = error instanceof Error ? error.message.trim() : String(error || '未知错误')
+
+  if (/\b404\b/.test(rawMessage) && /github\.com/i.test(rawMessage)) {
+    return 'GitHub 更新仓库不可公开访问（404）。请将更新仓库设为公开，并发布正式 Release。'
   }
 
-  return String(error || '未知错误')
+  const firstLine = rawMessage.split(/\r?\n|\\n/, 1)[0].trim()
+  return firstLine.length > 220 ? `${firstLine.slice(0, 220)}…` : firstLine
 }
 
 function setErrorState(error: unknown): void {

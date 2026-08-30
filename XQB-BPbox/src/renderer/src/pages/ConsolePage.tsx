@@ -6254,6 +6254,7 @@ function ConsolePage(): React.JSX.Element {
             <img src={item.icon} alt="" aria-hidden="true" />
           </button>
         ))}
+        <UpdateStatusBar />
       </aside>
 
       <aside className="side-panel">
@@ -6389,7 +6390,6 @@ function ConsolePage(): React.JSX.Element {
           />
         </div>
       </main>
-      <UpdateStatusBar />
     </div>
   )
 }
