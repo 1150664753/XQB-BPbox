@@ -1231,6 +1231,7 @@ function SideFileList<T extends SideFileListItem>({
   getMeta,
   onSelect,
   onCreate,
+  createLabel = '新建',
   onOpenFolder,
   onRename,
   onDelete
@@ -1242,6 +1243,7 @@ function SideFileList<T extends SideFileListItem>({
   getMeta: (item: T) => string
   onSelect: (fileName: string) => void
   onCreate?: () => void
+  createLabel?: string
   onOpenFolder: () => void
   onRename?: (fileName: string, nextName: string) => void | Promise<void>
   onDelete: (fileName: string) => void
@@ -1337,11 +1339,21 @@ function SideFileList<T extends SideFileListItem>({
     <section className="side-list-panel" onContextMenu={(event) => openContextMenu(event)}>
       <div className="side-list-header">
         <h2 className="side-section-title">{title}</h2>
-        {onCreate ? (
-          <button type="button" className="side-list-tool" onClick={onCreate}>
-            新建
+        <div className="side-list-actions">
+          <button
+            type="button"
+            className="side-list-tool side-list-folder-tool"
+            title="打开本地文件夹"
+            onClick={onOpenFolder}
+          >
+            目录
           </button>
-        ) : null}
+          {onCreate ? (
+            <button type="button" className="side-list-tool primary" onClick={onCreate}>
+              {createLabel}
+            </button>
+          ) : null}
+        </div>
       </div>
       <div className="side-file-list" onContextMenu={(event) => openContextMenu(event)}>
         {items.length > 0 ? (
@@ -1428,7 +1440,7 @@ function SideFileList<T extends SideFileListItem>({
                 onCreate()
               }}
             >
-              新建
+              {createLabel}
             </button>
           ) : null}
           <button
@@ -2932,7 +2944,7 @@ function FlowConfigPanel({
             从本地导入
           </button>
           <button type="button" onClick={loadSelectedFlow}>
-            读取左侧选中流程
+            读取选中流程
           </button>
           <button
             type="button"
@@ -4074,24 +4086,6 @@ function DisplaySettingsPanel({
     onMessage('success', '展示页设置已保存')
   }
 
-  const openDisplaySettingsFolder = async (): Promise<void> => {
-    const displaySettingsApi = window.bpAPI
-      .displaySettings as typeof window.bpAPI.displaySettings & {
-      openFolder?: () => Promise<boolean>
-    }
-    if (!displaySettingsApi.openFolder) {
-      onMessage('error', '当前窗口缺少打开展示页配置文件夹接口')
-      return
-    }
-
-    try {
-      await displaySettingsApi.openFolder()
-      onMessage('success', '已打开展示页配置文件夹')
-    } catch (error) {
-      onMessage('error', error instanceof Error ? error.message : String(error))
-    }
-  }
-
   const openPreviewWindow = async (): Promise<void> => {
     try {
       const nextSettings = { ...settings, triggerFlowFile: selectedDisplayFlowFile }
@@ -4537,9 +4531,7 @@ function DisplaySettingsPanel({
               </button>
             ))}
           </div>
-          <button type="button" className="secondary" onClick={openDisplaySettingsFolder}>
-            打开配置文件夹
-          </button>
+
           <button type="button" className="secondary" onClick={openPreviewWindow}>
             打开预览页面
           </button>
@@ -4765,10 +4757,7 @@ function DisplaySettingsPanel({
                 <h2>BP 框大小 / 位置</h2>
               </div>
             </header>
-            <p className="slot-group-hint">
-              每类支持 1–8 组，每一组都可单独设置数量。为兼容已有配置，第一组数量为 0
-              时会自动承接其余槽位。
-            </p>
+
             <div className="slot-group-section-grid">
               {slotGroupSections.map((item) => {
                 const sideClass = item.key.startsWith('star') ? 'is-star' : 'is-rail'
@@ -4992,6 +4981,7 @@ function StartBpPanel({
   displayOnline,
   onMessage,
   onOpenDisplay,
+  newSessionRequestToken,
   selectedResultFile,
   onSelectedResultFileChange,
   onResultListRefresh
@@ -5001,6 +4991,7 @@ function StartBpPanel({
   displayOnline: boolean
   onMessage: (type: MessageType, text: string) => void
   onOpenDisplay: () => Promise<void>
+  newSessionRequestToken: number
   selectedResultFile: string
   onSelectedResultFileChange: (fileName: string) => void
   onResultListRefresh: (preferredFileName?: string) => Promise<void>
@@ -5028,6 +5019,7 @@ function StartBpPanel({
   const [liveCompletedDelayedChangeKeys, setLiveCompletedDelayedChangeKeys] = useState<Set<string>>(
     () => new Set()
   )
+  const handledNewSessionRequestRef = useRef(newSessionRequestToken)
 
   const loadTargetLists = useCallback(async (): Promise<void> => {
     const [nextCharacters, nextLightCones] = await Promise.all([
@@ -5177,11 +5169,6 @@ function StartBpPanel({
     })
   }, [characters, filters])
 
-  const selectedCharacter =
-    characters.find((character) => character.id === selectedCharacterId) ?? null
-  const selectedLightCone =
-    lightCones.find((lightCone) => lightCone.id === selectedLightConeId) ?? null
-
   const filteredLightCones = useMemo(() => {
     const keyword = filters.search.trim().toLowerCase()
     return lightCones.filter((lightCone) => {
@@ -5226,34 +5213,38 @@ function StartBpPanel({
     setLiveCompletedDelayedChangeKeys(new Set())
   }, [])
 
-  const syncRuntime = async (
-    nextRuntime: BpRuntimeState,
-    mode: BpPlaybackMode = bpMode,
-    flow: FlowConfig = bpFlow
-  ): Promise<void> => {
-    const upCharacterPvPath = cleanOptionalPath(nextRuntime.upCharacterPvPath)
-    const upCharacterPvUrl = upCharacterPvPath
-      ? await window.bpAPI.files.toFileUrl(upCharacterPvPath).catch(() => null)
-      : null
-    const runtimeWithMode = {
-      ...withFollowingStep(nextRuntime, flow),
-      upCharacterPvPath,
-      upCharacterPvUrl,
-      upCharacterPvStartTime: normalizePvStartTime(nextRuntime.upCharacterPvStartTime),
-      upCharacterPvEndTime: normalizePvEndTime(nextRuntime.upCharacterPvEndTime),
-      playbackMode: mode
-    }
-    setRuntime(runtimeWithMode)
-    await window.bpAPI.bp.sendStateToDisplay(runtimeWithMode)
-  }
+  const syncRuntime = useCallback(
+    async (
+      nextRuntime: BpRuntimeState,
+      mode: BpPlaybackMode = bpMode,
+      flow: FlowConfig = bpFlow
+    ): Promise<void> => {
+      const upCharacterPvPath = cleanOptionalPath(nextRuntime.upCharacterPvPath)
+      const upCharacterPvUrl = upCharacterPvPath
+        ? await window.bpAPI.files.toFileUrl(upCharacterPvPath).catch(() => null)
+        : null
+      const runtimeWithMode = {
+        ...withFollowingStep(nextRuntime, flow),
+        upCharacterPvPath,
+        upCharacterPvUrl,
+        upCharacterPvStartTime: normalizePvStartTime(nextRuntime.upCharacterPvStartTime),
+        upCharacterPvEndTime: normalizePvEndTime(nextRuntime.upCharacterPvEndTime),
+        playbackMode: mode
+      }
+      setRuntime(runtimeWithMode)
+      await window.bpAPI.bp.sendStateToDisplay(runtimeWithMode)
+    },
+    [bpFlow, bpMode]
+  )
 
   const startFlow = async (flow: FlowConfig): Promise<void> => {
     const normalizedFlow = normalizeFlowConfig(flow)
-    const nextRuntime = createRuntime(normalizedFlow)
+    const nextRuntime = withUpCharacterPv(createRuntime(normalizedFlow), runtime)
 
     setBpFlow(normalizedFlow)
     setResultName(defaultResultName(normalizedFlow.name))
     setActiveResultFile('')
+    onSelectedResultFileChange('')
     setSelectedCharacterId(null)
     setSelectedLightConeId(null)
     setPairedSelection({ star: null, rail: null })
@@ -5292,6 +5283,38 @@ function StartBpPanel({
     onMessage('info', '已重置 BP 本局')
   }
 
+  const startNewBp = useCallback(async (): Promise<void> => {
+    if (
+      runtime.actions.length > 0 &&
+      !window.confirm('当前 BP 已有操作记录，确定新建一局吗？未保存内容将丢失。')
+    ) {
+      return
+    }
+
+    const nextRuntime = withUpCharacterPv(createRuntime(bpFlow), runtime)
+    setResultName(defaultResultName(bpFlow.name))
+    setActiveResultFile('')
+    onSelectedResultFileChange('')
+    setSelectedCharacterId(null)
+    setSelectedLightConeId(null)
+    setPairedSelection({ star: null, rail: null })
+    setBpMode('manual')
+    resetLiveDelayState()
+    await syncRuntime(nextRuntime, 'manual', bpFlow)
+    onMessage('success', `已新建 BP：${bpFlow.name}`)
+  }, [bpFlow, onMessage, onSelectedResultFileChange, resetLiveDelayState, runtime, syncRuntime])
+
+  useEffect(() => {
+    if (newSessionRequestToken === handledNewSessionRequestRef.current) {
+      return
+    }
+
+    handledNewSessionRequestRef.current = newSessionRequestToken
+    startNewBp().catch((error: unknown) =>
+      onMessage('error', error instanceof Error ? error.message : String(error))
+    )
+  }, [newSessionRequestToken, onMessage, startNewBp])
+
   const startManualReplay = async (): Promise<void> => {
     setBpMode('manual')
     resetLiveDelayState()
@@ -5312,13 +5335,13 @@ function StartBpPanel({
       if (!window.confirm('当前 BP 已结束，是否重新开始直播 BP？')) {
         return
       }
-      nextRuntime = createRuntime(normalizedFlow)
+      nextRuntime = withUpCharacterPv(createRuntime(normalizedFlow), runtime)
     } else if (runtime.actions.length > 0) {
       const restart = window.confirm(
         '当前 BP 已进行到一半，是否重新开始直播 BP？取消则继续当前进度。'
       )
       if (restart) {
-        nextRuntime = createRuntime(normalizedFlow)
+        nextRuntime = withUpCharacterPv(createRuntime(normalizedFlow), runtime)
       }
     }
 
@@ -5562,12 +5585,6 @@ function StartBpPanel({
     onMessage('success', `${stepLabel(step)}：${actionRecord.targetName}`)
   }
 
-  const confirmSelection = async (): Promise<void> => {
-    await confirmTarget(
-      runtime.currentStep?.targetType === 'character' ? selectedCharacter : selectedLightCone
-    )
-  }
-
   const undoLast = async (): Promise<void> => {
     if (runtime.actions.length === 0) {
       return
@@ -5675,40 +5692,31 @@ function StartBpPanel({
     onMessage('success', `已读取 BP 结果：${result.name}`)
   }
 
-  const openBpResultsFolder = async (): Promise<void> => {
-    const bpApi = window.bpAPI.bp as typeof window.bpAPI.bp & {
-      openResultsFolder?: () => Promise<boolean>
-    }
-    if (!bpApi.openResultsFolder) {
-      onMessage('error', '当前窗口缺少打开 BP 结果文件夹接口')
-      return
-    }
-
-    try {
-      await bpApi.openResultsFolder()
-      onMessage('success', '已打开 BP 结果文件夹')
-    } catch (error) {
-      onMessage('error', error instanceof Error ? error.message : String(error))
-    }
-  }
-
   return (
     <section className="bp-workbench">
       <div className="bp-display-toolbar">
-        <button
-          type="button"
-          className={bpMode === 'manual' ? 'active' : ''}
-          onClick={startManualReplay}
-        >
-          手动回放
-        </button>
-        <button
-          type="button"
-          className={bpMode === 'live' ? 'primary active' : 'primary'}
-          onClick={startLiveBp}
-        >
-          直播BP
-        </button>
+        <div className="bp-toolbar-intro">
+          <span>BP 控制</span>
+          <strong>{bpFlow.name}</strong>
+        </div>
+        <div className="bp-mode-switch" role="group" aria-label="BP 运行模式">
+          <button
+            type="button"
+            className={bpMode === 'manual' ? 'active' : ''}
+            aria-pressed={bpMode === 'manual'}
+            onClick={startManualReplay}
+          >
+            手动回放
+          </button>
+          <button
+            type="button"
+            className={bpMode === 'live' ? 'primary active' : ''}
+            aria-pressed={bpMode === 'live'}
+            onClick={startLiveBp}
+          >
+            直播 BP
+          </button>
+        </div>
       </div>
 
       <BpTeamPanel
@@ -5733,112 +5741,139 @@ function StartBpPanel({
           </span>
         </div>
 
-        <div className={`bp-live-status ${liveWaitingExtraClick ? 'pending' : ''}`}>
-          <strong>当前模式：{liveModeLabel}</strong>
-          <span>展示页：{displayOnline ? '已打开' : '未打开'}</span>
-          <span>{liveStatusText}</span>
-          {liveWaitingExtraClick ? (
-            <span>
-              等待额外点击：{livePendingSummary || '展示页变化'}，还需 {liveExtraClickRemaining} 次
-            </span>
-          ) : (
-            <span>额外点击：无等待</span>
-          )}
-          <button
-            type="button"
-            disabled={bpMode !== 'live' || !liveWaitingExtraClick}
-            onClick={handleLiveExtraClick}
-          >
-            额外点击
-          </button>
-        </div>
+        <div className="bp-session-panel">
+          <section className="bp-session-card">
+            <header>
+              <span>流程</span>
+              <strong>{bpFlow.name}</strong>
+              <small>{bpFlow.steps.length} 个步骤</small>
+            </header>
+            <label className="bp-card-field">
+              切换 BP 流程
+              <select
+                value={selectedFlowFile}
+                onChange={(event) => setSelectedFlowFile(event.target.value)}
+              >
+                <option value="">选择流程文件</option>
+                {flowList.map((flow) => (
+                  <option key={flow.fileName} value={flow.fileName}>
+                    {flow.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="bp-card-actions">
+              <button
+                type="button"
+                className="primary"
+                disabled={!selectedFlowFile}
+                onClick={loadSelectedFlow}
+              >
+                应用所选流程
+              </button>
+              <button type="button" onClick={useCurrentFlow}>
+                同步编辑中的流程
+              </button>
+            </div>
+          </section>
 
-        <div className="bp-session-bar">
-          <div className="bp-flow-summary">
-            <strong>{bpFlow.name}</strong>
-            <span>{bpFlow.steps.length} 个步骤</span>
-          </div>
-          <label>
-            BP 流程
-            <select
-              value={selectedFlowFile}
-              onChange={(event) => setSelectedFlowFile(event.target.value)}
-            >
-              <option value="">选择流程文件</option>
-              {flowList.map((flow) => (
-                <option key={flow.fileName} value={flow.fileName}>
-                  {flow.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button type="button" onClick={loadSelectedFlow}>
-            读取流程
-          </button>
-          <button type="button" onClick={useCurrentFlow}>
-            使用当前配置
-          </button>
-          <label>
-            结果名
-            <input value={resultName} onChange={(event) => setResultName(event.target.value)} />
-          </label>
-          <button type="button" onClick={loadSelectedResult}>
-            读取结果
-          </button>
-          <button type="button" onClick={importUpCharacterPv}>
-            导入当前UP角色PV
-          </button>
-          <div className="bp-up-pv-status" title={runtime.upCharacterPvPath ?? ''}>
-            <span>当前UP角色PV</span>
-            <strong>{fileName(runtime.upCharacterPvPath)}</strong>
-          </div>
-          <label className="bp-up-pv-time-field">
-            UP PV开始时间
-            <input
-              type="number"
-              min={0}
-              step="0.1"
-              value={runtime.upCharacterPvStartTime ?? DEFAULT_PV_START_TIME}
-              onChange={(event) =>
-                void updateUpCharacterPvTime('upCharacterPvStartTime', event.target.value)
-              }
-            />
-          </label>
-          <label className="bp-up-pv-time-field">
-            UP PV结束时间
-            <input
-              type="number"
-              min={0}
-              step="0.1"
-              value={runtime.upCharacterPvEndTime ?? DEFAULT_PV_END_TIME}
-              onChange={(event) =>
-                void updateUpCharacterPvTime('upCharacterPvEndTime', event.target.value)
-              }
-            />
-          </label>
+          <section className="bp-session-card">
+            <header>
+              <span>本局记录</span>
+              <strong>{resultName.trim() || '未命名 BP'}</strong>
+              <small>{runtime.actions.length} 条操作</small>
+            </header>
+            <label className="bp-card-field">
+              结果名称
+              <input value={resultName} onChange={(event) => setResultName(event.target.value)} />
+            </label>
+            <div className="bp-card-actions">
+              <button type="button" disabled={!selectedResultFile} onClick={loadSelectedResult}>
+                读取选中结果
+              </button>
+            </div>
+          </section>
+
+          <section className="bp-session-card bp-pv-card">
+            <header className="bp-up-pv-status" title={runtime.upCharacterPvPath ?? ''}>
+              <span>当前 UP 角色 PV</span>
+              <strong>{fileName(runtime.upCharacterPvPath)}</strong>
+            </header>
+            <div className="bp-card-actions">
+              <button type="button" onClick={importUpCharacterPv}>
+                选择 PV 文件
+              </button>
+            </div>
+            <div className="bp-pv-time-grid">
+              <label className="bp-up-pv-time-field">
+                开始时间
+                <input
+                  type="number"
+                  min={0}
+                  step="0.1"
+                  value={runtime.upCharacterPvStartTime ?? DEFAULT_PV_START_TIME}
+                  onChange={(event) =>
+                    void updateUpCharacterPvTime('upCharacterPvStartTime', event.target.value)
+                  }
+                />
+              </label>
+              <label className="bp-up-pv-time-field">
+                结束时间
+                <input
+                  type="number"
+                  min={0}
+                  step="0.1"
+                  value={runtime.upCharacterPvEndTime ?? DEFAULT_PV_END_TIME}
+                  onChange={(event) =>
+                    void updateUpCharacterPvTime('upCharacterPvEndTime', event.target.value)
+                  }
+                />
+              </label>
+            </div>
+          </section>
         </div>
 
         <div className="bp-controls">
-          <button type="button" onClick={resetBp}>
-            重置本局
-          </button>
-          <button type="button" onClick={undoLast}>
-            撤回当前选择
-          </button>
-          <button
-            type="button"
-            onClick={confirmSelection}
-            className="primary"
-            disabled={liveWaitingExtraClick}
-          >
-            确认选择
-          </button>
-          <button type="button" onClick={saveResult}>
-            保存结果
-          </button>
-          <button type="button" onClick={openBpResultsFolder}>
-            打开结果文件夹
-          </button>
+          <div className="bp-controls-copy">
+            <div className={`bp-live-status ${liveWaitingExtraClick ? 'pending' : ''}`}>
+              <div className="bp-live-status-main">
+                <strong>{liveModeLabel}</strong>
+                <span>{liveStatusText}</span>
+              </div>
+              <span className={`bp-display-state ${displayOnline ? 'online' : ''}`}>
+                展示页 {displayOnline ? '已打开' : '未打开'}
+              </span>
+              {liveWaitingExtraClick ? (
+                <div className="bp-live-delay">
+                  <span>
+                    等待额外点击：{livePendingSummary || '展示页变化'}，还需{' '}
+                    {liveExtraClickRemaining} 次
+                  </span>
+                  <button type="button" onClick={handleLiveExtraClick}>
+                    触发额外点击
+                  </button>
+                </div>
+              ) : (
+                <span className="bp-live-idle">当前无需额外点击</span>
+              )}
+            </div>
+          </div>
+          <div className="bp-control-actions">
+            <button type="button" disabled={runtime.actions.length === 0} onClick={undoLast}>
+              撤回上一步
+            </button>
+            <button type="button" className="primary" onClick={saveResult}>
+              保存本局
+            </button>
+            <button
+              type="button"
+              className="danger"
+              disabled={runtime.actions.length === 0}
+              onClick={resetBp}
+            >
+              清空本局
+            </button>
+          </div>
         </div>
 
         {currentPairedAction ? (
@@ -5980,6 +6015,7 @@ function ConsolePage(): React.JSX.Element {
   const [selectedDisplaySettingsFile, setSelectedDisplaySettingsFile] = useState('')
   const [bpResultList, setBpResultList] = useState<BpResultListItem[]>([])
   const [selectedBpResultFile, setSelectedBpResultFile] = useState('')
+  const [newBpRequestToken, setNewBpRequestToken] = useState(0)
   const [voiceTimelineList, setVoiceTimelineList] = useState<VoiceTimelineListItem[]>([])
   const [selectedVoiceTimelineFile, setSelectedVoiceTimelineFile] = useState('')
   const [characterSidebarHost, setCharacterSidebarHost] = useState<HTMLDivElement | null>(null)
@@ -6420,7 +6456,7 @@ function ConsolePage(): React.JSX.Element {
         <div className="product-title">XQB-BPBox</div>
         {activeView === 'flows' ? (
           <SideFileList
-            title="BP流程配置文件列表"
+            title={''}
             items={flowConfigList}
             selectedFileName={selectedFlowConfigFile}
             emptyText="暂无流程配置文件"
@@ -6434,7 +6470,7 @@ function ConsolePage(): React.JSX.Element {
         ) : null}
         {activeView === 'displaySettings' ? (
           <SideFileList
-            title="展示页配置列表"
+            title={''}
             items={displaySettingsList}
             selectedFileName={selectedDisplaySettingsFile}
             emptyText="暂无展示页配置"
@@ -6448,7 +6484,7 @@ function ConsolePage(): React.JSX.Element {
         ) : null}
         {activeView === 'bp' ? (
           <SideFileList
-            title="已保存 BP 结果列表"
+            title={''}
             items={bpResultList}
             selectedFileName={selectedBpResultFile}
             emptyText="暂无已保存 BP 结果"
@@ -6456,6 +6492,8 @@ function ConsolePage(): React.JSX.Element {
               `${result.flowName} / ${result.actionCount} 步 / ${formatListTime(result.updatedAt)}`
             }
             onSelect={setSelectedBpResultFile}
+            onCreate={() => setNewBpRequestToken((current) => current + 1)}
+            createLabel="新建 BP"
             onOpenFolder={openBpResultFolder}
             onRename={renameBpResult}
             onDelete={deleteBpResult}
@@ -6463,7 +6501,7 @@ function ConsolePage(): React.JSX.Element {
         ) : null}
         {activeView === 'voiceTimeline' ? (
           <SideFileList
-            title="配音轴列表"
+            title={''}
             items={voiceTimelineList}
             selectedFileName={selectedVoiceTimelineFile}
             emptyText="暂无配音轴"
@@ -6532,6 +6570,7 @@ function ConsolePage(): React.JSX.Element {
             displayOnline={displayOnline}
             onMessage={report}
             onOpenDisplay={openDisplay}
+            newSessionRequestToken={newBpRequestToken}
             selectedResultFile={selectedBpResultFile}
             onSelectedResultFileChange={setSelectedBpResultFile}
             onResultListRefresh={loadBpResultList}
