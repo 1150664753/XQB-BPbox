@@ -12,16 +12,13 @@ XQB-BPBox 是一款面向《崩坏：星穹铁道》相关 BP 场景的桌面工
 - 使用独立预览窗口检查展示效果，并在 BP 操作时同步独立展示窗口。
 - 执行并记录 BP 流程，将结果保存到本地，供后续读取与复盘。
 - 使用配音轴将音频、BP 流程和已保存结果对齐，按时间点驱动展示页推进。
-- 通过本地 `assets/`、`config/` 和 `results/` 目录管理素材、配置和结果。
+- 通过 `XQB-BPbox/assets/`、`XQB-BPbox/config/` 和 `XQB-BPbox/results/` 目录管理素材、配置和结果。
 
 ## 下载与安装
 
 普通用户无需配置开发环境，可前往 [GitHub Releases](https://github.com/1150664753/XQB-BPbox/releases) 选择所需版本并下载安装包。Windows 用户可下载名称类似 `XQB-BPBox-<版本号>-setup.exe` 的安装程序，按安装向导完成安装后启动软件。
 
-如需了解素材准备、角色与光锥导入、BP 流程配置、展示页设置和配音轴使用，请阅读：
-
-- [Markdown 操作指南](./操作指南.md)
-- [Word 版详细操作指南](../操作指南.docx)
+如需了解素材准备、角色与光锥导入、BP 流程配置、展示页设置和配音轴使用，请阅读 [操作指南](./操作指南.md)。
 
 ## 基本使用流程
 
@@ -36,20 +33,21 @@ XQB-BPBox 是一款面向《崩坏：星穹铁道》相关 BP 场景的桌面工
 
 ## 源码使用
 
-本项目采用源码公开（Source Available）的发布方式。你可以在遵守 [LICENSE](../LICENSE) 的前提下，为个人学习、研究和非商业用途查看、运行和修改源代码；这不表示项目采用 OSI 认可的开源许可证。
+本项目采用源码公开（Source Available）的发布方式。你可以在遵守 [LICENSE](./LICENSE) 的前提下，为个人学习、研究和非商业用途查看、运行和修改源代码；这不表示项目采用 OSI 认可的开源许可证。
 
 项目主要代码位于：
 
 ```text
-src/main/          Electron 主进程
-src/preload/       预加载脚本与渲染进程桥接
-src/renderer/src/  React 界面、展示页与预览页
-src/shared/        主进程与渲染进程共用类型和逻辑
+XQB-BPbox/src/main/          Electron 主进程
+XQB-BPbox/src/preload/       预加载脚本与渲染进程桥接
+XQB-BPbox/src/renderer/src/  React 界面、展示页与预览页
+XQB-BPbox/src/shared/        主进程与渲染进程共用类型和逻辑
 ```
 
 安装依赖并启动开发环境：
 
 ```bash
+cd XQB-BPbox
 npm install
 npm run dev
 ```
@@ -62,11 +60,11 @@ npm run lint
 npm run build:win
 ```
 
-macOS 和 Linux 构建脚本也已在 `package.json` 中提供。自行构建、分发或使用时，仍须遵守本项目授权条件，并自行确认第三方依赖和素材的许可要求。
+macOS 和 Linux 构建脚本也已在 `XQB-BPbox/package.json` 中提供。自行构建、分发或使用时，仍须遵守本项目授权条件，并自行确认第三方依赖和素材的许可要求。
 
 ## 授权说明
 
-作者保留本项目程序代码及作者原创文档的版权。在遵守 [LICENSE](../LICENSE) 的前提下，以下用途默认免费：
+作者保留本项目程序代码及作者原创文档的版权。在遵守 [LICENSE](./LICENSE) 的前提下，以下用途默认免费：
 
 - 个人使用、学习和研究；
 - 学校课程和学生项目中的非商业使用；
@@ -79,7 +77,7 @@ macOS 和 Linux 构建脚本也已在 `package.json` 中提供。自行构建、
 
 商业公司、工作室或商业机构使用，商业赛事或收费赛事，将本软件作为收费服务的一部分，通过本软件直接获得收入，销售本软件，以及修改、重新包装或换名后销售等情形，均需要事先取得作者的商业授权。
 
-商业授权的范围、期限和费用不预先固定，请联系作者协商。完整规则见 [COMMERCIAL_LICENSE.md](../COMMERCIAL_LICENSE.md)。未经授权，不得出售、出租、收费提供本软件，也不得将本软件或修改版本重新包装后用于商业销售。
+商业授权的范围、期限和费用不预先固定，请联系作者协商。完整规则见 [COMMERCIAL_LICENSE.md](./COMMERCIAL_LICENSE.md)。未经授权，不得出售、出租、收费提供本软件，也不得将本软件或修改版本重新包装后用于商业销售。
 
 如无法判断某种使用方式是否属于商业使用，请在使用前通过本仓库的公开联系方式或 [GitHub Issues](https://github.com/1150664753/XQB-BPbox/issues) 联系作者确认。
 
@@ -97,7 +95,7 @@ macOS 和 Linux 构建脚本也已在 `package.json` 中提供。自行构建、
 
 ## 相关文档
 
-- [自定义非商业许可证](../LICENSE)
-- [商业授权说明](../COMMERCIAL_LICENSE.md)
-- [版本变更记录](../CHANGELOG.md)
+- [自定义非商业许可证](./LICENSE)
+- [商业授权说明](./COMMERCIAL_LICENSE.md)
+- [版本变更记录](./CHANGELOG.md)
 - [项目结构指南](./PROJECT_GUIDE.md)
