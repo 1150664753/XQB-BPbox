@@ -1,5 +1,6 @@
 import DisplayBanSlot from './DisplayBanSlot'
 import DisplayPickSlot from './DisplayPickSlot'
+import { configuredSlotGroups, resolvedSlotGroupCounts } from './slotGroups'
 import type {
   BpSide,
   DisplaySettings,
@@ -24,54 +25,6 @@ interface DisplayTeamPanelProps {
   previewEffectKey?: string | number
   renderSlotEffects?: boolean
   renderScale?: number
-}
-
-const fallbackSlotLayout: DisplaySlotLayout = {
-  x: 0,
-  y: 0,
-  width: 240,
-  height: 120,
-  gap: 16,
-  layer: 10,
-  direction: 'vertical',
-  frameImage: '',
-  frameImageUrl: null,
-  effectVideo: '',
-  effectVideoUrl: null
-}
-
-function slotLayout(
-  settings: DisplaySettings,
-  side: BpSide,
-  action: 'pick' | 'pickSecond' | 'ban' | 'banSecond'
-): DisplaySlotLayout {
-  const layouts = settings.slotLayouts
-
-  if (side === 'star') {
-    if (action === 'pick') {
-      return layouts?.starPick ?? fallbackSlotLayout
-    }
-
-    if (action === 'pickSecond') {
-      return layouts?.starPickSecond ?? fallbackSlotLayout
-    }
-
-    return action === 'banSecond'
-      ? (layouts?.starBanSecond ?? fallbackSlotLayout)
-      : (layouts?.starBan ?? fallbackSlotLayout)
-  }
-
-  if (action === 'pick') {
-    return layouts?.railPick ?? fallbackSlotLayout
-  }
-
-  if (action === 'pickSecond') {
-    return layouts?.railPickSecond ?? fallbackSlotLayout
-  }
-
-  return action === 'banSecond'
-    ? (layouts?.railBanSecond ?? fallbackSlotLayout)
-    : (layouts?.railBan ?? fallbackSlotLayout)
 }
 
 function tightPickLayout(layout: DisplaySlotLayout): DisplaySlotLayout {
@@ -250,136 +203,110 @@ function DisplayTeamPanel({
     team.bans.length,
     previewBanIndex === null ? 0 : previewBanIndex + 1
   )
-  const secondPickCount = Math.min(
-    pickCount,
-    Math.max(0, Math.floor(Number(settings.secondaryPickCounts?.[side]) || 0))
-  )
-  const firstPickCount = Math.max(0, pickCount - secondPickCount)
-  const secondBanCount = Math.min(
-    banCount,
-    Math.max(0, Math.floor(Number(settings.secondaryBanCounts?.[side]) || 0))
-  )
-  const firstBanCount = Math.max(0, banCount - secondBanCount)
-  const pickLayout = tightPickLayout(slotLayout(settings, side, 'pick'))
-  const secondPickLayout = tightPickLayout(slotLayout(settings, side, 'pickSecond'))
-  const banLayout = slotLayout(settings, side, 'ban')
-  const secondBanLayout = slotLayout(settings, side, 'banSecond')
+  const pickGroups = configuredSlotGroups(settings, side, 'pick')
+  const banGroups = configuredSlotGroups(settings, side, 'ban')
+  const pickGroupCounts = resolvedSlotGroupCounts(pickCount, pickGroups)
+  const banGroupCounts = resolvedSlotGroupCounts(banCount, banGroups)
 
   return (
     <section className={`display-team-panel display-team-${side}`}>
-      <div
-        className={slotGroupClassName('display-picks', pickLayout)}
-        style={layoutStyle(pickLayout, { scale: renderScale })}
-      >
-        {Array.from({ length: firstPickCount }).map((_, index) => (
-          <DisplayPickSlot
-            key={`pick-${index}`}
-            target={team.picks[index]}
-            side={side}
-            index={index + 1}
-          >
-            {renderSlotEffects
-              ? renderSlotEffect(slotKey(side, 'pick', index), slotEffects.pick, {
-                  pending: activePendingSlotKeys.has(slotKey(side, 'pick', index)),
-                  selected: selectedSlotKey === slotKey(side, 'pick', index),
-                  preview: previewSlotKey === slotKey(side, 'pick', index),
-                  selectedEffectKey,
-                  previewEffectKey
-                })
-              : null}
-          </DisplayPickSlot>
-        ))}
-      </div>
-      {secondPickCount > 0 ? (
-        <div
-          className={slotGroupClassName('display-picks display-picks-second', secondPickLayout)}
-          style={layoutStyle(secondPickLayout, { scale: renderScale })}
-        >
-          {Array.from({ length: secondPickCount }).map((_, index) => {
-            const pickIndex = firstPickCount + index
+      {pickGroups.map((group, groupIndex) => {
+        const groupCount = pickGroupCounts[groupIndex] ?? 0
+        if (groupCount <= 0) {
+          return null
+        }
 
-            return (
-              <DisplayPickSlot
-                key={`pick-second-${index}`}
-                target={team.picks[pickIndex]}
-                side={side}
-                index={pickIndex + 1}
-              >
-                {renderSlotEffects
-                  ? renderSlotEffect(slotKey(side, 'pick', pickIndex), slotEffects.pick, {
-                      pending: activePendingSlotKeys.has(slotKey(side, 'pick', pickIndex)),
-                      selected: selectedSlotKey === slotKey(side, 'pick', pickIndex),
-                      preview: previewSlotKey === slotKey(side, 'pick', pickIndex),
-                      selectedEffectKey,
-                      previewEffectKey
-                    })
-                  : null}
-              </DisplayPickSlot>
-            )
-          })}
-        </div>
-      ) : null}
-      <div
-        className={slotGroupClassName('display-bans', banLayout)}
-        style={layoutStyle(banLayout, { reverseHorizontal: side === 'star', scale: renderScale })}
-      >
-        {Array.from({ length: firstBanCount }).map((_, index) => (
-          <DisplayBanSlot
-            key={`ban-${index}`}
-            target={team.bans[index]}
-            index={index + 1}
-            style={slotGapStyle(banLayout, index, {
+        const startIndex = pickGroupCounts
+          .slice(0, groupIndex)
+          .reduce((sum, count) => sum + count, 0)
+        const layout = tightPickLayout(group)
+
+        return (
+          <div
+            key={`pick-group-${groupIndex}`}
+            className={slotGroupClassName(
+              `display-picks ${groupIndex > 0 ? 'display-picks-second' : ''} display-picks-group-${groupIndex + 1}`,
+              layout
+            )}
+            style={layoutStyle(layout, { scale: renderScale })}
+          >
+            {Array.from({ length: groupCount }).map((_, localIndex) => {
+              const pickIndex = startIndex + localIndex
+              const key = slotKey(side, 'pick', pickIndex)
+
+              return (
+                <DisplayPickSlot
+                  key={`pick-${pickIndex}`}
+                  target={team.picks[pickIndex]}
+                  side={side}
+                  index={pickIndex + 1}
+                >
+                  {renderSlotEffects
+                    ? renderSlotEffect(key, slotEffects.pick, {
+                        pending: activePendingSlotKeys.has(key),
+                        selected: selectedSlotKey === key,
+                        preview: previewSlotKey === key,
+                        selectedEffectKey,
+                        previewEffectKey
+                      })
+                    : null}
+                </DisplayPickSlot>
+              )
+            })}
+          </div>
+        )
+      })}
+      {banGroups.map((group, groupIndex) => {
+        const groupCount = banGroupCounts[groupIndex] ?? 0
+        if (groupCount <= 0) {
+          return null
+        }
+
+        const startIndex = banGroupCounts
+          .slice(0, groupIndex)
+          .reduce((sum, count) => sum + count, 0)
+
+        return (
+          <div
+            key={`ban-group-${groupIndex}`}
+            className={slotGroupClassName(
+              `display-bans ${groupIndex > 0 ? 'display-bans-second' : ''} display-bans-group-${groupIndex + 1}`,
+              group
+            )}
+            style={layoutStyle(group, {
               reverseHorizontal: side === 'star',
               scale: renderScale
             })}
           >
-            {renderSlotEffects
-              ? renderSlotEffect(slotKey(side, 'ban', index), slotEffects.ban, {
-                  pending: activePendingSlotKeys.has(slotKey(side, 'ban', index)),
-                  selected: selectedSlotKey === slotKey(side, 'ban', index),
-                  preview: previewSlotKey === slotKey(side, 'ban', index),
-                  selectedEffectKey,
-                  previewEffectKey
-                })
-              : null}
-          </DisplayBanSlot>
-        ))}
-      </div>
-      {secondBanCount > 0 ? (
-        <div
-          className={slotGroupClassName('display-bans display-bans-second', secondBanLayout)}
-          style={layoutStyle(secondBanLayout, {
-            reverseHorizontal: side === 'star',
-            scale: renderScale
-          })}
-        >
-          {Array.from({ length: secondBanCount }).map((_, index) => {
-            const banIndex = firstBanCount + index
+            {Array.from({ length: groupCount }).map((_, localIndex) => {
+              const banIndex = startIndex + localIndex
+              const key = slotKey(side, 'ban', banIndex)
 
-            return (
-              <DisplayBanSlot
-                key={`ban-second-${index}`}
-                target={team.bans[banIndex]}
-                index={banIndex + 1}
-                style={slotGapStyle(secondBanLayout, index, {
-                  reverseHorizontal: side === 'star',
-                  scale: renderScale
-                })}
-              >
-                {renderSlotEffects
-                  ? renderSlotEffect(slotKey(side, 'ban', banIndex), slotEffects.ban, {
-                      pending: activePendingSlotKeys.has(slotKey(side, 'ban', banIndex)),
-                      selected: selectedSlotKey === slotKey(side, 'ban', banIndex),
-                      preview: previewSlotKey === slotKey(side, 'ban', banIndex),
-                      selectedEffectKey,
-                      previewEffectKey
-                    })
-                  : null}
-              </DisplayBanSlot>
-            )
-          })}
-        </div>
-      ) : null}
+              return (
+                <DisplayBanSlot
+                  key={`ban-${banIndex}`}
+                  target={team.bans[banIndex]}
+                  index={banIndex + 1}
+                  style={slotGapStyle(group, localIndex, {
+                    reverseHorizontal: side === 'star',
+                    scale: renderScale
+                  })}
+                >
+                  {renderSlotEffects
+                    ? renderSlotEffect(key, slotEffects.ban, {
+                        pending: activePendingSlotKeys.has(key),
+                        selected: selectedSlotKey === key,
+                        preview: previewSlotKey === key,
+                        selectedEffectKey,
+                        previewEffectKey
+                      })
+                    : null}
+                </DisplayBanSlot>
+              )
+            })}
+          </div>
+        )
+      })}
     </section>
   )
 }

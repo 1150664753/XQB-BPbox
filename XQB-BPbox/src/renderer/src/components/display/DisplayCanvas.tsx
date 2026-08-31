@@ -4,6 +4,7 @@ import type { CSSProperties, SyntheticEvent } from 'react'
 import DisplayBackground from './DisplayBackground'
 import DisplayCenterStage from './DisplayCenterStage'
 import DisplayTeamPanel from './DisplayTeamPanel'
+import { configuredSlotGroups, resolveSlotGroup } from './slotGroups'
 import {
   coordinateScaleX,
   coordinateScaleY,
@@ -105,7 +106,6 @@ const defaultSlotEffects: DisplaySlotEffects = {
 
 type SlotEffectAction = 'pick' | 'ban'
 type SlotEffectKind = keyof DisplaySlotEffects
-type SlotLayoutGroup = 'pick' | 'pickSecond' | 'ban' | 'banSecond'
 type SlotEffectActionRecord = BpActionRecord & { action: SlotEffectAction }
 
 interface SlotEffectTarget {
@@ -954,20 +954,6 @@ interface ResolvedChantVideoSlot {
   activeResizeChange: DisplayPageChange | null
 }
 
-const fallbackSlotLayout: DisplaySlotLayout = {
-  x: 0,
-  y: 0,
-  width: 240,
-  height: 120,
-  gap: 16,
-  layer: 10,
-  direction: 'vertical',
-  frameImage: '',
-  frameImageUrl: null,
-  effectVideo: '',
-  effectVideoUrl: null
-}
-
 function numberOrFallback(value: unknown, fallback: number): number {
   const normalized = Number(value)
   return Number.isFinite(normalized) ? normalized : fallback
@@ -1165,40 +1151,6 @@ function parseSlotEffectKey(key: string | null): SlotEffectTarget | null {
   }
 }
 
-function slotLayout(
-  settings: DisplaySettings,
-  side: BpSide,
-  group: SlotLayoutGroup
-): DisplaySlotLayout {
-  const layouts = settings.slotLayouts
-
-  if (side === 'star') {
-    if (group === 'pick') {
-      return layouts?.starPick ?? fallbackSlotLayout
-    }
-
-    if (group === 'pickSecond') {
-      return layouts?.starPickSecond ?? fallbackSlotLayout
-    }
-
-    return group === 'banSecond'
-      ? (layouts?.starBanSecond ?? fallbackSlotLayout)
-      : (layouts?.starBan ?? fallbackSlotLayout)
-  }
-
-  if (group === 'pick') {
-    return layouts?.railPick ?? fallbackSlotLayout
-  }
-
-  if (group === 'pickSecond') {
-    return layouts?.railPickSecond ?? fallbackSlotLayout
-  }
-
-  return group === 'banSecond'
-    ? (layouts?.railBanSecond ?? fallbackSlotLayout)
-    : (layouts?.railBan ?? fallbackSlotLayout)
-}
-
 function tightPickLayout(layout: DisplaySlotLayout): DisplaySlotLayout {
   return {
     ...layout,
@@ -1269,50 +1221,20 @@ function effectSlotBox(
     target.index + 1
   )
 
-  if (target.action === 'pick') {
-    const secondCount = Math.min(
-      totalSlots,
-      Math.max(0, Math.floor(Number(settings.secondaryPickCounts?.[target.side]) || 0))
-    )
-    const firstCount = Math.max(0, totalSlots - secondCount)
-
-    if (target.index < firstCount) {
-      return slotBox(
-        tightPickLayout(slotLayout(settings, target.side, 'pick')),
-        target.index,
-        firstCount,
-        false
-      )
-    }
-
-    return slotBox(
-      tightPickLayout(slotLayout(settings, target.side, 'pickSecond')),
-      target.index - firstCount,
-      secondCount,
-      false
-    )
+  const groups = configuredSlotGroups(settings, target.side, target.action)
+  const resolvedGroup = resolveSlotGroup(totalSlots, target.index, groups)
+  if (!resolvedGroup) {
+    return null
   }
 
-  const secondCount = Math.min(
-    totalSlots,
-    Math.max(0, Math.floor(Number(settings.secondaryBanCounts?.[target.side]) || 0))
-  )
-  const firstCount = Math.max(0, totalSlots - secondCount)
-
-  if (target.index < firstCount) {
-    return slotBox(
-      slotLayout(settings, target.side, 'ban'),
-      target.index,
-      firstCount,
-      target.side === 'star'
-    )
-  }
+  const layout =
+    target.action === 'pick' ? tightPickLayout(resolvedGroup.group) : resolvedGroup.group
 
   return slotBox(
-    slotLayout(settings, target.side, 'banSecond'),
-    target.index - firstCount,
-    secondCount,
-    target.side === 'star'
+    layout,
+    resolvedGroup.localIndex,
+    resolvedGroup.groupCount,
+    target.action === 'ban' && target.side === 'star'
   )
 }
 

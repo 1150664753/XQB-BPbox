@@ -235,6 +235,7 @@ export interface DisplaySettings {
   backgroundLayers: DisplayBackgroundLayer[]
   pageChanges: DisplayPageChange[]
   slotLayouts: DisplaySlotLayouts
+  slotGroups?: DisplaySlotGroups
   secondaryPickCounts: DisplaySecondaryPickCounts
   secondaryBanCounts: DisplaySecondaryBanCounts
   chantVideoSlot: DisplayVideoSlotLayout
@@ -315,6 +316,19 @@ export interface DisplaySlotLayouts {
   railBan: DisplaySlotLayout
   railBanSecond: DisplaySlotLayout
 }
+
+export interface DisplaySlotGroup extends DisplaySlotLayout {
+  slotCount: number
+}
+
+export interface DisplaySlotGroups {
+  starPick: DisplaySlotGroup[]
+  starBan: DisplaySlotGroup[]
+  railPick: DisplaySlotGroup[]
+  railBan: DisplaySlotGroup[]
+}
+
+export type DisplaySlotGroupKey = keyof DisplaySlotGroups
 
 export interface DisplaySecondaryPickCounts {
   star: number

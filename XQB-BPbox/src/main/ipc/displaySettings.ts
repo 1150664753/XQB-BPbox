@@ -29,6 +29,9 @@ import type {
   DisplaySettingsListItem,
   DisplaySlotEffectConfig,
   DisplaySlotEffects,
+  DisplaySlotGroup,
+  DisplaySlotGroupKey,
+  DisplaySlotGroups,
   DisplaySlotLayout,
   DisplaySlotLayouts,
   DisplayVideoSlotLayout,
@@ -47,12 +50,17 @@ type MigratedSlotEffects = {
   [Key in keyof DisplaySlotEffects]?: Partial<DisplaySlotEffectConfig>
 }
 
+type MigratedSlotGroups = {
+  [Key in DisplaySlotGroupKey]?: Array<Partial<DisplaySlotGroup>>
+}
+
 type MigratedDisplaySettings = Omit<
   Partial<DisplaySettings>,
-  'chantVideoSlot' | 'slotEffects' | 'slotLayouts'
+  'chantVideoSlot' | 'slotEffects' | 'slotGroups' | 'slotLayouts'
 > & {
   chantVideoSlot?: Partial<DisplayVideoSlotLayout>
   slotEffects?: MigratedSlotEffects
+  slotGroups?: MigratedSlotGroups
   slotLayouts?: MigratedSlotLayouts
 }
 
@@ -163,6 +171,25 @@ const defaultSlotLayouts: DisplaySlotLayouts = {
   }
 }
 
+const defaultSlotGroups: DisplaySlotGroups = {
+  starPick: [
+    { ...defaultSlotLayouts.starPick, slotCount: 0 },
+    { ...defaultSlotLayouts.starPickSecond, slotCount: 0 }
+  ],
+  starBan: [
+    { ...defaultSlotLayouts.starBan, slotCount: 0 },
+    { ...defaultSlotLayouts.starBanSecond, slotCount: 0 }
+  ],
+  railPick: [
+    { ...defaultSlotLayouts.railPick, slotCount: 0 },
+    { ...defaultSlotLayouts.railPickSecond, slotCount: 0 }
+  ],
+  railBan: [
+    { ...defaultSlotLayouts.railBan, slotCount: 0 },
+    { ...defaultSlotLayouts.railBanSecond, slotCount: 0 }
+  ]
+}
+
 const defaultChantVideoSlot: DisplayVideoSlotLayout = {
   x: 645,
   y: 255,
@@ -231,6 +258,7 @@ const defaultDisplaySettings: DisplaySettings = {
   backgroundLayers: [],
   pageChanges: [],
   slotLayouts: defaultSlotLayouts,
+  slotGroups: defaultSlotGroups,
   secondaryPickCounts: {
     star: 0,
     rail: 0
@@ -392,16 +420,23 @@ function normalizeSlotEffects(
 function normalizeSlotLayout(
   key: keyof DisplaySlotLayouts,
   value: Partial<DisplaySlotLayout> | undefined,
-  copyExternalFile: boolean
+  copyExternalFile: boolean,
+  assetOwnerKey: string = key
 ): DisplaySlotLayout {
   const defaults = defaultSlotLayouts[key]
   const frameImage =
     copyExternalFile && isExternalFilePath(value?.frameImage)
-      ? (prepareAssetValue(value?.frameImage, 'display', key, `${key}-frame`) ?? '')
+      ? (prepareAssetValue(value?.frameImage, 'display', assetOwnerKey, `${assetOwnerKey}-frame`) ??
+        '')
       : (value?.frameImage ?? defaults.frameImage)
   const effectVideo =
     copyExternalFile && isExternalFilePath(value?.effectVideo)
-      ? (prepareAssetValue(value?.effectVideo, 'display', key, `${key}-effect`) ?? '')
+      ? (prepareAssetValue(
+          value?.effectVideo,
+          'display',
+          assetOwnerKey,
+          `${assetOwnerKey}-effect`
+        ) ?? '')
       : (value?.effectVideo ?? defaults.effectVideo)
 
   return {
@@ -422,53 +457,134 @@ function normalizeSlotLayout(
   }
 }
 
-function normalizeSlotLayouts(
-  slotLayouts: Partial<DisplaySlotLayouts> | undefined,
+const maxSlotGroupCount = 8
+const slotGroupLegacyLayoutKeys: Record<
+  DisplaySlotGroupKey,
+  [keyof DisplaySlotLayouts, keyof DisplaySlotLayouts]
+> = {
+  starPick: ['starPick', 'starPickSecond'],
+  starBan: ['starBan', 'starBanSecond'],
+  railPick: ['railPick', 'railPickSecond'],
+  railBan: ['railBan', 'railBanSecond']
+}
+
+function legacySecondarySlotCount(
+  key: DisplaySlotGroupKey,
+  pickCounts: Partial<DisplaySecondaryPickCounts> | undefined,
+  banCounts: Partial<DisplaySecondaryBanCounts> | undefined
+): number {
+  switch (key) {
+    case 'starPick':
+      return Math.max(0, Math.floor(numberOrFallback(pickCounts?.star, 0)))
+    case 'railPick':
+      return Math.max(0, Math.floor(numberOrFallback(pickCounts?.rail, 0)))
+    case 'starBan':
+      return Math.max(0, Math.floor(numberOrFallback(banCounts?.star, 0)))
+    case 'railBan':
+      return Math.max(0, Math.floor(numberOrFallback(banCounts?.rail, 0)))
+  }
+}
+
+function normalizeSlotGroupSet(
+  key: DisplaySlotGroupKey,
+  values: Array<Partial<DisplaySlotGroup>> | undefined,
+  legacyLayouts: Partial<DisplaySlotLayouts> | undefined,
+  pickCounts: Partial<DisplaySecondaryPickCounts> | undefined,
+  banCounts: Partial<DisplaySecondaryBanCounts> | undefined,
   copyExternalFile: boolean
-): DisplaySlotLayouts {
+): DisplaySlotGroup[] {
+  const [firstLegacyKey, secondLegacyKey] = slotGroupLegacyLayoutKeys[key]
+  const legacyGroups: Array<Partial<DisplaySlotGroup>> = [
+    { ...(legacyLayouts?.[firstLegacyKey] ?? defaultSlotLayouts[firstLegacyKey]), slotCount: 0 },
+    {
+      ...(legacyLayouts?.[secondLegacyKey] ?? defaultSlotLayouts[secondLegacyKey]),
+      slotCount: legacySecondarySlotCount(key, pickCounts, banCounts)
+    }
+  ]
+  const source = Array.isArray(values) && values.length > 0 ? values : legacyGroups
+
+  return source.slice(0, maxSlotGroupCount).map((value, index) => {
+    const fallbackGroup = defaultSlotGroups[key][Math.min(index, defaultSlotGroups[key].length - 1)]
+    const layoutKey = index === 0 ? firstLegacyKey : secondLegacyKey
+    const layout = normalizeSlotLayout(
+      layoutKey,
+      { ...fallbackGroup, ...value },
+      copyExternalFile,
+      `${key}-group-${index + 1}`
+    )
+
+    return {
+      ...layout,
+      slotCount: Math.max(0, Math.floor(numberOrFallback(value.slotCount, 0)))
+    }
+  })
+}
+
+function normalizeSlotGroups(
+  slotGroups: MigratedSlotGroups | undefined,
+  legacyLayouts: Partial<DisplaySlotLayouts> | undefined,
+  pickCounts: Partial<DisplaySecondaryPickCounts> | undefined,
+  banCounts: Partial<DisplaySecondaryBanCounts> | undefined,
+  copyExternalFile: boolean
+): DisplaySlotGroups {
   return {
-    starPick: normalizeSlotLayout('starPick', slotLayouts?.starPick, copyExternalFile),
-    starPickSecond: normalizeSlotLayout(
-      'starPickSecond',
-      slotLayouts?.starPickSecond,
+    starPick: normalizeSlotGroupSet(
+      'starPick',
+      slotGroups?.starPick,
+      legacyLayouts,
+      pickCounts,
+      banCounts,
       copyExternalFile
     ),
-    starBan: normalizeSlotLayout('starBan', slotLayouts?.starBan, copyExternalFile),
-    starBanSecond: normalizeSlotLayout(
-      'starBanSecond',
-      slotLayouts?.starBanSecond,
+    starBan: normalizeSlotGroupSet(
+      'starBan',
+      slotGroups?.starBan,
+      legacyLayouts,
+      pickCounts,
+      banCounts,
       copyExternalFile
     ),
-    railPick: normalizeSlotLayout('railPick', slotLayouts?.railPick, copyExternalFile),
-    railPickSecond: normalizeSlotLayout(
-      'railPickSecond',
-      slotLayouts?.railPickSecond,
+    railPick: normalizeSlotGroupSet(
+      'railPick',
+      slotGroups?.railPick,
+      legacyLayouts,
+      pickCounts,
+      banCounts,
       copyExternalFile
     ),
-    railBan: normalizeSlotLayout('railBan', slotLayouts?.railBan, copyExternalFile),
-    railBanSecond: normalizeSlotLayout(
-      'railBanSecond',
-      slotLayouts?.railBanSecond,
+    railBan: normalizeSlotGroupSet(
+      'railBan',
+      slotGroups?.railBan,
+      legacyLayouts,
+      pickCounts,
+      banCounts,
       copyExternalFile
     )
   }
 }
 
-function normalizeSecondaryPickCounts(
-  counts: Partial<DisplaySecondaryPickCounts> | undefined
-): DisplaySecondaryPickCounts {
-  return {
-    star: Math.max(0, Math.floor(numberOrFallback(counts?.star, 0))),
-    rail: Math.max(0, Math.floor(numberOrFallback(counts?.rail, 0)))
-  }
+function groupLayoutOrFallback(
+  groups: DisplaySlotGroups,
+  key: DisplaySlotGroupKey,
+  index: number,
+  fallbackKey: keyof DisplaySlotLayouts
+): DisplaySlotLayout {
+  const source = groups[key][index] ?? defaultSlotLayouts[fallbackKey]
+  const layout: DisplaySlotLayout & { slotCount?: number } = { ...source }
+  delete layout.slotCount
+  return layout
 }
 
-function normalizeSecondaryBanCounts(
-  counts: Partial<DisplaySecondaryBanCounts> | undefined
-): DisplaySecondaryBanCounts {
+function legacySlotLayoutsFromGroups(groups: DisplaySlotGroups): DisplaySlotLayouts {
   return {
-    star: Math.max(0, Math.floor(numberOrFallback(counts?.star, 0))),
-    rail: Math.max(0, Math.floor(numberOrFallback(counts?.rail, 0)))
+    starPick: groupLayoutOrFallback(groups, 'starPick', 0, 'starPick'),
+    starPickSecond: groupLayoutOrFallback(groups, 'starPick', 1, 'starPickSecond'),
+    starBan: groupLayoutOrFallback(groups, 'starBan', 0, 'starBan'),
+    starBanSecond: groupLayoutOrFallback(groups, 'starBan', 1, 'starBanSecond'),
+    railPick: groupLayoutOrFallback(groups, 'railPick', 0, 'railPick'),
+    railPickSecond: groupLayoutOrFallback(groups, 'railPick', 1, 'railPickSecond'),
+    railBan: groupLayoutOrFallback(groups, 'railBan', 0, 'railBan'),
+    railBanSecond: groupLayoutOrFallback(groups, 'railBan', 1, 'railBanSecond')
   }
 }
 
@@ -601,6 +717,13 @@ function withDisplayAsset(settings: DisplaySettings, copyExternalFile: boolean):
       : settings.backgroundImage
   const backgroundLayers = normalizeBackgroundLayers(settings, backgroundImage, copyExternalFile)
   const firstLayer = backgroundLayers[0]
+  const slotGroups = normalizeSlotGroups(
+    settings.slotGroups,
+    settings.slotLayouts,
+    settings.secondaryPickCounts,
+    settings.secondaryBanCounts,
+    copyExternalFile
+  )
 
   return {
     stageWidth: currentStageWidth,
@@ -618,9 +741,16 @@ function withDisplayAsset(settings: DisplaySettings, copyExternalFile: boolean):
     characterEffectVolume: normalizeDisplayAudioVolumePercent(settings.characterEffectVolume),
     backgroundLayers,
     pageChanges: normalizePageChanges(settings.pageChanges),
-    slotLayouts: normalizeSlotLayouts(settings.slotLayouts, copyExternalFile),
-    secondaryPickCounts: normalizeSecondaryPickCounts(settings.secondaryPickCounts),
-    secondaryBanCounts: normalizeSecondaryBanCounts(settings.secondaryBanCounts),
+    slotLayouts: legacySlotLayoutsFromGroups(slotGroups),
+    slotGroups,
+    secondaryPickCounts: {
+      star: slotGroups.starPick[1]?.slotCount ?? 0,
+      rail: slotGroups.railPick[1]?.slotCount ?? 0
+    },
+    secondaryBanCounts: {
+      star: slotGroups.starBan[1]?.slotCount ?? 0,
+      rail: slotGroups.railBan[1]?.slotCount ?? 0
+    },
     chantVideoSlot: normalizeVideoSlotLayout(settings.chantVideoSlot),
     slotEffects: normalizeSlotEffects(settings.slotEffects, copyExternalFile)
   }
@@ -636,7 +766,11 @@ function readSettings(fileName?: string): DisplaySettings {
 
   const parsed = JSON.parse(readFileSync(filePath, 'utf-8')) as MigratedDisplaySettings
   const migrated = migrateLegacyStageSettings(parsed)
-  return withDisplayAsset({ ...defaultDisplaySettings, ...migrated } as DisplaySettings, false)
+  const merged = { ...defaultDisplaySettings, ...migrated } as DisplaySettings
+  if (!migrated.slotGroups) {
+    delete merged.slotGroups
+  }
+  return withDisplayAsset(merged, false)
 }
 
 function writeSettings(settings: DisplaySettings, fileName?: string): DisplaySettings {
@@ -666,6 +800,12 @@ function writeSettings(settings: DisplaySettings, fileName?: string): DisplaySet
       railPickSecond: stripSlotLayoutUrls(normalized.slotLayouts.railPickSecond),
       railBan: stripSlotLayoutUrls(normalized.slotLayouts.railBan),
       railBanSecond: stripSlotLayoutUrls(normalized.slotLayouts.railBanSecond)
+    },
+    slotGroups: {
+      starPick: (normalized.slotGroups ?? defaultSlotGroups).starPick.map(stripSlotGroupUrls),
+      starBan: (normalized.slotGroups ?? defaultSlotGroups).starBan.map(stripSlotGroupUrls),
+      railPick: (normalized.slotGroups ?? defaultSlotGroups).railPick.map(stripSlotGroupUrls),
+      railBan: (normalized.slotGroups ?? defaultSlotGroups).railBan.map(stripSlotGroupUrls)
     },
     secondaryPickCounts: normalized.secondaryPickCounts,
     secondaryBanCounts: normalized.secondaryBanCounts,
@@ -796,6 +936,15 @@ function stripSlotLayoutUrls(
     direction: layout.direction,
     frameImage: layout.frameImage,
     effectVideo: layout.effectVideo
+  }
+}
+
+function stripSlotGroupUrls(
+  group: DisplaySlotGroup
+): Omit<DisplaySlotGroup, 'frameImageUrl' | 'effectVideoUrl'> {
+  return {
+    ...stripSlotLayoutUrls(group),
+    slotCount: group.slotCount
   }
 }
 

@@ -21,6 +21,9 @@ import type {
   DisplaySlotEffectLayout,
   DisplaySlotLayout,
   DisplaySlotLayouts,
+  DisplaySlotGroup,
+  DisplaySlotGroupKey,
+  DisplaySlotGroups,
   DisplayVideoSlotLayout,
   FlowConfig,
   FlowListItem,
@@ -42,6 +45,7 @@ import type {
 } from '../types/character'
 import type { LightCone, LightConePayload, LightConeRarity } from '../types/lightCone'
 import DisplayCanvas from '../components/display/DisplayCanvas'
+import { resolvedSlotGroupCounts } from '../components/display/slotGroups'
 import UpdateStatusBar from '../components/UpdateStatusBar'
 import VoiceTimelinePanel from './VoiceTimelinePanel'
 import {
@@ -64,7 +68,6 @@ type ConsoleView =
   | 'voiceTimeline'
 type DisplaySettingsSection = 'base' | 'changes' | 'effects'
 type MessageType = 'info' | 'success' | 'error'
-type SlotLayoutKey = keyof DisplaySlotLayouts
 type SlotLayoutNumberKey = 'x' | 'y' | 'width' | 'height' | 'gap' | 'layer'
 type SlotEffectKey = keyof DisplaySlotEffects
 type SlotEffectVideoField = 'pendingVideo' | 'selectedVideo'
@@ -72,8 +75,6 @@ type SlotEffectLayoutNumberKey = keyof DisplaySlotEffectLayout
 type VideoSlotNumberKey = 'x' | 'y' | 'width' | 'height' | 'layer'
 type PageChangeNumberKey = 'startX' | 'startY' | 'speed'
 type VideoChangeNumberKey = 'videoX' | 'videoY' | 'videoWidth' | 'videoHeight' | 'speed'
-type SecondaryPickCountKey = 'star' | 'rail'
-type SecondaryBanCountKey = 'star' | 'rail'
 
 function fileChangeIncludes(
   event: ProjectFileChangeEvent,
@@ -229,6 +230,25 @@ const defaultSlotLayouts: DisplaySlotLayouts = {
   }
 }
 
+const defaultSlotGroups: DisplaySlotGroups = {
+  starPick: [
+    { ...defaultSlotLayouts.starPick, slotCount: 0 },
+    { ...defaultSlotLayouts.starPickSecond, slotCount: 0 }
+  ],
+  starBan: [
+    { ...defaultSlotLayouts.starBan, slotCount: 0 },
+    { ...defaultSlotLayouts.starBanSecond, slotCount: 0 }
+  ],
+  railPick: [
+    { ...defaultSlotLayouts.railPick, slotCount: 0 },
+    { ...defaultSlotLayouts.railPickSecond, slotCount: 0 }
+  ],
+  railBan: [
+    { ...defaultSlotLayouts.railBan, slotCount: 0 },
+    { ...defaultSlotLayouts.railBanSecond, slotCount: 0 }
+  ]
+}
+
 const defaultChantVideoSlot: DisplayVideoSlotLayout = {
   x: 645,
   y: 255,
@@ -281,15 +301,12 @@ const defaultSlotEffects: DisplaySlotEffects = {
   }
 }
 
-const slotLayoutLabels: Array<{ key: SlotLayoutKey; label: string }> = [
-  { key: 'starPick', label: '左侧 Pick 槽1' },
-  { key: 'starPickSecond', label: '左侧 Pick 槽2' },
-  { key: 'starBan', label: '左侧 Ban 槽' },
-  { key: 'starBanSecond', label: '左侧 Ban 槽2' },
-  { key: 'railPick', label: '右侧 Pick 槽1' },
-  { key: 'railPickSecond', label: '右侧 Pick 槽2' },
-  { key: 'railBan', label: '右侧 Ban 槽' },
-  { key: 'railBanSecond', label: '右侧 Ban 槽 2' }
+const maxSlotGroupCount = 8
+const slotGroupSections: Array<{ key: DisplaySlotGroupKey; label: string }> = [
+  { key: 'starPick', label: '左侧 Pick' },
+  { key: 'starBan', label: '左侧 Ban' },
+  { key: 'railPick', label: '右侧 Pick' },
+  { key: 'railBan', label: '右侧 Ban' }
 ]
 
 function uniqueTextValues(values: Array<string | null | undefined>): string[] {
@@ -481,6 +498,7 @@ const emptyDisplaySettings: DisplaySettings = {
   backgroundLayers: [],
   pageChanges: [],
   slotLayouts: defaultSlotLayouts,
+  slotGroups: defaultSlotGroups,
   secondaryPickCounts: {
     star: 0,
     rail: 0
@@ -1475,6 +1493,7 @@ function CharacterNumberManager({
   const [loadingTable, setLoadingTable] = useState(false)
   const [saving, setSaving] = useState(false)
   const [importing, setImporting] = useState(false)
+  const activeTableOperationRef = useRef(0)
   const busy = loadingTable || saving || importing
 
   const applyResourceTable = useCallback(
@@ -1493,6 +1512,7 @@ function CharacterNumberManager({
 
   const loadResourceTable = useCallback(
     async (scanAssets = false, notifyScan = true): Promise<void> => {
+      activeTableOperationRef.current += 1
       setLoadingTable(true)
 
       try {
@@ -1508,6 +1528,7 @@ function CharacterNumberManager({
         onMessage('error', error instanceof Error ? error.message : String(error))
         setRows([createCharacterNumberImportRow()])
       } finally {
+        activeTableOperationRef.current = Math.max(0, activeTableOperationRef.current - 1)
         setLoadingTable(false)
       }
     },
@@ -1527,6 +1548,10 @@ function CharacterNumberManager({
     }
 
     return window.bpAPI.files.onChanged((event) => {
+      if (activeTableOperationRef.current > 0) {
+        return
+      }
+
       if (fileChangeIncludes(event, 'assets')) {
         void loadResourceTable(true, false)
         return
@@ -1554,6 +1579,7 @@ function CharacterNumberManager({
     candidateRows: CharacterNumberImportRow[] = rows,
     notify = true
   ): Promise<CharacterNumberImportRow[]> => {
+    activeTableOperationRef.current += 1
     setSaving(true)
 
     try {
@@ -1573,6 +1599,7 @@ function CharacterNumberManager({
       onMessage('error', error instanceof Error ? error.message : String(error))
       throw error
     } finally {
+      activeTableOperationRef.current = Math.max(0, activeTableOperationRef.current - 1)
       setSaving(false)
     }
   }
@@ -1609,6 +1636,7 @@ function CharacterNumberManager({
   }
 
   const importRows = async (targetRows: CharacterNumberImportRow[]): Promise<void> => {
+    activeTableOperationRef.current += 1
     setImporting(true)
 
     try {
@@ -1708,6 +1736,7 @@ function CharacterNumberManager({
     } catch (error) {
       onMessage('error', error instanceof Error ? error.message : String(error))
     } finally {
+      activeTableOperationRef.current = Math.max(0, activeTableOperationRef.current - 1)
       setImporting(false)
     }
   }
@@ -1764,12 +1793,12 @@ function CharacterNumberManager({
               </tr>
             </thead>
             <tbody>
-              {loadingTable ? (
+              {loadingTable && rows.length === 0 ? (
                 <tr>
                   <td colSpan={11}>正在加载批量管理表</td>
                 </tr>
               ) : null}
-              {!loadingTable &&
+              {rows.length > 0 &&
                 rows.map((row) => {
                   const normalizedCode = formatCharacterCode(row.code)
                   const missingCount = countRowMissingResources(row)
@@ -2663,6 +2692,7 @@ function FlowConfigPanel({
   const normalizedDefaultFlow = normalizeFlowConfig(defaultFlow)
   const [flowName, setFlowName] = useState(normalizedDefaultFlow.name)
   const [steps, setSteps] = useState<FlowStep[]>(normalizedDefaultFlow.steps)
+  const flowLoadSequenceRef = useRef(0)
 
   const currentFlow = useMemo(
     () =>
@@ -2675,6 +2705,7 @@ function FlowConfigPanel({
 
   const applyFlow = useCallback(
     (flow: FlowConfig): void => {
+      flowLoadSequenceRef.current += 1
       const normalizedFlow = normalizeFlowConfig(flow)
       setFlowName(normalizedFlow.name)
       setSteps(normalizedFlow.steps)
@@ -2684,6 +2715,7 @@ function FlowConfigPanel({
   )
 
   const updateFlowName = (name: string): void => {
+    flowLoadSequenceRef.current += 1
     setFlowName(name)
     onFlowLoaded(
       normalizeFlowConfig({
@@ -2694,12 +2726,16 @@ function FlowConfigPanel({
   }
 
   const updateSteps = (nextSteps: FlowStep[]): void => {
-    const normalizedSteps = normalizeFlowSteps(nextSteps)
-    setSteps(normalizedSteps)
+    flowLoadSequenceRef.current += 1
+    const editableSteps = nextSteps.map((step, index) => ({
+      ...step,
+      index: index + 1
+    }))
+    setSteps(editableSteps)
     onFlowLoaded(
       normalizeFlowConfig({
         name: flowName,
-        steps: normalizedSteps
+        steps: editableSteps
       })
     )
   }
@@ -2805,8 +2841,10 @@ function FlowConfigPanel({
         return
       }
 
+      const loadSequence = flowLoadSequenceRef.current + 1
+      flowLoadSequenceRef.current = loadSequence
       const flow = await window.bpAPI.flows.load(fileName)
-      if (flow) {
+      if (flow && loadSequence === flowLoadSequenceRef.current) {
         applyFlow(flow)
         onMessage('success', `已读取流程：${flow.name}`)
       }
@@ -2844,12 +2882,8 @@ function FlowConfigPanel({
         onFlowListRefresh(selectedFlowFile).catch((error: unknown) =>
           onMessage('error', error instanceof Error ? error.message : String(error))
         )
-
-        if (selectedFlowFile) {
-          loadFlowFile(selectedFlowFile).catch(() => onSelectedFlowFileChange(''))
-        }
       }),
-    [loadFlowFile, onFlowListRefresh, onMessage, onSelectedFlowFileChange, selectedFlowFile]
+    [onFlowListRefresh, onMessage, selectedFlowFile]
   )
 
   const importFlow = async (): Promise<void> => {
@@ -2991,18 +3025,7 @@ function FlowConfigPanel({
                 <input
                   list="flow-event-names"
                   value={step.eventName ?? legacyStepEventName(step) ?? ''}
-                  onChange={(event) =>
-                    updateSteps(
-                      steps.map((item, stepIndex) =>
-                        stepIndex === index
-                          ? {
-                              ...item,
-                              eventName: event.target.value.trim() || null
-                            }
-                          : item
-                      )
-                    )
-                  }
+                  onChange={(event) => updateStep(index, 'eventName', event.target.value)}
                 />
                 <div className="flow-row-actions">
                   <button type="button" onClick={() => moveStep(index, -1)} disabled={index === 0}>
@@ -3041,8 +3064,10 @@ function FlowConfigPanel({
 
 function SlotLayoutEditor({
   label,
+  groupNumber,
   layout,
   slotCount,
+  slotCountIsAuto,
   gapCount,
   onNumberChange,
   onGapChange,
@@ -3051,8 +3076,10 @@ function SlotLayoutEditor({
   onChooseFrame
 }: {
   label: string
+  groupNumber: number
   layout: DisplaySlotLayout
   slotCount?: number
+  slotCountIsAuto?: boolean
   gapCount?: number
   onNumberChange: (key: SlotLayoutNumberKey, value: number) => void
   onGapChange?: (index: number, value: number) => void
@@ -3063,8 +3090,12 @@ function SlotLayoutEditor({
   return (
     <section className="slot-layout-editor">
       <header>
-        <strong>{label}</strong>
+        <div className="slot-layout-heading">
+          <span>{String(groupNumber).padStart(2, '0')}</span>
+          <strong>{label}</strong>
+        </div>
         <select
+          aria-label={`${label}排列方向`}
           value={layout.direction}
           onChange={(event) =>
             onDirectionChange(event.target.value as DisplaySlotLayout['direction'])
@@ -3076,6 +3107,20 @@ function SlotLayoutEditor({
       </header>
 
       <div className="slot-layout-numbers">
+        {onSlotCountChange ? (
+          <label className="slot-count-field">
+            <span>
+              数量
+              {slotCountIsAuto ? <em>自动</em> : null}
+            </span>
+            <input
+              type="number"
+              min="0"
+              value={slotCount ?? 0}
+              onChange={(event) => onSlotCountChange(Math.max(0, Number(event.target.value) || 0))}
+            />
+          </label>
+        ) : null}
         {[
           ['x', 'X'],
           ['y', 'Y'],
@@ -3095,17 +3140,6 @@ function SlotLayoutEditor({
             />
           </label>
         ))}
-        {onSlotCountChange ? (
-          <label>
-            数量
-            <input
-              type="number"
-              min="0"
-              value={slotCount ?? 0}
-              onChange={(event) => onSlotCountChange(Math.max(0, Number(event.target.value) || 0))}
-            />
-          </label>
-        ) : null}
       </div>
 
       {gapCount && gapCount > 0 && onGapChange ? (
@@ -3188,8 +3222,11 @@ function SlotEffectEditor({
         const soundLabel = '确选音效'
 
         return (
-          <section className="slot-effect-card" key={key}>
-            <h3>{title}</h3>
+          <section className={`slot-effect-card slot-effect-${key}`} key={key}>
+            <header className="slot-effect-card-header">
+              <span>{key.toUpperCase()}</span>
+              <h3>{title}</h3>
+            </header>
             <div className="slot-effect-fields">
               {!pairedEffect ? (
                 <div className="event-delay-field">
@@ -3375,7 +3412,13 @@ function VideoSlotEditor({
   return (
     <section className="slot-layout-editor chant-video-slot-editor">
       <header>
-        <strong>唱名视频槽</strong>
+        <div className="chant-video-slot-heading">
+          <span>VIDEO</span>
+          <div>
+            <strong>唱名视频槽</strong>
+            <small>设置视频默认显示区域及图层</small>
+          </div>
+        </div>
         <div className="chant-video-actions">
           <button type="button" onClick={onAddChange}>
             添加变化
@@ -3413,8 +3456,12 @@ function VideoSlotEditor({
       </div>
       {changes.length > 0 ? (
         <div className="chant-video-change-list">
-          {changes.map((change) => (
+          {changes.map((change, index) => (
             <div className="chant-video-change-row" key={change.id}>
+              <div className="chant-video-change-heading">
+                <span>{String(index + 1).padStart(2, '0')}</span>
+                <strong>{change.name || `唱名视频变化 ${index + 1}`}</strong>
+              </div>
               <label>
                 变化名称
                 <input
@@ -3534,7 +3581,13 @@ function PageChangeCard({
   return (
     <section className="page-change-card">
       <header>
-        <strong>{pageChange.name || '未命名变化'}</strong>
+        <div className="page-change-heading">
+          <span>{String(pageChange.index).padStart(2, '0')}</span>
+          <div>
+            <strong>{pageChange.name || '未命名变化'}</strong>
+            <small>{pageChange.triggerEvent || pageChange.triggerName || '未设置响应事件'}</small>
+          </div>
+        </div>
         <button type="button" className="danger" onClick={onRemove}>
           删除
         </button>
@@ -3735,6 +3788,7 @@ function mergeLiveDisplaySettings(
 
   return {
     ...liveSettings,
+    slotGroups: liveSettings.slotGroups ?? localSettings.slotGroups,
     pageChanges: localSettings.pageChanges.map((pageChange, index) =>
       normalizeLocalPageChange(
         {
@@ -3762,8 +3816,8 @@ function DisplayVolumeControl({
 
   return (
     <label className="display-volume-control">
-      <span>
-        {label}
+      <span className="display-volume-control-header">
+        <span className="display-volume-label">{label}</span>
         <strong>{volume}%</strong>
       </span>
       <input
@@ -3801,9 +3855,15 @@ function DisplaySettingsPanel({
   const [displayTriggerFlow, setDisplayTriggerFlow] = useState<FlowConfig>(() =>
     normalizeFlowConfig(currentFlow)
   )
+  const liveUpdateSequenceRef = useRef(0)
 
   const loadSelectedSettings = useCallback(async (): Promise<void> => {
+    const loadSequence = liveUpdateSequenceRef.current + 1
+    liveUpdateSequenceRef.current = loadSequence
     const nextSettings = await window.bpAPI.displaySettings.get(selectedSettingsFile || undefined)
+    if (loadSequence !== liveUpdateSequenceRef.current) {
+      return
+    }
     setSettings(nextSettings)
 
     if (nextSettings.triggerFlowFile) {
@@ -3823,6 +3883,9 @@ function DisplaySettingsPanel({
 
     if (selectedSettingsFile) {
       const liveSettings = await window.bpAPI.displaySettings.updateLive(nextSettings)
+      if (loadSequence !== liveUpdateSequenceRef.current) {
+        return
+      }
       setSettings(mergeLiveDisplaySettings(nextSettings, liveSettings))
     }
   }, [currentFlow, onMessage, selectedSettingsFile])
@@ -3892,8 +3955,13 @@ function DisplaySettingsPanel({
   }
 
   const updateLive = async (nextSettings: DisplaySettings): Promise<void> => {
+    const updateSequence = liveUpdateSequenceRef.current + 1
+    liveUpdateSequenceRef.current = updateSequence
     setSettings(nextSettings)
     const liveSettings = await window.bpAPI.displaySettings.updateLive(nextSettings)
+    if (updateSequence !== liveUpdateSequenceRef.current) {
+      return
+    }
     setSettings(mergeLiveDisplaySettings(nextSettings, liveSettings))
   }
 
@@ -4180,49 +4248,115 @@ function DisplaySettingsPanel({
     removePageChange(id)
   }
 
-  const updateSlotLayout = (key: SlotLayoutKey, patch: Partial<DisplaySlotLayout>): void => {
+  const slotGroups = settings.slotGroups ?? defaultSlotGroups
+
+  const applySlotGroups = (nextSlotGroups: DisplaySlotGroups): void => {
+    const slotLayoutFromGroup = (group: DisplaySlotGroup): DisplaySlotLayout => {
+      const layout: DisplaySlotLayout & { slotCount?: number } = { ...group }
+      delete layout.slotCount
+      return layout
+    }
+    const legacyGroup = (
+      key: DisplaySlotGroupKey,
+      index: number,
+      fallback: DisplaySlotGroup
+    ): DisplaySlotGroup => nextSlotGroups[key][index] ?? fallback
     const nextSettings: DisplaySettings = {
       ...settings,
+      slotGroups: nextSlotGroups,
       slotLayouts: {
-        ...settings.slotLayouts,
-        [key]: {
-          ...settings.slotLayouts[key],
-          ...patch
-        }
-      }
-    }
-
-    updateLive(nextSettings).catch((error: unknown) => onMessage('error', String(error)))
-  }
-
-  const updateSlotGap = (key: SlotLayoutKey, gapIndex: number, value: number): void => {
-    const gaps = [...(settings.slotLayouts[key].gaps ?? [])]
-    gaps[gapIndex] = Math.max(0, Number(value) || 0)
-    updateSlotLayout(key, { gaps })
-  }
-
-  const updateSecondaryPickCount = (key: SecondaryPickCountKey, value: number): void => {
-    const nextSettings: DisplaySettings = {
-      ...settings,
+        starPick: slotLayoutFromGroup(legacyGroup('starPick', 0, defaultSlotGroups.starPick[0])),
+        starPickSecond: slotLayoutFromGroup(
+          legacyGroup('starPick', 1, defaultSlotGroups.starPick[1])
+        ),
+        starBan: slotLayoutFromGroup(legacyGroup('starBan', 0, defaultSlotGroups.starBan[0])),
+        starBanSecond: slotLayoutFromGroup(legacyGroup('starBan', 1, defaultSlotGroups.starBan[1])),
+        railPick: slotLayoutFromGroup(legacyGroup('railPick', 0, defaultSlotGroups.railPick[0])),
+        railPickSecond: slotLayoutFromGroup(
+          legacyGroup('railPick', 1, defaultSlotGroups.railPick[1])
+        ),
+        railBan: slotLayoutFromGroup(legacyGroup('railBan', 0, defaultSlotGroups.railBan[0])),
+        railBanSecond: slotLayoutFromGroup(legacyGroup('railBan', 1, defaultSlotGroups.railBan[1]))
+      },
       secondaryPickCounts: {
-        ...(settings.secondaryPickCounts ?? { star: 0, rail: 0 }),
-        [key]: Math.max(0, Math.floor(value))
+        star: nextSlotGroups.starPick[1]?.slotCount ?? 0,
+        rail: nextSlotGroups.railPick[1]?.slotCount ?? 0
+      },
+      secondaryBanCounts: {
+        star: nextSlotGroups.starBan[1]?.slotCount ?? 0,
+        rail: nextSlotGroups.railBan[1]?.slotCount ?? 0
       }
     }
 
     updateLive(nextSettings).catch((error: unknown) => onMessage('error', String(error)))
   }
 
-  const updateSecondaryBanCount = (key: SecondaryBanCountKey, value: number): void => {
-    const nextSettings: DisplaySettings = {
-      ...settings,
-      secondaryBanCounts: {
-        ...(settings.secondaryBanCounts ?? { star: 0, rail: 0 }),
-        [key]: Math.max(0, Math.floor(value))
-      }
+  const updateSlotGroupLayout = (
+    key: DisplaySlotGroupKey,
+    groupIndex: number,
+    patch: Partial<DisplaySlotGroup>
+  ): void => {
+    applySlotGroups({
+      ...slotGroups,
+      [key]: slotGroups[key].map((group, index) =>
+        index === groupIndex ? { ...group, ...patch } : group
+      )
+    })
+  }
+
+  const updateSlotGroupGap = (
+    key: DisplaySlotGroupKey,
+    groupIndex: number,
+    gapIndex: number,
+    value: number
+  ): void => {
+    const group = slotGroups[key][groupIndex]
+    if (!group) {
+      return
     }
 
-    updateLive(nextSettings).catch((error: unknown) => onMessage('error', String(error)))
+    const gaps = [...(group.gaps ?? [])]
+    gaps[gapIndex] = Math.max(0, Number(value) || 0)
+    updateSlotGroupLayout(key, groupIndex, { gaps })
+  }
+
+  const updateSlotGroupSlotCount = (
+    key: DisplaySlotGroupKey,
+    groupIndex: number,
+    value: number
+  ): void => {
+    updateSlotGroupLayout(key, groupIndex, {
+      slotCount: Math.max(0, Math.floor(Number(value) || 0))
+    })
+  }
+
+  const updateSlotGroupCount = (key: DisplaySlotGroupKey, value: number): void => {
+    const groupCount = Math.min(maxSlotGroupCount, Math.max(1, Math.floor(Number(value) || 1)))
+    const nextGroups = slotGroups[key]
+      .slice(0, groupCount)
+      .map((group) => ({ ...group, gaps: [...(group.gaps ?? [])] }))
+
+    while (nextGroups.length < groupCount) {
+      const defaultGroup = defaultSlotGroups[key][nextGroups.length]
+      if (defaultGroup) {
+        nextGroups.push({ ...defaultGroup, gaps: [...(defaultGroup.gaps ?? [])] })
+        continue
+      }
+
+      const previous = nextGroups.at(-1) ?? defaultSlotGroups[key][0]
+      const beforePrevious = nextGroups.at(-2)
+      const deltaX = beforePrevious ? previous.x - beforePrevious.x : 0
+      const deltaY = beforePrevious ? previous.y - beforePrevious.y : previous.height + previous.gap
+      nextGroups.push({
+        ...previous,
+        x: previous.x + deltaX,
+        y: previous.y + deltaY,
+        gaps: [...(previous.gaps ?? [])],
+        slotCount: 0
+      })
+    }
+
+    applySlotGroups({ ...slotGroups, [key]: nextGroups })
   }
 
   const updateChantVideoSlot = (patch: Partial<DisplayVideoSlotLayout>): void => {
@@ -4324,58 +4458,40 @@ function DisplaySettingsPanel({
     })
   }
 
-  const chooseSlotAsset = async (key: SlotLayoutKey, field: 'frameImage'): Promise<void> => {
+  const chooseSlotAsset = async (
+    key: DisplaySlotGroupKey,
+    groupIndex: number,
+    field: 'frameImage'
+  ): Promise<void> => {
     const result = await window.bpAPI.files.selectImage()
     if (!result.canceled && result.path) {
-      updateSlotLayout(key, { [field]: result.path })
+      updateSlotGroupLayout(key, groupIndex, { [field]: result.path })
     }
   }
-  const slotCountForLayout = (key: SlotLayoutKey): number | undefined => {
-    const starSecondPicks = settings.secondaryPickCounts?.star ?? 0
-    const railSecondPicks = settings.secondaryPickCounts?.rail ?? 0
-    const starSecondBans = settings.secondaryBanCounts?.star ?? 0
-    const railSecondBans = settings.secondaryBanCounts?.rail ?? 0
 
-    switch (key) {
-      case 'starPickSecond':
-        return starSecondPicks
-      case 'railPickSecond':
-        return railSecondPicks
-      case 'starBan':
-        return Math.max(0, previewState.slotCounts.star.bans - starSecondBans)
-      case 'starBanSecond':
-        return starSecondBans
-      case 'railBan':
-        return Math.max(0, previewState.slotCounts.rail.bans - railSecondBans)
-      case 'railBanSecond':
-        return railSecondBans
-      default:
-        return undefined
-    }
+  const totalSlotsForGroup = (key: DisplaySlotGroupKey): number => {
+    const sideCounts = key.startsWith('star')
+      ? previewState.slotCounts.star
+      : previewState.slotCounts.rail
+    return key.endsWith('Pick') ? sideCounts.picks : sideCounts.bans
   }
-  const gapCountForLayout = (key: SlotLayoutKey): number | undefined => {
-    if (
-      key !== 'starBan' &&
-      key !== 'starBanSecond' &&
-      key !== 'railBan' &&
-      key !== 'railBanSecond'
-    ) {
+
+  const slotCountForGroup = (key: DisplaySlotGroupKey, groupIndex: number): number => {
+    if (groupIndex > 0) {
+      return slotGroups[key][groupIndex]?.slotCount ?? 0
+    }
+
+    return resolvedSlotGroupCounts(totalSlotsForGroup(key), slotGroups[key])[0] ?? 0
+  }
+
+  const gapCountForGroup = (key: DisplaySlotGroupKey, groupIndex: number): number | undefined => {
+    if (key.endsWith('Pick')) {
       return undefined
     }
 
-    const totalBans =
-      key === 'starBan' || key === 'starBanSecond'
-        ? previewState.slotCounts.star.bans
-        : previewState.slotCounts.rail.bans
-    const secondaryBans =
-      key === 'starBan' || key === 'starBanSecond'
-        ? (settings.secondaryBanCounts?.star ?? 0)
-        : (settings.secondaryBanCounts?.rail ?? 0)
-    const actualSecondaryBans = Math.min(totalBans, Math.max(0, secondaryBans))
-    const slotCount =
-      key === 'starBan' || key === 'railBan' ? totalBans - actualSecondaryBans : actualSecondaryBans
-
-    return Math.max(0, slotCount - 1)
+    const groupCount =
+      resolvedSlotGroupCounts(totalSlotsForGroup(key), slotGroups[key])[groupIndex] ?? 0
+    return Math.max(0, groupCount - 1)
   }
 
   return (
@@ -4455,14 +4571,17 @@ function DisplaySettingsPanel({
                 {backgroundLayers.map((layer, index) => (
                   <section className="background-layer-card" key={layer.id}>
                     <header>
-                      <input
-                        className="background-layer-name-input"
-                        aria-label="背景图层名称"
-                        value={layer.name || `背景 ${index + 1}`}
-                        onChange={(event) =>
-                          updateBackgroundLayer(layer.id, { name: event.target.value })
-                        }
-                      />
+                      <div className="background-layer-heading">
+                        <span>{String(index + 1).padStart(2, '0')}</span>
+                        <input
+                          className="background-layer-name-input"
+                          aria-label="背景图层名称"
+                          value={layer.name || `背景 ${index + 1}`}
+                          onChange={(event) =>
+                            updateBackgroundLayer(layer.id, { name: event.target.value })
+                          }
+                        />
+                      </div>
                       <label className="inline-check">
                         <input
                           type="checkbox"
@@ -4646,33 +4765,73 @@ function DisplaySettingsPanel({
                 <h2>BP 框大小 / 位置</h2>
               </div>
             </header>
-            <div className="slot-layout-grid">
-              {slotLayoutLabels.map((item) => (
-                <SlotLayoutEditor
-                  key={item.key}
-                  label={item.label}
-                  layout={settings.slotLayouts[item.key]}
-                  slotCount={slotCountForLayout(item.key)}
-                  gapCount={gapCountForLayout(item.key)}
-                  onNumberChange={(numberKey, value) =>
-                    updateSlotLayout(item.key, { [numberKey]: value })
-                  }
-                  onGapChange={(gapIndex, value) => updateSlotGap(item.key, gapIndex, value)}
-                  onSlotCountChange={
-                    item.key === 'starPickSecond'
-                      ? (value) => updateSecondaryPickCount('star', value)
-                      : item.key === 'railPickSecond'
-                        ? (value) => updateSecondaryPickCount('rail', value)
-                        : item.key === 'starBanSecond'
-                          ? (value) => updateSecondaryBanCount('star', value)
-                          : item.key === 'railBanSecond'
-                            ? (value) => updateSecondaryBanCount('rail', value)
-                            : undefined
-                  }
-                  onDirectionChange={(direction) => updateSlotLayout(item.key, { direction })}
-                  onChooseFrame={() => chooseSlotAsset(item.key, 'frameImage')}
-                />
-              ))}
+            <p className="slot-group-hint">
+              每类支持 1–8 组，每一组都可单独设置数量。为兼容已有配置，第一组数量为 0
+              时会自动承接其余槽位。
+            </p>
+            <div className="slot-group-section-grid">
+              {slotGroupSections.map((item) => {
+                const sideClass = item.key.startsWith('star') ? 'is-star' : 'is-rail'
+                const actionClass = item.key.endsWith('Pick') ? 'is-pick' : 'is-ban'
+                const sideLabel = item.key.startsWith('star') ? '左侧队伍' : '右侧队伍'
+                const actionLabel = item.key.endsWith('Pick') ? 'PICK' : 'BAN'
+
+                return (
+                  <section
+                    key={item.key}
+                    className={`slot-group-section ${sideClass} ${actionClass}`}
+                  >
+                    <header className="slot-group-section-header">
+                      <div className="slot-group-section-title">
+                        <span>{actionLabel}</span>
+                        <div>
+                          <strong>{sideLabel}</strong>
+                          <small>{item.label} 槽位布局</small>
+                        </div>
+                      </div>
+                      <label className="slot-group-count-control">
+                        <span>组数</span>
+                        <input
+                          aria-label={`${item.label}组数`}
+                          type="number"
+                          min="1"
+                          max={maxSlotGroupCount}
+                          value={slotGroups[item.key].length}
+                          onChange={(event) =>
+                            updateSlotGroupCount(item.key, Number(event.target.value))
+                          }
+                        />
+                      </label>
+                    </header>
+                    <div className="slot-layout-grid">
+                      {slotGroups[item.key].map((group, groupIndex) => (
+                        <SlotLayoutEditor
+                          key={`${item.key}-${groupIndex}`}
+                          label={`第 ${groupIndex + 1} 组`}
+                          groupNumber={groupIndex + 1}
+                          layout={group}
+                          slotCount={slotCountForGroup(item.key, groupIndex)}
+                          slotCountIsAuto={groupIndex === 0 && group.slotCount === 0}
+                          gapCount={gapCountForGroup(item.key, groupIndex)}
+                          onNumberChange={(numberKey, value) =>
+                            updateSlotGroupLayout(item.key, groupIndex, { [numberKey]: value })
+                          }
+                          onGapChange={(gapIndex, value) =>
+                            updateSlotGroupGap(item.key, groupIndex, gapIndex, value)
+                          }
+                          onSlotCountChange={(value) =>
+                            updateSlotGroupSlotCount(item.key, groupIndex, value)
+                          }
+                          onDirectionChange={(direction) =>
+                            updateSlotGroupLayout(item.key, groupIndex, { direction })
+                          }
+                          onChooseFrame={() => chooseSlotAsset(item.key, groupIndex, 'frameImage')}
+                        />
+                      ))}
+                    </div>
+                  </section>
+                )
+              })}
             </div>
           </section>
         ) : null}
