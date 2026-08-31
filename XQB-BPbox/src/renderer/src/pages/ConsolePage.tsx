@@ -5201,13 +5201,6 @@ function StartBpPanel({
       ? livePendingDelayedChanges.map((pendingChange) => pendingChange.pageChangeName).join('、')
       : ''
   const liveModeLabel = bpMode === 'live' ? '直播BP' : '手动回放'
-  const liveStatusText =
-    runtime.status === 'complete'
-      ? 'BP 已完成'
-      : runtime.currentStep
-        ? stepLabel(runtime.currentStep)
-        : '等待开始'
-
   const resetLiveDelayState = useCallback((): void => {
     setLiveDelayClickProgress({})
     setLiveCompletedDelayedChangeKeys(new Set())
@@ -5619,7 +5612,7 @@ function StartBpPanel({
     }
 
     if (!result.path.toLowerCase().endsWith('.mp4')) {
-      onMessage('error', '当前 UP 角色 PV 只支持 .mp4 文件')
+      onMessage('error', '底片视频 只支持 .mp4 文件')
       return
     }
 
@@ -5744,6 +5737,23 @@ function StartBpPanel({
         <div className="bp-session-panel">
           <section className="bp-session-card">
             <header>
+              <span>本局记录</span>
+              <strong>{resultName.trim() || '未命名 BP'}</strong>
+              <small>{runtime.actions.length} 条操作</small>
+            </header>
+            <label className="bp-card-field">
+              结果名称
+              <input value={resultName} onChange={(event) => setResultName(event.target.value)} />
+            </label>
+            <div className="bp-card-actions">
+              <button type="button" disabled={!selectedResultFile} onClick={loadSelectedResult}>
+                读取选中结果
+              </button>
+            </div>
+          </section>
+
+          <section className="bp-session-card">
+            <header>
               <span>流程</span>
               <strong>{bpFlow.name}</strong>
               <small>{bpFlow.steps.length} 个步骤</small>
@@ -5777,26 +5787,9 @@ function StartBpPanel({
             </div>
           </section>
 
-          <section className="bp-session-card">
-            <header>
-              <span>本局记录</span>
-              <strong>{resultName.trim() || '未命名 BP'}</strong>
-              <small>{runtime.actions.length} 条操作</small>
-            </header>
-            <label className="bp-card-field">
-              结果名称
-              <input value={resultName} onChange={(event) => setResultName(event.target.value)} />
-            </label>
-            <div className="bp-card-actions">
-              <button type="button" disabled={!selectedResultFile} onClick={loadSelectedResult}>
-                读取选中结果
-              </button>
-            </div>
-          </section>
-
           <section className="bp-session-card bp-pv-card">
             <header className="bp-up-pv-status" title={runtime.upCharacterPvPath ?? ''}>
-              <span>当前 UP 角色 PV</span>
+              <span>底片视频</span>
               <strong>{fileName(runtime.upCharacterPvPath)}</strong>
             </header>
             <div className="bp-card-actions">
@@ -5838,7 +5831,6 @@ function StartBpPanel({
             <div className={`bp-live-status ${liveWaitingExtraClick ? 'pending' : ''}`}>
               <div className="bp-live-status-main">
                 <strong>{liveModeLabel}</strong>
-                <span>{liveStatusText}</span>
               </div>
               <span className={`bp-display-state ${displayOnline ? 'online' : ''}`}>
                 展示页 {displayOnline ? '已打开' : '未打开'}
