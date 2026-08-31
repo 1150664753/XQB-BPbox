@@ -2137,6 +2137,15 @@ function CharacterManager({
     }
   }
 
+  const openAssetsFolder = async (): Promise<void> => {
+    try {
+      await window.bpAPI.files.openAssetsFolder()
+      onMessage('success', '已打开资源文件夹')
+    } catch (error) {
+      onMessage('error', error instanceof Error ? error.message : String(error))
+    }
+  }
+
   const editorPanel = (
     <form className="editor-panel" onSubmit={submit}>
       <label>
@@ -2285,6 +2294,9 @@ function CharacterManager({
           </button>
           <button type="button" onClick={openConfigFolder}>
             打开配置文件夹
+          </button>
+          <button type="button" onClick={openAssetsFolder}>
+            打开资源文件夹
           </button>
           <button type="button" onClick={() => loadCharacters()}>
             刷新
@@ -2537,6 +2549,15 @@ function LightConeManager({
     await loadLightCones()
   }
 
+  const openAssetsFolder = async (): Promise<void> => {
+    try {
+      await window.bpAPI.files.openAssetsFolder()
+      onMessage('success', '已打开资源文件夹')
+    } catch (error) {
+      onMessage('error', error instanceof Error ? error.message : String(error))
+    }
+  }
+
   const editorPanel = (
     <form className="editor-panel" onSubmit={submit}>
       <label>
@@ -2600,9 +2621,14 @@ function LightConeManager({
         <div>
           <h1>光锥管理</h1>
         </div>
-        <button type="button" onClick={() => loadLightCones()}>
-          刷新
-        </button>
+        <div className="header-actions">
+          <button type="button" onClick={openAssetsFolder}>
+            打开资源文件夹
+          </button>
+          <button type="button" onClick={() => loadLightCones()}>
+            刷新
+          </button>
+        </div>
       </div>
 
       {sidebarHost ? createPortal(editorPanel, sidebarHost) : null}

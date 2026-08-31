@@ -1,22 +1,30 @@
+# Node / npm dependencies
+/XQB-BPbox/node_modules/
 
-# Dependencies
-node_modules/
+# Electron / Vite build and packaging output
+/XQB-BPbox/dist/
+/XQB-BPbox/out/
+/XQB-BPbox/release/
+/XQB-BPbox/**/*.exe
+/XQB-BPbox/**/*.msi
+/XQB-BPbox/**/*.msix
+/XQB-BPbox/**/*.appx
+/XQB-BPbox/**/*.blockmap
+/XQB-BPbox/**/latest*.yml
 
-# Vite / Electron build and packaging output
-dist/
-out/
-release/
-*.exe
-*.msi
-*.msix
-*.appx
-*.blockmap
-latest*.yml
+# Local runtime assets
+# Keep assets/icons visible: these are UI resources referenced by the source code.
+/XQB-BPbox/assets/audios/
+/XQB-BPbox/assets/backgrounds/
+/XQB-BPbox/assets/characters/
+/XQB-BPbox/assets/effects/
+/XQB-BPbox/assets/hire/
+/XQB-BPbox/assets/lightcones/
+/XQB-BPbox/assets/videos/
 
-# Local runtime data and large resources
-assets/
-config/
-results/
+# Local configuration and generated results
+/XQB-BPbox/config/
+/XQB-BPbox/results/
 
 # Environment files, credentials, and signing keys
 .env
@@ -29,19 +37,22 @@ results/
 *.p12
 *.keystore
 
-# User caches, logs, and temporary files
-.cache/
-.tmp/
-tmp/
-temp/
-*.tmp
-*.temp
-*.log*
-.eslintcache
+# Logs, caches, and temporary files
+/XQB-BPbox/.eslintcache
+/XQB-BPbox/.cache/
+/XQB-BPbox/.tmp/
+/XQB-BPbox/tmp/
+/XQB-BPbox/temp/
+/XQB-BPbox/**/*.tmp
+/XQB-BPbox/**/*.temp
+/XQB-BPbox/**/*.log*
+
+# Operating-system metadata
 .DS_Store
 Thumbs.db
 
-# Local archives
-*.zip
-*.7z
-*.rar
+# Local archives and large source videos
+/XQB-BPbox/**/*.zip
+/XQB-BPbox/**/*.7z
+/XQB-BPbox/**/*.rar
+/XQB-BPbox/**/*.mov
