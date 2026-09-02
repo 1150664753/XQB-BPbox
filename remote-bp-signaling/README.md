@@ -9,7 +9,7 @@
 ## 本地检查
 
 ```bash
-cd remote-bp-signaling/cloudflare
+cd remote-bp-signaling
 npm install
 npm run typecheck
 npm test
@@ -20,10 +20,18 @@ npm test
 ## 部署
 
 ```bash
-cd remote-bp-signaling/cloudflare
+cd remote-bp-signaling
 npm install
 npx wrangler login
 npx wrangler deploy
+```
+
+Cloudflare 自动部署设置：
+
+```text
+Root directory: remote-bp-signaling
+Build command: npm install
+Deploy command: npx wrangler deploy
 ```
 
 Wrangler 配置会创建 `xqb-bp-signaling` Worker、`BpRoom` Durable Object 和自定义域 `signal.xqbbp.dpdns.org`。该域必须位于执行部署的 Cloudflare 账号所管理的有效 Zone 中；Custom Domain 会由 Cloudflare 创建 DNS 记录和证书。如果同名 CNAME 已存在，应先移除冲突记录。
@@ -45,3 +53,5 @@ https://signal.xqbbp.dpdns.org/health
 房主连接基础地址，由 Worker 生成房间码；选手连接时使用 `?roomId=ABCDEFG` 定位相同 Durable Object。WebSocket 内的 `CREATE_ROOM`、`JOIN_ROOM`、`OFFER`、`ANSWER` 与 `ICE_CANDIDATE` 消息格式保持不变。
 
 网页发布地址为 `https://xqbbp.dpdns.org`。生产构建默认使用公网 WSS；本地开发默认使用 `ws://localhost:8787`，也可以在 `.env.local` 中通过 `VITE_REMOTE_BP_SIGNALING_URL` 显式覆盖。
+
+原 Node.js 本地信令服务仍可通过 `npm start` 启动，并使用 `npm run test:local` 自检。

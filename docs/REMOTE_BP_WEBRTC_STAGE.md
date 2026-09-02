@@ -38,7 +38,7 @@ Web 页面没有乐观写入 BAN/PICK 结果。连接断开时禁止发送 Actio
 
 ### Signaling Server
 
-`remote-bp-signaling` 保留 Node.js + WebSocket 本地开发服务，并在 `remote-bp-signaling/cloudflare` 提供协议兼容的公网实现。公网服务使用 Cloudflare Worker、SQLite-backed `BpRoom` Durable Object 和 WebSocket Hibernation API；一个 `roomId` 固定对应一个 Durable Object，不使用全局变量或 KV 保存房间。两种实现都支持：
+`remote-bp-signaling` 根目录同时保留 Node.js + WebSocket 本地开发服务和协议兼容的 Cloudflare 公网实现。公网服务使用 Cloudflare Worker、SQLite-backed `BpRoom` Durable Object 和 WebSocket Hibernation API；一个 `roomId` 固定对应一个 Durable Object，不使用全局变量或 KV 保存房间。两种实现都支持：
 
 - `CREATE_ROOM`、`JOIN_ROOM`、`LEAVE_ROOM`。
 - `OFFER`、`ANSWER`、`ICE_CANDIDATE` 中继。
@@ -123,7 +123,7 @@ npm start
 公网 Worker 本地检查及部署：
 
 ```bash
-cd remote-bp-signaling/cloudflare
+cd remote-bp-signaling
 npm install
 npm run typecheck
 npm test
@@ -166,8 +166,8 @@ npm run dev -- --host 0.0.0.0
 ## 验证命令
 
 ```bash
-cd remote-bp-signaling && npm test
-cd remote-bp-signaling/cloudflare && npm run typecheck && npm test
+cd remote-bp-signaling && npm run test:local
+cd remote-bp-signaling && npm run typecheck && npm test
 cd XQB-BPbox && npm run typecheck && npm run test:remote-bp
 cd XBQ-BPweb && npm run build
 ```

@@ -1,14 +1,26 @@
 {
-  "name": "xqb-remote-bp-signaling",
+  "name": "xqb-bp-signaling-cloudflare",
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "node src/server.mjs",
-    "dev": "node --watch src/server.mjs",
-    "test": "node test/signaling-self-check.mjs"
+    "dev": "wrangler dev",
+    "dev:local": "node --watch src/server.mjs",
+    "typegen": "wrangler types",
+    "typecheck": "npm run typegen && tsc --noEmit",
+    "test": "node test/signaling-worker-self-check.mjs",
+    "test:local": "node test/signaling-self-check.mjs",
+    "deploy": "wrangler deploy"
   },
   "dependencies": {
     "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "wrangler": "^4.0.0"
   }
 }
