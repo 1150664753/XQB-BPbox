@@ -4,6 +4,7 @@ export type {
   BpDisplayReplayClickType,
   BpEventRecord,
   BpPlaybackMode,
+  BpPreviewSelection,
   BpResult,
   BpResultListItem,
   BpRuntimeState,

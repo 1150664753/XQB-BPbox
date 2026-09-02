@@ -3,6 +3,7 @@ import DisplayPickSlot from './DisplayPickSlot'
 import { configuredSlotGroups, resolvedSlotGroupCounts } from './slotGroups'
 import type {
   BpSide,
+  BpTeamTarget,
   DisplaySettings,
   DisplaySlotEffectConfig,
   DisplaySlotEffects,
@@ -23,6 +24,8 @@ interface DisplayTeamPanelProps {
   selectedEffectKey?: string | number
   previewSlotKey?: string | null
   previewEffectKey?: string | number
+  tentativeTarget?: BpTeamTarget | null
+  tentativeAction?: 'pick' | 'ban' | null
   renderSlotEffects?: boolean
   renderScale?: number
 }
@@ -188,20 +191,27 @@ function DisplayTeamPanel({
   selectedEffectKey,
   previewSlotKey = null,
   previewEffectKey,
+  tentativeTarget = null,
+  tentativeAction = null,
   renderSlotEffects = true,
   renderScale = 1
 }: DisplayTeamPanelProps): React.JSX.Element {
   const previewPickIndex = previewIndex(previewSlotKey, side, 'pick')
   const previewBanIndex = previewIndex(previewSlotKey, side, 'ban')
+  const tentativePickIndex =
+    tentativeTarget && tentativeAction === 'pick' ? team.picks.length : null
+  const tentativeBanIndex = tentativeTarget && tentativeAction === 'ban' ? team.bans.length : null
   const pickCount = Math.max(
     slotCounts.picks,
     team.picks.length,
-    previewPickIndex === null ? 0 : previewPickIndex + 1
+    previewPickIndex === null ? 0 : previewPickIndex + 1,
+    tentativePickIndex === null ? 0 : tentativePickIndex + 1
   )
   const banCount = Math.max(
     slotCounts.bans,
     team.bans.length,
-    previewBanIndex === null ? 0 : previewBanIndex + 1
+    previewBanIndex === null ? 0 : previewBanIndex + 1,
+    tentativeBanIndex === null ? 0 : tentativeBanIndex + 1
   )
   const pickGroups = configuredSlotGroups(settings, side, 'pick')
   const banGroups = configuredSlotGroups(settings, side, 'ban')
@@ -237,9 +247,13 @@ function DisplayTeamPanel({
               return (
                 <DisplayPickSlot
                   key={`pick-${pickIndex}`}
-                  target={team.picks[pickIndex]}
+                  target={
+                    team.picks[pickIndex] ??
+                    (tentativePickIndex === pickIndex ? (tentativeTarget ?? undefined) : undefined)
+                  }
                   side={side}
                   index={pickIndex + 1}
+                  tentative={tentativePickIndex === pickIndex}
                 >
                   {renderSlotEffects
                     ? renderSlotEffect(key, slotEffects.pick, {
@@ -285,8 +299,12 @@ function DisplayTeamPanel({
               return (
                 <DisplayBanSlot
                   key={`ban-${banIndex}`}
-                  target={team.bans[banIndex]}
+                  target={
+                    team.bans[banIndex] ??
+                    (tentativeBanIndex === banIndex ? (tentativeTarget ?? undefined) : undefined)
+                  }
                   index={banIndex + 1}
+                  tentative={tentativeBanIndex === banIndex}
                   style={slotGapStyle(group, localIndex, {
                     reverseHorizontal: side === 'star',
                     scale: renderScale

@@ -7,6 +7,7 @@ import { registerCharacterIpc } from './ipc/characters'
 import { registerDisplaySettingsIpc } from './ipc/displaySettings'
 import { registerFlowIpc } from './ipc/flows'
 import { registerLightConeIpc } from './ipc/lightCones'
+import { registerRemoteBpIpc } from './ipc/remoteBp'
 import { registerVoiceTimelineIpc } from './ipc/voiceTimelines'
 import { startProjectFileWatchers } from './projectFileWatchers'
 import { registerAssetProtocol, registerAssetProtocolScheme } from './protocols'
@@ -25,6 +26,7 @@ function registerIpcHandlers(): void {
   registerDisplaySettingsIpc()
   registerVoiceTimelineIpc()
   registerBpIpc()
+  registerRemoteBpIpc()
   registerUpdaterIpc()
 }
 

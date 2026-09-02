@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.node.json",
+  "compilerOptions": {
+    "composite": false,
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "types": ["node"],
+    "noEmit": false,
+    "outDir": ".tmp/remote-bp-test",
+    "rootDir": "."
+  },
+  "include": [
+    "scripts/remote-bp-self-check.ts",
+    "src/main/remoteBp/RemoteAssetProvider.ts",
+    "src/shared/**/*"
+  ]
+}

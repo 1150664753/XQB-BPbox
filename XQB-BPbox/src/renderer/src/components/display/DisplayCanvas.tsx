@@ -1843,6 +1843,7 @@ function DisplayCanvas({
     activeEffectInstances.find((instance) => instance.mode === 'selected') ?? null
   const selectedSlotKey = selectedEffectInstance?.slotKey ?? null
   const selectedEffectKey = selectedEffectInstance?.effectKey ?? 'none'
+  const tentativeSelection = state.previewSelection ?? null
 
   const previewSide =
     previewSlotEffect &&
@@ -2026,6 +2027,8 @@ function DisplayCanvas({
             selectedEffectKey={selectedEffectKey}
             previewSlotKey={previewSlotKey}
             previewEffectKey={previewSlotEffect?.nonce}
+            tentativeTarget={tentativeSelection?.side === 'star' ? tentativeSelection.target : null}
+            tentativeAction={tentativeSelection?.side === 'star' ? tentativeSelection.action : null}
             renderSlotEffects={false}
             renderScale={coordinateScaleX}
           />
@@ -2041,6 +2044,8 @@ function DisplayCanvas({
             selectedEffectKey={selectedEffectKey}
             previewSlotKey={previewSlotKey}
             previewEffectKey={previewSlotEffect?.nonce}
+            tentativeTarget={tentativeSelection?.side === 'rail' ? tentativeSelection.target : null}
+            tentativeAction={tentativeSelection?.side === 'rail' ? tentativeSelection.action : null}
             renderSlotEffects={false}
             renderScale={coordinateScaleX}
           />

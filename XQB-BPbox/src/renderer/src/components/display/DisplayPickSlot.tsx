@@ -7,6 +7,7 @@ interface DisplayPickSlotProps {
   target?: Character | LightCone
   side: 'star' | 'rail'
   index: number
+  tentative?: boolean
   children?: ReactNode
 }
 
@@ -43,13 +44,14 @@ function DisplayPickSlot({
   target,
   side,
   index,
+  tentative = false,
   children
 }: DisplayPickSlotProps): React.JSX.Element {
   const imageUrl = pickImage(target, side)
   const name = targetName(target)
 
   return (
-    <div className="display-slot display-pick-slot">
+    <div className={`display-slot display-pick-slot${tentative ? ' display-slot-tentative' : ''}`}>
       {imageUrl ? <img src={imageUrl} alt={name} /> : <span>P{index}</span>}
       {target ? <strong>{name}</strong> : null}
       {children}

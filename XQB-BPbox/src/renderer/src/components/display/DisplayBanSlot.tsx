@@ -7,6 +7,7 @@ interface DisplayBanSlotProps {
   target?: Character | LightCone
   index: number
   style?: CSSProperties
+  tentative?: boolean
   children?: ReactNode
 }
 
@@ -40,13 +41,17 @@ function DisplayBanSlot({
   target,
   index,
   style,
+  tentative = false,
   children
 }: DisplayBanSlotProps): React.JSX.Element {
   const imageUrl = banImage(target)
   const name = targetName(target)
 
   return (
-    <div className="display-slot display-ban-slot" style={style}>
+    <div
+      className={`display-slot display-ban-slot${tentative ? ' display-slot-tentative' : ''}`}
+      style={style}
+    >
       {imageUrl ? <img src={imageUrl} alt={name} /> : <span>B{index}</span>}
       {target ? <strong>{name}</strong> : null}
       {children}

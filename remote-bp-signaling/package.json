@@ -1,0 +1,14 @@
+{
+  "name": "xqb-remote-bp-signaling",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.mjs",
+    "dev": "node --watch src/server.mjs",
+    "test": "node test/signaling-self-check.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  }
+}

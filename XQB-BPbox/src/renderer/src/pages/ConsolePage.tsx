@@ -45,6 +45,8 @@ import type {
 } from '../types/character'
 import type { LightCone, LightConePayload, LightConeRarity } from '../types/lightCone'
 import DisplayCanvas from '../components/display/DisplayCanvas'
+import RemoteBpPanel from '../components/remoteBp/RemoteBpPanel'
+import { createRemoteHostTransport } from '../services/remoteBp/createRemoteHostTransport'
 import { resolvedSlotGroupCounts } from '../components/display/slotGroups'
 import UpdateStatusBar from '../components/UpdateStatusBar'
 import VoiceTimelinePanel from './VoiceTimelinePanel'
@@ -58,6 +60,18 @@ import {
   normalizePvEndTime,
   normalizePvStartTime
 } from '../../../shared/pvPlayback'
+import {
+  BpActionDispatcher,
+  DEFAULT_REMOTE_SIDE_MAPPING,
+  RemoteBpHost,
+  internalSideToRemoteSide,
+  remoteSideToInternalSide,
+  type BpActionDispatchSnapshot,
+  type BpActionExecutor,
+  type BpActionTarget,
+  type RemoteBpAction,
+  type RemoteBpStateSerializeInput
+} from '../../../shared/remoteBp'
 
 type ConsoleView =
   | 'characters'
@@ -415,6 +429,15 @@ function isRosterAction(action: BpAction): boolean {
 
 function oppositeSide(side: BpSide): BpSide {
   return side === 'star' ? 'rail' : 'star'
+}
+
+function createUniqueId(prefix: string): string {
+  const uniquePart = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`
+  return `${prefix}-${uniquePart}`
+}
+
+function createBpActionId(source: 'local' | 'remote' = 'local'): string {
+  return createUniqueId(source)
 }
 
 function normalizeFlowSteps(steps: FlowStep[]): FlowStep[] {
@@ -2904,7 +2927,6 @@ function FlowConfigPanel({
       return
     }
 
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadFlowFile(selectedFlowFile).catch((error: unknown) =>
       onMessage('error', error instanceof Error ? error.message : String(error))
     )
@@ -4073,7 +4095,7 @@ function DisplaySettingsPanel({
       updateBackgroundLayers([
         ...backgroundLayers,
         {
-          id: `background-${Date.now()}`,
+          id: createUniqueId('background'),
           name: `背景 ${backgroundLayers.length + 1}`,
           image: result.path,
           imageUrl: null,
@@ -4180,7 +4202,7 @@ function DisplaySettingsPanel({
     updatePageChanges([
       ...settings.pageChanges,
       {
-        id: `page-change-${Date.now()}`,
+        id: createUniqueId('page-change'),
         index: nextIndex,
         name,
         triggerEvent: name,
@@ -4232,7 +4254,7 @@ function DisplaySettingsPanel({
     updatePageChanges([
       ...settings.pageChanges,
       {
-        id: `chant-video-change-${Date.now()}`,
+        id: createUniqueId('chant-video-change'),
         index: nextIndex,
         name,
         triggerEvent: name,
@@ -5001,6 +5023,10 @@ function BpTeamPanel({
   )
 }
 
+/* The remote host bridge intentionally keeps the latest React state in refs so transport callbacks
+ * stay stable and never capture an obsolete BP turn. Ref reads/writes are confined to the bridge
+ * and event handlers; they do not determine rendered output. */
+/* eslint-disable react-hooks/refs, react-hooks/preserve-manual-memoization */
 function StartBpPanel({
   active,
   currentFlow,
@@ -5033,6 +5059,10 @@ function StartBpPanel({
     star: Character | null
     rail: Character | null
   }>({ star: null, rail: null })
+  const [pairedConfirmations, setPairedConfirmations] = useState<Record<BpSide, boolean>>({
+    star: false,
+    rail: false
+  })
   const [flowList, setFlowList] = useState<FlowListItem[]>([])
   const [selectedFlowFile, setSelectedFlowFile] = useState('')
   const [resultName, setResultName] = useState(() => defaultResultName(initialFlow.name))
@@ -5045,7 +5075,184 @@ function StartBpPanel({
   const [liveCompletedDelayedChangeKeys, setLiveCompletedDelayedChangeKeys] = useState<Set<string>>(
     () => new Set()
   )
+  const remoteSideMapping = DEFAULT_REMOTE_SIDE_MAPPING
   const handledNewSessionRequestRef = useRef(newSessionRequestToken)
+  const remoteDispatcher = useMemo(() => new BpActionDispatcher(1), [])
+  const remoteTransport = useMemo(() => createRemoteHostTransport(), [])
+  const runtimeRef = useRef(runtime)
+  const charactersRef = useRef(characters)
+  const lightConesRef = useRef(lightCones)
+  const bpFlowRef = useRef(bpFlow)
+  const selectedCharacterIdRef = useRef(selectedCharacterId)
+  const selectedLightConeIdRef = useRef(selectedLightConeId)
+  const wasLiveWaitingExtraClickRef = useRef(false)
+  const pairedSelectionRef = useRef(pairedSelection)
+  const pairedConfirmationsRef = useRef(pairedConfirmations)
+  const remoteSideMappingRef = useRef(remoteSideMapping)
+  const remoteExecutorRef = useRef<BpActionExecutor | null>(null)
+  const getRemoteDispatchSnapshotRef = useRef<() => BpActionDispatchSnapshot>(() => ({
+    started: false,
+    currentStep: null,
+    availableCharacterIds: [],
+    availableLightConeIds: [],
+    pickedCharacterIds: [],
+    pickedCharacterIdsBySide: { star: [], rail: [] },
+    availablePairedTargetIdsBySide: { star: [], rail: [] },
+    selectedTarget: null,
+    selectedTargetsBySide: { star: null, rail: null }
+  }))
+  const getRemoteSerializerInputRef = useRef<
+    () => Omit<RemoteBpStateSerializeInput, 'revision' | 'roomId' | 'sessionId' | 'mapping'>
+  >(() => ({
+    runtime: runtimeRef.current,
+    characters: charactersRef.current,
+    lightCones: lightConesRef.current,
+    flowStepCount: bpFlowRef.current.steps.length
+  }))
+
+  runtimeRef.current = runtime
+  charactersRef.current = characters
+  lightConesRef.current = lightCones
+  bpFlowRef.current = bpFlow
+  selectedCharacterIdRef.current = selectedCharacterId
+  selectedLightConeIdRef.current = selectedLightConeId
+  pairedSelectionRef.current = pairedSelection
+  pairedConfirmationsRef.current = pairedConfirmations
+  remoteSideMappingRef.current = remoteSideMapping
+
+  getRemoteDispatchSnapshotRef.current = (): BpActionDispatchSnapshot => {
+    const currentRuntime = runtimeRef.current
+    const usedCharacterIds = new Set(
+      currentRuntime.actions
+        .filter((action) => isRosterAction(action.action) && action.targetType === 'character')
+        .map((action) => String(action.targetId))
+    )
+    const usedLightConeIds = new Set(
+      currentRuntime.actions
+        .filter((action) => isRosterAction(action.action) && action.targetType === 'lightCone')
+        .map((action) => String(action.targetId))
+    )
+    const step = currentRuntime.currentStep
+    const selectedTarget: BpActionTarget | null = step
+      ? step.targetType === 'character' && selectedCharacterIdRef.current
+        ? { kind: 'CHARACTER', id: String(selectedCharacterIdRef.current) }
+        : step.targetType === 'lightCone' && selectedLightConeIdRef.current
+          ? { kind: 'LIGHT_CONE', id: String(selectedLightConeIdRef.current) }
+          : null
+      : null
+    const selectedTargetsBySide: Record<BpSide, BpActionTarget | null> = {
+      star: pairedSelectionRef.current.star
+        ? { kind: 'CHARACTER', id: String(pairedSelectionRef.current.star.id) }
+        : null,
+      rail: pairedSelectionRef.current.rail
+        ? { kind: 'CHARACTER', id: String(pairedSelectionRef.current.rail.id) }
+        : null
+    }
+    if (step && !isPairedAction(step.action)) {
+      selectedTargetsBySide[step.side] = selectedTarget
+    }
+    const pickedIdsBySide: Record<BpSide, string[]> = {
+      star: currentRuntime.actions
+        .filter(
+          (action) =>
+            action.side === 'star' && action.action === 'pick' && action.targetType === 'character'
+        )
+        .map((action) => String(action.targetId)),
+      rail: currentRuntime.actions
+        .filter(
+          (action) =>
+            action.side === 'rail' && action.action === 'pick' && action.targetType === 'character'
+        )
+        .map((action) => String(action.targetId))
+    }
+    const protectedIds = new Set(
+      currentRuntime.actions
+        .filter((action) => action.action === 'protect')
+        .flatMap((action) => [action.starTargetId, action.railTargetId])
+        .filter((id): id is number => Boolean(id))
+        .map(String)
+    )
+    const availablePairedTargetIdsBySide: Record<BpSide, string[]> = {
+      star:
+        step?.action === 'borrow'
+          ? pickedIdsBySide.rail.filter((id) => !protectedIds.has(id))
+          : pickedIdsBySide.star,
+      rail:
+        step?.action === 'borrow'
+          ? pickedIdsBySide.star.filter((id) => !protectedIds.has(id))
+          : pickedIdsBySide.rail
+    }
+
+    return {
+      started: currentRuntime.status === 'running',
+      currentStep: step
+        ? {
+            index: step.index,
+            side: step.side,
+            action: step.action,
+            targetType: step.targetType
+          }
+        : null,
+      availableCharacterIds: charactersRef.current
+        .map((character) => String(character.id))
+        .filter((id) => !usedCharacterIds.has(id)),
+      availableLightConeIds: lightConesRef.current
+        .map((lightCone) => String(lightCone.id))
+        .filter((id) => !usedLightConeIds.has(id)),
+      pickedCharacterIds: currentRuntime.actions
+        .filter((action) => action.action === 'pick' && action.targetType === 'character')
+        .map((action) => String(action.targetId)),
+      pickedCharacterIdsBySide: pickedIdsBySide,
+      availablePairedTargetIdsBySide,
+      selectedTarget,
+      selectedTargetsBySide
+    }
+  }
+
+  getRemoteSerializerInputRef.current = () => ({
+    runtime: runtimeRef.current,
+    characters: charactersRef.current,
+    lightCones: lightConesRef.current,
+    flowStepCount: normalizeFlowConfig(bpFlowRef.current).steps.length,
+    selectedCharacterId: selectedCharacterIdRef.current,
+    selectedLightConeId: selectedLightConeIdRef.current,
+    pairedSelections: {
+      star: pairedSelectionRef.current.star?.id ?? null,
+      rail: pairedSelectionRef.current.rail?.id ?? null
+    },
+    pairedConfirmations: pairedConfirmationsRef.current,
+    canConfirm: Boolean(
+      selectedCharacterIdRef.current ||
+      selectedLightConeIdRef.current ||
+      (pairedSelectionRef.current.star && pairedSelectionRef.current.rail)
+    )
+  })
+
+  const remoteHost = useMemo(
+    () =>
+      new RemoteBpHost({
+        dispatcher: remoteDispatcher,
+        transport: remoteTransport,
+        getDispatchSnapshot: () => getRemoteDispatchSnapshotRef.current(),
+        getExecutor: () => {
+          if (!remoteExecutorRef.current) throw new Error('BP action executor 尚未就绪')
+          return remoteExecutorRef.current
+        },
+        getSerializerInput: () => getRemoteSerializerInputRef.current(),
+        getAssetManifest: () => window.bpAPI.remoteBp.getAssetManifest(),
+        getAsset: (assetId) => window.bpAPI.remoteBp.getAsset(assetId)
+      }),
+    [remoteDispatcher, remoteTransport]
+  )
+  const [remoteRoomState, setRemoteRoomState] = useState(() => remoteHost.getRoomState())
+
+  useEffect(() => {
+    const unsubscribe = remoteHost.subscribe(setRemoteRoomState)
+    return () => {
+      unsubscribe()
+      void remoteHost.stopRoom()
+    }
+  }, [remoteHost])
 
   const loadTargetLists = useCallback(async (): Promise<void> => {
     const [nextCharacters, nextLightCones] = await Promise.all([
@@ -5092,6 +5299,11 @@ function StartBpPanel({
           loadTargetLists().catch((error: unknown) =>
             onMessage('error', error instanceof Error ? error.message : String(error))
           )
+          remoteHost
+            .refreshAssetManifest()
+            .catch((error: unknown) =>
+              onMessage('error', error instanceof Error ? error.message : String(error))
+            )
         }
 
         if (fileChangeIncludes(event, 'flows')) {
@@ -5106,7 +5318,7 @@ function StartBpPanel({
           )
         }
       }),
-    [activeResultFile, loadFlowList, loadTargetLists, onMessage, onResultListRefresh]
+    [activeResultFile, loadFlowList, loadTargetLists, onMessage, onResultListRefresh, remoteHost]
   )
 
   useEffect(() => {
@@ -5250,10 +5462,20 @@ function StartBpPanel({
         upCharacterPvEndTime: normalizePvEndTime(nextRuntime.upCharacterPvEndTime),
         playbackMode: mode
       }
+      runtimeRef.current = runtimeWithMode
       setRuntime(runtimeWithMode)
       await window.bpAPI.bp.sendStateToDisplay(runtimeWithMode)
     },
     [bpFlow, bpMode]
+  )
+
+  const noteRemoteAuthorityChange = useCallback(
+    (reason: string): void => {
+      if (remoteHost.getRoomState().lifecycle === 'active') {
+        remoteDispatcher.noteAuthoritativeStateChange(reason)
+      }
+    },
+    [remoteDispatcher, remoteHost]
   )
 
   const startFlow = async (flow: FlowConfig): Promise<void> => {
@@ -5267,9 +5489,11 @@ function StartBpPanel({
     setSelectedCharacterId(null)
     setSelectedLightConeId(null)
     setPairedSelection({ star: null, rail: null })
+    setPairedConfirmations({ star: false, rail: false })
     setBpMode('manual')
     resetLiveDelayState()
     await syncRuntime(nextRuntime, 'manual', normalizedFlow)
+    noteRemoteAuthorityChange('flow-changed')
   }
 
   const useCurrentFlow = async (): Promise<void> => {
@@ -5297,8 +5521,10 @@ function StartBpPanel({
     setSelectedCharacterId(null)
     setSelectedLightConeId(null)
     setPairedSelection({ star: null, rail: null })
+    setPairedConfirmations({ star: false, rail: false })
     resetLiveDelayState()
     await syncRuntime(nextRuntime, bpMode)
+    noteRemoteAuthorityChange('bp-reset')
     onMessage('info', '已重置 BP 本局')
   }
 
@@ -5317,11 +5543,21 @@ function StartBpPanel({
     setSelectedCharacterId(null)
     setSelectedLightConeId(null)
     setPairedSelection({ star: null, rail: null })
+    setPairedConfirmations({ star: false, rail: false })
     setBpMode('manual')
     resetLiveDelayState()
     await syncRuntime(nextRuntime, 'manual', bpFlow)
+    noteRemoteAuthorityChange('new-bp')
     onMessage('success', `已新建 BP：${bpFlow.name}`)
-  }, [bpFlow, onMessage, onSelectedResultFileChange, resetLiveDelayState, runtime, syncRuntime])
+  }, [
+    bpFlow,
+    noteRemoteAuthorityChange,
+    onMessage,
+    onSelectedResultFileChange,
+    resetLiveDelayState,
+    runtime,
+    syncRuntime
+  ])
 
   useEffect(() => {
     if (newSessionRequestToken === handledNewSessionRequestRef.current) {
@@ -5367,6 +5603,7 @@ function StartBpPanel({
     setBpMode('live')
     resetLiveDelayState()
     await syncRuntime(nextRuntime, 'live', normalizedFlow)
+    if (nextRuntime !== runtime) noteRemoteAuthorityChange('live-bp-restarted')
     await onOpenDisplay()
     onMessage('success', '已进入直播 BP 模式')
   }
@@ -5424,18 +5661,19 @@ function StartBpPanel({
     )
   }
 
-  const confirmPairedSelection = async (selection: {
+  const commitPairedSelection = async (selection: {
     star: Character | null
     rail: Character | null
-  }): Promise<void> => {
-    const step = runtime.currentStep
+  }): Promise<boolean> => {
+    const currentRuntime = runtimeRef.current
+    const step = currentRuntime.currentStep
 
     if (!step || !isPairedAction(step.action)) {
-      return
+      return false
     }
 
     if (blockPendingExtraClick()) {
-      return
+      return false
     }
 
     if (!selection.star || !selection.rail) {
@@ -5445,18 +5683,18 @@ function StartBpPanel({
           ? '请分别选择双方要保护的已 Pick 角色'
           : '请分别选择双方要租借的对方已 Pick 角色'
       )
-      return
+      return false
     }
 
     if (step.action === 'borrow') {
       if (protectedCharacterIds.rail.has(selection.star.id)) {
         onMessage('error', '左侧队不能租借右侧队已保护角色')
-        return
+        return false
       }
 
       if (protectedCharacterIds.star.has(selection.rail.id)) {
         onMessage('error', '右侧队不能租借左侧队已保护角色')
-        return
+        return false
       }
     }
 
@@ -5482,17 +5720,62 @@ function StartBpPanel({
       pageChangeName: step.pageChangeName ?? null,
       pageChangeIndex: step.pageChangeIndex ?? null
     }
-    const actions = [...runtime.actions, actionRecord]
+    const actions = [...currentRuntime.actions, actionRecord]
     const nextRuntime = withUpCharacterPv(
-      buildRuntimeFromActions(bpFlow, actions, runtime.createdAt),
-      runtime
+      buildRuntimeFromActions(bpFlowRef.current, actions, currentRuntime.createdAt),
+      currentRuntime
     )
 
+    selectedCharacterIdRef.current = null
+    selectedLightConeIdRef.current = null
+    pairedSelectionRef.current = { star: null, rail: null }
+    pairedConfirmationsRef.current = { star: false, rail: false }
     setSelectedCharacterId(null)
     setSelectedLightConeId(null)
     setPairedSelection({ star: null, rail: null })
+    setPairedConfirmations({ star: false, rail: false })
     await syncRuntime(nextRuntime)
     onMessage('success', `${stepLabel(step)}：${actionRecord.targetName}`)
+    return true
+  }
+
+  const dispatchPairedSelection = async (selection: {
+    star: Character | null
+    rail: Character | null
+  }): Promise<void> => {
+    const step = runtimeRef.current.currentStep
+    if (!step || !isPairedAction(step.action) || !selection.star || !selection.rail) return
+
+    const action: RemoteBpAction = {
+      actionId: createBpActionId(),
+      actorSide: internalSideToRemoteSide(step.side, remoteSideMappingRef.current),
+      expectedRevision: remoteDispatcher.getRevision(),
+      stepIndex: step.index,
+      createdAt: new Date().toISOString(),
+      kind: step.action === 'protect' ? 'PROTECT' : 'BORROW',
+      targets: [
+        {
+          kind: 'CHARACTER',
+          id: String(selection.star.id),
+          side: internalSideToRemoteSide('star', remoteSideMappingRef.current)
+        },
+        {
+          kind: 'CHARACTER',
+          id: String(selection.rail.id),
+          side: internalSideToRemoteSide('rail', remoteSideMappingRef.current)
+        }
+      ]
+    }
+    const executor = remoteExecutorRef.current
+    if (!executor) return
+    const result = await remoteDispatcher.dispatch(
+      action,
+      'local',
+      getRemoteDispatchSnapshotRef.current(),
+      executor,
+      remoteSideMappingRef.current
+    )
+    if (!result.accepted) onMessage('error', result.message)
   }
 
   const handleTeamPickClick = (panelSide: BpSide, target: Character): void => {
@@ -5517,35 +5800,40 @@ function StartBpPanel({
       [choiceSide]: target
     }
 
+    selectedCharacterIdRef.current = null
+    selectedLightConeIdRef.current = null
+    pairedSelectionRef.current = nextSelection
+    pairedConfirmationsRef.current = { ...pairedConfirmationsRef.current, [choiceSide]: false }
     setSelectedCharacterId(null)
     setSelectedLightConeId(null)
     setPairedSelection(nextSelection)
+    setPairedConfirmations((current) => ({ ...current, [choiceSide]: false }))
 
     if (nextSelection.star && nextSelection.rail) {
-      void confirmPairedSelection(nextSelection)
+      void dispatchPairedSelection(nextSelection)
     }
   }
 
-  const confirmTarget = async (target: Character | LightCone | null): Promise<void> => {
-    const step = runtime.currentStep
+  const commitTarget = async (target: Character | LightCone | null): Promise<boolean> => {
+    const currentRuntime = runtimeRef.current
+    const step = currentRuntime.currentStep
 
     if (!step) {
       onMessage('info', '当前没有可确认的步骤')
-      return
+      return false
     }
 
     if (blockPendingExtraClick()) {
-      return
+      return false
     }
 
     if (isPairedAction(step.action)) {
-      await confirmPairedSelection(pairedSelection)
-      return
+      return commitPairedSelection(pairedSelectionRef.current)
     }
 
     if (!target) {
       onMessage('error', step.targetType === 'character' ? '请选择角色' : '请选择光锥')
-      return
+      return false
     }
 
     const targetIsLightCone = isLightConeTarget(target)
@@ -5557,7 +5845,7 @@ function StartBpPanel({
         'error',
         step.targetType === 'character' ? '当前步骤只能选择角色' : '当前步骤只能选择光锥'
       )
-      return
+      return false
     }
 
     if (
@@ -5569,7 +5857,7 @@ function StartBpPanel({
         'error',
         step.targetType === 'character' ? '该角色已经被 Pick 或 Ban' : '该光锥已经被 Pick 或 Ban'
       )
-      return
+      return false
     }
 
     const actionRecord: BpActionRecord = {
@@ -5591,17 +5879,213 @@ function StartBpPanel({
       pageChangeName: step.pageChangeName ?? null,
       pageChangeIndex: step.pageChangeIndex ?? null
     }
-    const actions = [...runtime.actions, actionRecord]
+    const actions = [...currentRuntime.actions, actionRecord]
     const nextRuntime = withUpCharacterPv(
-      buildRuntimeFromActions(bpFlow, actions, runtime.createdAt),
-      runtime
+      buildRuntimeFromActions(bpFlowRef.current, actions, currentRuntime.createdAt),
+      currentRuntime
     )
 
+    selectedCharacterIdRef.current = null
+    selectedLightConeIdRef.current = null
+    pairedSelectionRef.current = { star: null, rail: null }
+    pairedConfirmationsRef.current = { star: false, rail: false }
     setSelectedCharacterId(null)
     setSelectedLightConeId(null)
     setPairedSelection({ star: null, rail: null })
+    setPairedConfirmations({ star: false, rail: false })
     await syncRuntime(nextRuntime)
     onMessage('success', `${stepLabel(step)}：${actionRecord.targetName}`)
+    return true
+  }
+
+  const dispatchTarget = async (target: Character | LightCone): Promise<void> => {
+    const step = runtimeRef.current.currentStep
+    if (!step || isPairedAction(step.action) || !isRosterAction(step.action)) return
+
+    const targetIsLightCone = isLightConeTarget(target)
+    const action: RemoteBpAction = {
+      actionId: createBpActionId(),
+      actorSide: internalSideToRemoteSide(step.side, remoteSideMappingRef.current),
+      expectedRevision: remoteDispatcher.getRevision(),
+      stepIndex: step.index,
+      createdAt: new Date().toISOString(),
+      kind: step.action === 'ban' ? 'BAN' : 'PICK',
+      targets: [
+        {
+          kind: targetIsLightCone ? 'LIGHT_CONE' : 'CHARACTER',
+          id: String(target.id)
+        }
+      ]
+    }
+    const executor = remoteExecutorRef.current
+    if (!executor) return
+    const result = await remoteDispatcher.dispatch(
+      action,
+      'local',
+      getRemoteDispatchSnapshotRef.current(),
+      executor,
+      remoteSideMappingRef.current
+    )
+    if (!result.accepted) onMessage('error', result.message)
+  }
+
+  const publishPreviewTarget = useCallback(
+    async (target: Character | LightCone | null, actorSide: BpSide): Promise<void> => {
+      const currentRuntime = runtimeRef.current
+      const step = currentRuntime.currentStep
+      const previewSelection =
+        !liveWaitingExtraClick &&
+        target &&
+        step &&
+        (step.action === 'ban' || step.action === 'pick')
+          ? { side: actorSide, action: step.action, target }
+          : null
+      await window.bpAPI.bp.sendStateToDisplay({
+        ...currentRuntime,
+        previewSelection
+      })
+    },
+    [liveWaitingExtraClick]
+  )
+
+  useEffect(() => {
+    const wasWaiting = wasLiveWaitingExtraClickRef.current
+    wasLiveWaitingExtraClickRef.current = liveWaitingExtraClick
+    const step = runtimeRef.current.currentStep
+    if (!step) return
+
+    if (liveWaitingExtraClick) {
+      void publishPreviewTarget(null, step.side)
+      return
+    }
+    if (!wasWaiting || (step.action !== 'ban' && step.action !== 'pick')) return
+
+    const target =
+      step.targetType === 'lightCone'
+        ? (lightConesRef.current.find((item) => item.id === selectedLightConeIdRef.current) ?? null)
+        : (charactersRef.current.find((item) => item.id === selectedCharacterIdRef.current) ?? null)
+    void publishPreviewTarget(target, step.side)
+  }, [liveWaitingExtraClick, publishPreviewTarget])
+
+  remoteExecutorRef.current = {
+    selectTarget: async (target, actorSide) => {
+      const step = runtimeRef.current.currentStep
+      if (step && isPairedAction(step.action)) {
+        if (target.kind !== 'CHARACTER') {
+          return { stateChanged: false, message: '保护/租借只能选择角色' }
+        }
+        const character = charactersRef.current.find((item) => String(item.id) === target.id)
+        if (!character) return { stateChanged: false, message: '角色不存在' }
+        const changed =
+          pairedSelectionRef.current[actorSide]?.id !== character.id ||
+          pairedConfirmationsRef.current[actorSide]
+        pairedSelectionRef.current = { ...pairedSelectionRef.current, [actorSide]: character }
+        pairedConfirmationsRef.current = {
+          ...pairedConfirmationsRef.current,
+          [actorSide]: false
+        }
+        setPairedSelection((current) => ({ ...current, [actorSide]: character }))
+        setPairedConfirmations((current) => ({ ...current, [actorSide]: false }))
+        return { stateChanged: changed, message: '特殊操作选择已更新，请确认' }
+      }
+
+      if (target.kind === 'CHARACTER') {
+        const character = charactersRef.current.find((item) => String(item.id) === target.id)
+        if (!character) return { stateChanged: false, message: '角色不存在' }
+        const changed = selectedCharacterIdRef.current !== character.id
+        selectedCharacterIdRef.current = character.id
+        selectedLightConeIdRef.current = null
+        setSelectedCharacterId(character.id)
+        setSelectedLightConeId(null)
+        await publishPreviewTarget(character, actorSide)
+        return { stateChanged: changed, message: '角色选择已更新' }
+      }
+
+      const lightCone = lightConesRef.current.find((item) => String(item.id) === target.id)
+      if (!lightCone) return { stateChanged: false, message: '光锥不存在' }
+      const changed = selectedLightConeIdRef.current !== lightCone.id
+      selectedCharacterIdRef.current = null
+      selectedLightConeIdRef.current = lightCone.id
+      setSelectedCharacterId(null)
+      setSelectedLightConeId(lightCone.id)
+      await publishPreviewTarget(lightCone, actorSide)
+      return { stateChanged: changed, message: '光锥选择已更新' }
+    },
+    deselectTarget: async (actorSide) => {
+      const step = runtimeRef.current.currentStep
+      if (step && isPairedAction(step.action)) {
+        const changed =
+          pairedSelectionRef.current[actorSide] !== null ||
+          pairedConfirmationsRef.current[actorSide]
+        pairedSelectionRef.current = { ...pairedSelectionRef.current, [actorSide]: null }
+        pairedConfirmationsRef.current = {
+          ...pairedConfirmationsRef.current,
+          [actorSide]: false
+        }
+        setPairedSelection((current) => ({ ...current, [actorSide]: null }))
+        setPairedConfirmations((current) => ({ ...current, [actorSide]: false }))
+        return { stateChanged: changed, message: changed ? '选择已取消' : '当前没有选择' }
+      }
+
+      const changed =
+        selectedCharacterIdRef.current !== null || selectedLightConeIdRef.current !== null
+      selectedCharacterIdRef.current = null
+      selectedLightConeIdRef.current = null
+      setSelectedCharacterId(null)
+      setSelectedLightConeId(null)
+      await publishPreviewTarget(null, actorSide)
+      return { stateChanged: changed, message: changed ? '选择已取消' : '当前没有选择' }
+    },
+    confirmTarget: async (target, actorSide) => {
+      const step = runtimeRef.current.currentStep
+      if (step && isPairedAction(step.action)) {
+        if (pairedConfirmationsRef.current[actorSide]) {
+          return { stateChanged: false, message: '当前选手已经确认' }
+        }
+        const nextConfirmations = { ...pairedConfirmationsRef.current, [actorSide]: true }
+        pairedConfirmationsRef.current = nextConfirmations
+        setPairedConfirmations(nextConfirmations)
+        const otherSide = oppositeSide(actorSide)
+        if (!nextConfirmations[otherSide]) {
+          return { stateChanged: true, message: '已确认，等待另一方确认' }
+        }
+        const committed = await commitPairedSelection(pairedSelectionRef.current)
+        return {
+          stateChanged: committed,
+          message: committed ? '双方均已确认，特殊操作已应用' : '特殊操作提交失败'
+        }
+      }
+
+      const item =
+        target.kind === 'CHARACTER'
+          ? charactersRef.current.find((character) => String(character.id) === target.id)
+          : lightConesRef.current.find((lightCone) => String(lightCone.id) === target.id)
+      if (!item) return { stateChanged: false, message: '确认目标不存在' }
+      return { stateChanged: await commitTarget(item) }
+    },
+    commitTargets: async (kind, targets) => {
+      if (kind === 'PROTECT' || kind === 'BORROW') {
+        const selection: { star: Character | null; rail: Character | null } = {
+          star: null,
+          rail: null
+        }
+        for (const target of targets) {
+          if (!target.side) return { stateChanged: false, message: '特殊操作缺少目标阵营' }
+          const character = charactersRef.current.find((item) => String(item.id) === target.id)
+          if (!character) return { stateChanged: false, message: '特殊操作目标不存在' }
+          selection[remoteSideToInternalSide(target.side, remoteSideMappingRef.current)] = character
+        }
+        return { stateChanged: await commitPairedSelection(selection) }
+      }
+
+      const target = targets[0]
+      const item =
+        target.kind === 'CHARACTER'
+          ? charactersRef.current.find((character) => String(character.id) === target.id)
+          : lightConesRef.current.find((lightCone) => String(lightCone.id) === target.id)
+      if (!item) return { stateChanged: false, message: '操作目标不存在' }
+      return { stateChanged: await commitTarget(item) }
+    }
   }
 
   const undoLast = async (): Promise<void> => {
@@ -5616,8 +6100,10 @@ function StartBpPanel({
     setSelectedCharacterId(null)
     setSelectedLightConeId(null)
     setPairedSelection({ star: null, rail: null })
+    setPairedConfirmations({ star: false, rail: false })
     resetLiveDelayState()
     await syncRuntime(nextRuntime)
+    noteRemoteAuthorityChange('undo')
     onMessage('info', '已撤回上一步选择')
   }
 
@@ -5705,11 +6191,22 @@ function StartBpPanel({
     setSelectedCharacterId(null)
     setSelectedLightConeId(null)
     setPairedSelection({ star: null, rail: null })
+    setPairedConfirmations({ star: false, rail: false })
     setBpMode('manual')
     resetLiveDelayState()
     await syncRuntime(restored.runtime, 'manual', restored.flow)
+    noteRemoteAuthorityChange('result-loaded')
     onMessage('success', `已读取 BP 结果：${result.name}`)
   }
+
+  const leftTeamName =
+    (remoteRoomState.mapping.first === 'star'
+      ? remoteRoomState.firstPlayer.displayName
+      : remoteRoomState.secondPlayer.displayName) || '左侧队'
+  const rightTeamName =
+    (remoteRoomState.mapping.first === 'rail'
+      ? remoteRoomState.firstPlayer.displayName
+      : remoteRoomState.secondPlayer.displayName) || '右侧队'
 
   return (
     <section className="bp-workbench">
@@ -5739,14 +6236,14 @@ function StartBpPanel({
       </div>
 
       <BpTeamPanel
-        title="左侧队"
+        title={leftTeamName}
         side="star"
         picks={runtime.starTeam.picks}
         bans={runtime.starTeam.bans}
         slotCounts={runtime.slotCounts.star}
         protectedIds={protectedCharacterIds.star}
         blockedIds={currentPairedAction === 'borrow' ? protectedCharacterIds.star : undefined}
-        selectedIds={pairedPanelSelectionIds.star}
+        selectedIds={liveWaitingExtraClick ? undefined : pairedPanelSelectionIds.star}
         onPickClick={currentPairedAction ? handleTeamPickClick : undefined}
       />
 
@@ -5820,7 +6317,7 @@ function StartBpPanel({
             </header>
             <div className="bp-card-actions">
               <button type="button" onClick={importUpCharacterPv}>
-                选择 PV 文件
+                选择底片视频
               </button>
             </div>
             <div className="bp-pv-time-grid">
@@ -5850,6 +6347,8 @@ function StartBpPanel({
               </label>
             </div>
           </section>
+
+          <RemoteBpPanel host={remoteHost} />
         </div>
 
         <div className="bp-controls">
@@ -5903,8 +6402,16 @@ function StartBpPanel({
                 : '请点击对方已 Pick 角色，选择要租借的角色。'}
             </span>
             <span>
-              左侧队：{pairedSelection.star?.chinese_name ?? '未选择'} / 右侧队：
-              {pairedSelection.rail?.chinese_name ?? '未选择'}
+              {liveWaitingExtraClick ? (
+                <>等待额外点击完成后显示双方预选</>
+              ) : (
+                <>
+                  {leftTeamName}：{pairedSelection.star?.chinese_name ?? '未选择'}（
+                  {pairedConfirmations.star ? '已确认' : '未确认'}） / {rightTeamName}：
+                  {pairedSelection.rail?.chinese_name ?? '未选择'}（
+                  {pairedConfirmations.rail ? '已确认' : '未确认'}）
+                </>
+              )}
             </span>
           </div>
         ) : (
@@ -5959,7 +6466,8 @@ function StartBpPanel({
               {runtime.currentStep?.targetType === 'lightCone'
                 ? filteredLightCones.map((lightCone) => {
                     const isUsed = usedLightConeIds.has(lightCone.id)
-                    const isSelected = selectedLightConeId === lightCone.id
+                    const isSelected =
+                      !liveWaitingExtraClick && selectedLightConeId === lightCone.id
                     const imageUrl = lightConeImage(lightCone)
 
                     return (
@@ -5970,9 +6478,11 @@ function StartBpPanel({
                         title={lightCone.name}
                         disabled={isUsed || liveWaitingExtraClick}
                         onClick={() => {
+                          selectedLightConeIdRef.current = lightCone.id
+                          selectedCharacterIdRef.current = null
                           setSelectedLightConeId(lightCone.id)
                           setSelectedCharacterId(null)
-                          void confirmTarget(lightCone)
+                          void dispatchTarget(lightCone)
                         }}
                       >
                         {imageUrl ? <img src={imageUrl} alt={lightCone.name} /> : null}
@@ -5981,7 +6491,8 @@ function StartBpPanel({
                   })
                 : filteredCharacters.map((character) => {
                     const isUsed = usedCharacterIds.has(character.id)
-                    const isSelected = selectedCharacterId === character.id
+                    const isSelected =
+                      !liveWaitingExtraClick && selectedCharacterId === character.id
                     const imageUrl = bpCharacterImage(character)
 
                     return (
@@ -5992,9 +6503,11 @@ function StartBpPanel({
                         title={character.chinese_name}
                         disabled={isUsed || liveWaitingExtraClick}
                         onClick={() => {
+                          selectedCharacterIdRef.current = character.id
+                          selectedLightConeIdRef.current = null
                           setSelectedCharacterId(character.id)
                           setSelectedLightConeId(null)
-                          void confirmTarget(character)
+                          void dispatchTarget(character)
                         }}
                       >
                         {imageUrl ? <img src={imageUrl} alt={character.chinese_name} /> : null}
@@ -6007,19 +6520,20 @@ function StartBpPanel({
       </main>
 
       <BpTeamPanel
-        title="右侧队"
+        title={rightTeamName}
         side="rail"
         picks={runtime.railTeam.picks}
         bans={runtime.railTeam.bans}
         slotCounts={runtime.slotCounts.rail}
         protectedIds={protectedCharacterIds.rail}
         blockedIds={currentPairedAction === 'borrow' ? protectedCharacterIds.rail : undefined}
-        selectedIds={pairedPanelSelectionIds.rail}
+        selectedIds={liveWaitingExtraClick ? undefined : pairedPanelSelectionIds.rail}
         onPickClick={currentPairedAction ? handleTeamPickClick : undefined}
       />
     </section>
   )
 }
+/* eslint-enable react-hooks/refs, react-hooks/preserve-manual-memoization */
 
 function ConsolePage(): React.JSX.Element {
   const [activeView, setActiveView] = useState<ConsoleView>('characters')

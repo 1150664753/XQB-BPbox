@@ -26,6 +26,7 @@ import type {
   VoiceTimelinePlayback
 } from '../shared/types'
 import type { UpdateState } from '../shared/updater'
+import type { AssetManifest, AssetManifestEntry, RemoteAssetBinary } from '../shared/remoteBp'
 
 export interface BpAPI {
   updater: {
@@ -114,6 +115,11 @@ export interface BpAPI {
     onVoiceTimelinePlayback: (
       callback: (playback: VoiceTimelinePlayback | null) => void
     ) => () => void
+  }
+  remoteBp: {
+    getAssetManifest: () => Promise<AssetManifest>
+    getAssetDescriptor: (assetId: string) => Promise<AssetManifestEntry>
+    getAsset: (assetId: string) => Promise<RemoteAssetBinary>
   }
   voiceTimelines: {
     list: () => Promise<VoiceTimelineListItem[]>

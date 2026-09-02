@@ -1,0 +1,58 @@
+.remote-bp-card {
+  grid-template-rows: auto auto auto 1fr;
+}
+
+.remote-bp-room-code-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+}
+
+.remote-bp-room-code-row strong {
+  overflow: hidden;
+  font-size: var(--bp-font-size);
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remote-bp-copy-button {
+  flex: 0 0 auto;
+  min-height: 24px;
+  padding: 2px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: #ffffff;
+  color: var(--color-blue);
+  font-size: var(--bp-small-font-size);
+  cursor: pointer;
+}
+
+.remote-bp-copy-button:hover {
+  border-color: var(--color-blue);
+  background: #f3f8ff;
+}
+
+.remote-bp-copy-button:focus-visible {
+  outline: 2px solid var(--color-blue);
+  outline-offset: 1px;
+}
+
+.remote-bp-status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 10px;
+  color: var(--color-muted);
+  font-size: var(--bp-small-font-size);
+}
+
+.remote-bp-status-grid span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remote-bp-error {
+  color: #b42318;
+}

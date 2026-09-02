@@ -113,6 +113,11 @@ const bpAPI: BpAPI = {
       return () => ipcRenderer.removeListener('bp:display-replay-click', listener)
     }
   },
+  remoteBp: {
+    getAssetManifest: () => ipcRenderer.invoke('remote-bp:get-asset-manifest'),
+    getAssetDescriptor: (assetId) => ipcRenderer.invoke('remote-bp:get-asset-descriptor', assetId),
+    getAsset: (assetId) => ipcRenderer.invoke('remote-bp:get-asset', assetId)
+  },
   voiceTimelines: {
     list: () => ipcRenderer.invoke('voice-timelines:list'),
     load: (fileName) => ipcRenderer.invoke('voice-timelines:load', fileName),

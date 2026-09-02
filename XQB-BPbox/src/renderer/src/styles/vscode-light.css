@@ -2657,6 +2657,15 @@ button.bp-slot {
   grid-area: 1 / 1;
 }
 
+.display-slot-tentative > img {
+  opacity: 0.58;
+  filter: grayscale(0.45) saturate(0.7);
+}
+
+.display-slot-tentative > strong {
+  opacity: 0.7;
+}
+
 .display-slot-effect {
   position: absolute;
   z-index: 4;

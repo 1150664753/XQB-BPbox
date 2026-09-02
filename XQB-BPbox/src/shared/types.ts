@@ -380,6 +380,12 @@ export interface DisplaySlotEffects {
 
 export type BpTeamTarget = Character | LightCone
 
+export interface BpPreviewSelection {
+  side: BpSide
+  action: 'pick' | 'ban'
+  target: BpTeamTarget
+}
+
 export interface TeamBpState {
   name: string
   picks: BpTeamTarget[]
@@ -434,6 +440,7 @@ export interface BpRuntimeState {
   stepCursor: number
   status: 'idle' | 'running' | 'complete'
   currentStep: FlowStep | null
+  previewSelection?: BpPreviewSelection | null
   followingStep?: FlowStep | null
   slotCounts: BpSlotCounts
   starTeam: TeamBpState

@@ -1,5 +1,7 @@
 # Node / npm dependencies
 /XQB-BPbox/node_modules/
+/XBQ-BPweb/node_modules/
+/remote-bp-signaling/node_modules/
 
 # Electron / Vite build and packaging output
 /XQB-BPbox/dist/

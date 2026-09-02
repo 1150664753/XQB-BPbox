@@ -1,0 +1,29 @@
+export const PROTOCOL_VERSION = "1.1.1" as const;
+
+export const CLIENT_MESSAGE_TYPES = {
+  HELLO: "HELLO",
+  JOIN: "JOIN",
+  ACTION_REQUEST: "ACTION_REQUEST",
+  STATE_REQUEST: "STATE_REQUEST",
+  ASSET_REQUEST: "ASSET_REQUEST",
+  PING: "PING",
+} as const;
+
+export const HOST_MESSAGE_TYPES = {
+  WELCOME: "WELCOME",
+  INITIAL_STATE: "INITIAL_STATE",
+  STATE_UPDATE: "STATE_UPDATE",
+  ACTION_RESULT: "ACTION_RESULT",
+  ASSET_MANIFEST: "ASSET_MANIFEST",
+  ASSET_START: "ASSET_START",
+  ASSET_CHUNK: "ASSET_CHUNK",
+  ASSET_COMPLETE: "ASSET_COMPLETE",
+  PONG: "PONG",
+  ERROR: "ERROR",
+} as const;
+
+export type ClientMessageType =
+  (typeof CLIENT_MESSAGE_TYPES)[keyof typeof CLIENT_MESSAGE_TYPES];
+export type HostMessageType =
+  (typeof HOST_MESSAGE_TYPES)[keyof typeof HOST_MESSAGE_TYPES];
+export type ProtocolMessageType = ClientMessageType | HostMessageType;
