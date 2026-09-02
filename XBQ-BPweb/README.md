@@ -35,4 +35,18 @@ npm run build
 npm run preview
 ```
 
+## Cloudflare Workers Static Assets 部署
+
+Cloudflare 项目使用以下构建与部署设置：
+
+```text
+Root directory: XBQ-BPweb
+Build command: npm run build
+Deploy command: npx wrangler deploy
+Static assets: ./dist
+SPA fallback: enabled
+```
+
+Wrangler 发布 Vite 生成的 `dist` 目录；SPA fallback 由 `wrangler.jsonc` 配置，因此 `/room/ABCDEFG` 等客户端路由可直接访问或刷新。
+
 完整启动、双端联调与后续 TODO 见 [本阶段开发记录](../docs/REMOTE_BP_WEBRTC_STAGE.md)。
