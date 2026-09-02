@@ -38,7 +38,7 @@ Web 页面没有乐观写入 BAN/PICK 结果。连接断开时禁止发送 Actio
 
 ### Signaling Server
 
-`remote-bp-signaling` 是独立的 Node.js + WebSocket 最小服务。它支持：
+`remote-bp-signaling` 保留 Node.js + WebSocket 本地开发服务，并在 `remote-bp-signaling/cloudflare` 提供协议兼容的公网实现。公网服务使用 Cloudflare Worker、SQLite-backed `BpRoom` Durable Object 和 WebSocket Hibernation API；一个 `roomId` 固定对应一个 Durable Object，不使用全局变量或 KV 保存房间。两种实现都支持：
 
 - `CREATE_ROOM`、`JOIN_ROOM`、`LEAVE_ROOM`。
 - `OFFER`、`ANSWER`、`ICE_CANDIDATE` 中继。
@@ -46,7 +46,7 @@ Web 页面没有乐观写入 BAN/PICK 结果。连接断开时禁止发送 Actio
 
 房间保存 `roomCode`、`host`、`firstPlayer`、`secondPlayer`、`createdAt`、`expiresAt`。服务器生成 6 位房间码和随机 sessionId；一个选手槽位只能存在一个连接。房主断开会使房间失效，选手异常断开会释放对应槽位。客户端声明的身份只有在 `ROOM_JOINED` 返回后才生效。
 
-服务提供 `/health`，默认监听 `0.0.0.0:8787`，默认房间有效期 2 小时。
+服务提供 `/health`，默认房间有效期 2 小时。本地 Node 服务监听 `0.0.0.0:8787`；公网入口为 `wss://signal.xqbbp.dpdns.org`。公网选手连接通过 `?roomId=ABCDEFG` 定位房间，WebSocket 内的信令消息格式不变。
 
 ### Signaling Client 与 WebRTC
 
@@ -120,6 +120,18 @@ npm start
 
 可参考 `.env.example` 设置 `SIGNALING_HOST`、`SIGNALING_PORT` 和 `SIGNALING_ROOM_TTL_MS`。跨设备联调时，防火墙需要允许所选端口。
 
+公网 Worker 本地检查及部署：
+
+```bash
+cd remote-bp-signaling/cloudflare
+npm install
+npm run typecheck
+npm test
+npx wrangler deploy
+```
+
+Wrangler 将 `signal.xqbbp.dpdns.org` 配置为 `xqb-bp-signaling` Worker 的 Custom Domain，并创建 `BpRoom` Durable Object。DNS、证书和部署前提见该目录的 `README.md`。
+
 ### BPbox
 
 ```bash
@@ -128,7 +140,7 @@ npm install
 npm run dev
 ```
 
-把 `.env.example` 复制为本地 `.env`，并把 `VITE_REMOTE_BP_SIGNALING_URL` 指向信令服务器，例如 `ws://192.168.1.20:8787`。在“开始 BP”页点击“创建远程 BP”，管理卡片会显示房间码、信令状态、先手/后手连接状态和 revision。
+生产构建默认使用 `wss://signal.xqbbp.dpdns.org`，开发模式默认使用 `ws://localhost:8787`。如需跨设备本地联调，可在 `.env.local` 中把 `VITE_REMOTE_BP_SIGNALING_URL` 设为局域网地址，例如 `ws://192.168.1.20:8787`。在“开始 BP”页点击“创建远程 BP”，管理卡片会显示房间码、信令状态、先手/后手连接状态和 revision。
 
 ### Web
 
@@ -138,7 +150,7 @@ npm install
 npm run dev -- --host 0.0.0.0
 ```
 
-同样把 `VITE_REMOTE_BP_SIGNALING_URL` 指向选手浏览器可访问的地址。两台设备访问 Vite 输出的 Web 地址。公网或 HTTPS 页面应配套使用 WSS，避免浏览器拦截 mixed content。
+生产网页 `https://xqbbp.dpdns.org` 默认使用公网 WSS。开发模式默认连接 `ws://localhost:8787`；跨设备本地联调时可在 `.env.local` 中覆盖为选手浏览器可访问的地址。
 
 ## 双端联调步骤
 
@@ -155,6 +167,7 @@ npm run dev -- --host 0.0.0.0
 
 ```bash
 cd remote-bp-signaling && npm test
+cd remote-bp-signaling/cloudflare && npm run typecheck && npm test
 cd XQB-BPbox && npm run typecheck && npm run test:remote-bp
 cd XBQ-BPweb && npm run build
 ```
@@ -166,5 +179,4 @@ cd XBQ-BPweb && npm run build
 - `IndexedDBAssetCache`。
 - 跨信令断线的稳定 session 身份恢复。
 - 更完整的审计日志和监控。
-- 公网部署、WSS、NAT/企业网络环境测试。
-- 数据库房间持久化、账号和复杂权限系统。
+- 公网上线后的 NAT、企业网络与移动网络覆盖测试。

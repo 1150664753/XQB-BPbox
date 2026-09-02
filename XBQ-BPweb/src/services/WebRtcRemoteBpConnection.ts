@@ -56,6 +56,12 @@ function sideToRole(side: PlayerSide): "FIRST" | "SECOND" {
   return side === "first" ? "FIRST" : "SECOND";
 }
 
+function createSignalingUrl(baseUrl: string, roomId: string): string {
+  const url = new URL(baseUrl);
+  url.searchParams.set("roomId", roomId);
+  return url.toString();
+}
+
 function parseSignalingMessage(raw: string): SignalingEnvelope {
   if (new TextEncoder().encode(raw).byteLength > MAX_SIGNALING_MESSAGE_BYTES) {
     throw new Error("信令消息超过大小限制");
@@ -159,7 +165,9 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
     };
     this.confirmed = null;
     this.setConnectionState("connecting", "正在连接信令服务器");
-    const socket = new WebSocket(this.options.signalingUrl);
+    const socket = new WebSocket(
+      createSignalingUrl(this.options.signalingUrl, this.requested.roomId),
+    );
     this.socket = socket;
     socket.addEventListener("message", (event) =>
       this.handleSignalingRaw(event.data),

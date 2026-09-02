@@ -21,11 +21,11 @@ npm run dev
 
 ```text
 VITE_REMOTE_BP_TRANSPORT=webrtc
-VITE_REMOTE_BP_SIGNALING_URL=ws://localhost:8787
+VITE_REMOTE_BP_SIGNALING_URL=wss://signal.xqbbp.dpdns.org
 VITE_REMOTE_BP_ICE_SERVERS=[{"urls":["stun:stun.l.google.com:19302"]}]
 ```
 
-如需独立体验 UI，把 Transport 改为 `mock`。
+生产构建默认连接公网 WSS；本地开发默认连接 `ws://localhost:8787`，可在 `.env.local` 中显式覆盖。不要在源码中写入部署环境专用的临时地址。如需独立体验 UI，把 Transport 改为 `mock`。
 
 ## 检查与构建
 

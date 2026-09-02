@@ -1,0 +1,26 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "xqb-bp-signaling",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-02",
+  "routes": [
+    {
+      "pattern": "signal.xqbbp.dpdns.org",
+      "custom_domain": true
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "BP_ROOMS",
+        "class_name": "BpRoom"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["BpRoom"]
+    }
+  ]
+}
