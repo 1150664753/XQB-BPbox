@@ -1,8 +1,6 @@
 export type RemoteBpHostTransportMode = 'mock' | 'webrtc'
 
-const DEFAULT_SIGNALING_URL = import.meta.env.DEV
-  ? 'ws://localhost:8787'
-  : 'wss://signal.xqbbp.dpdns.org'
+const DEFAULT_SIGNALING_URL = 'wss://signal.xqbbp.dpdns.org'
 const DEFAULT_ICE_SERVERS: RTCIceServer[] = [{ urls: ['stun:stun.l.google.com:19302'] }]
 
 function parseIceServers(raw: string | undefined): RTCIceServer[] {

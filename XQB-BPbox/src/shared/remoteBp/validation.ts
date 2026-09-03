@@ -1,6 +1,6 @@
 import type { RemoteBpAction } from './types'
 
-export const REMOTE_BP_PROTOCOL_VERSION = '1.1.1' as const
+export const REMOTE_BP_PROTOCOL_VERSION = '1.2.1' as const
 export const MAX_REMOTE_BP_MESSAGE_BYTES = 512 * 1024
 
 export type ValidatedRemoteClientMessage =

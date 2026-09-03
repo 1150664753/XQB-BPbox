@@ -7,7 +7,9 @@ export type ConnectionState =
   | "connected"
   | "reconnecting"
   | "disconnected"
-  | "failed";
+  | "failed"
+  | "kicked"
+  | "room-closed";
 
 export type ConnectionTransport = "mock" | "p2p" | "turn-relay" | "unknown";
 

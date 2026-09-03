@@ -40,13 +40,13 @@ Web 页面没有乐观写入 BAN/PICK 结果。连接断开时禁止发送 Actio
 
 `remote-bp-signaling` 根目录同时保留 Node.js + WebSocket 本地开发服务和协议兼容的 Cloudflare 公网实现。公网服务使用 Cloudflare Worker、SQLite-backed `BpRoom` Durable Object 和 WebSocket Hibernation API；一个 `roomId` 固定对应一个 Durable Object，不使用全局变量或 KV 保存房间。两种实现都支持：
 
-- `CREATE_ROOM`、`JOIN_ROOM`、`LEAVE_ROOM`。
+- `CREATE_ROOM`、`RESUME_ROOM`、`JOIN_ROOM`、`LEAVE_ROOM`、`KICK_PEER`、`HEARTBEAT`。
 - `OFFER`、`ANSWER`、`ICE_CANDIDATE` 中继。
-- `ROOM_CREATED`、`ROOM_JOINED`、`PEER_JOINED`、`PEER_LEFT`、`ERROR`。
+- `ROOM_CREATED`、`ROOM_RESUMED`、`ROOM_JOINED`、`PEER_JOINED`、`PEER_LEFT`、`HOST_DISCONNECTED`、`HOST_RECONNECTED`、`ERROR`。
 
-房间保存 `roomCode`、`host`、`firstPlayer`、`secondPlayer`、`createdAt`、`expiresAt`。服务器生成 6 位房间码和随机 sessionId；一个选手槽位只能存在一个连接。房主断开会使房间失效，选手异常断开会释放对应槽位。客户端声明的身份只有在 `ROOM_JOINED` 返回后才生效。
+房间持久保存 `roomCode`、房主 session、房主恢复凭证和 `createdAt`；运行时保留先手、后手槽位。服务器生成 6 位房间码和随机 sessionId；一个选手槽位只能存在一个连接。房主信令异常断开不再销毁房间，而是通知选手等待恢复；房主明确点击“关闭房间”才会发出 `ROOM_CLOSED` 并释放所有连接。选手异常断开会释放对应槽位。
 
-服务提供 `/health`，默认房间有效期 2 小时。本地 Node 服务监听 `0.0.0.0:8787`；公网入口为 `wss://signal.xqbbp.dpdns.org`。公网选手连接通过 `?roomId=ABCDEFG` 定位房间，WebSocket 内的信令消息格式不变。
+服务提供 `/health`，新房间不再设置固定 TTL 或空闲销毁计时器。本地 Node 服务监听 `0.0.0.0:8787`；公网入口为 `wss://signal.xqbbp.dpdns.org`。公网选手连接通过 `?roomId=ABCDEFG` 定位房间。
 
 ### Signaling Client 与 WebRTC
 
@@ -54,7 +54,12 @@ BPbox 的 `WebRtcRemoteHostTransport` 连接信令服务并创建房间。每当
 
 Web 的 `WebRtcRemoteBpConnection` 先请求加入房间，拿到服务器确认的 `assignedSide` 和 sessionId 后再响应 Offer、创建 Answer。DataChannel 打开后才把连接状态设为 `connected` 并进入 BP 页面。
 
-支持 `connecting / connected / disconnected / failed / reconnecting`。短暂 ICE 断线时 BPbox 会尝试 ICE restart；Web 保留最后一次权威 UI 状态，恢复后重新请求状态。信令连接完全丢失后的 session 恢复仍列为后续工作。
+支持 `connecting / connected / disconnected / failed / reconnecting / kicked / room-closed`。DataChannel 每 15 秒发送与 BP Action 分离的 `PING/PONG`，信令 WebSocket 每 20 秒发送 `HEARTBEAT/HEARTBEAT_ACK`；两种心跳都不改变 revision，也不触发 BP 状态广播。短暂 ICE 断线保留 10 秒恢复窗口，仅在确认失败后重建；信令断线采用有上限的指数退避自动重连。Web 保留最后一次权威 UI 状态，恢复后重新请求状态。`KICKED` 和 `ROOM_CLOSED` 是终止状态，不会自动重连。
+
+### 连接状态与 WAIT
+
+- BPbox 房间管理卡分别展示先手/后手的连接中、已连接、重连中和未连接状态，并可以用独立的 `×` 踢出某个槽位。Web 的两侧选手区同步显示实际 Peer/DataChannel 状态。
+- 直播 BP 因展示页延迟规则需要 BPbox 额外点击时，Host 在 `RemoteBpState` 中明确发布 `waitingForHost: true`、`phase: WAITING` 与 `currentOperation: WAIT`。Web 顶部显示中性配色的 `WAIT`，并清空可操作目标与确认能力，不依赖 disabled 按钮反推。
 
 ### actionId / revision
 
@@ -96,7 +101,7 @@ action payload
 - 网页加入房间时提交队伍或选手展示名称；BPbox 仅用它替换左右队标签，先手/后手权限映射不变。
 - Web 的 `SELECT` / `DESELECT` 会同步成带目标类型的预选。BPbox 控制页同步高亮，直播展示页只在下一个待选位置显示灰化预览，不写入正式 Action，也不加载资源、播放视频、音频或特效。
 - `CONFIRM` 才提交正式 BAN/PICK。保护和租借允许双方分别选择各自合法目标并确认，第二位选手完成确认后才形成一次正式操作并推进流程。
-- `RemoteBpState` 新增光锥池及结果、`selectionTargets`、`confirmedSides`、分侧可用目标与分侧确认能力。协议版本从 `1.0.0` 提升为 `1.1.0`，资源分片性能优化后补丁版本为 `1.1.1`；Web 与 BPbox 需要配套更新，信令服务器仍只负责房间和 WebRTC 信令转发。
+- `RemoteBpState` 新增光锥池及结果、`selectionTargets`、`confirmedSides`、分侧可用目标与分侧确认能力。协议版本从 `1.0.0` 提升为 `1.1.0`，资源分片性能优化后补丁版本为 `1.1.1`；本轮增加连接状态、`WAIT`、踢出与房间关闭终止消息后升级为 `1.2.1`。Web 与 BPbox 需要配套更新，信令服务器仍只负责房间和 WebRTC 信令转发。
 
 ### STUN / TURN 配置
 
@@ -118,7 +123,7 @@ npm install
 npm start
 ```
 
-可参考 `.env.example` 设置 `SIGNALING_HOST`、`SIGNALING_PORT` 和 `SIGNALING_ROOM_TTL_MS`。跨设备联调时，防火墙需要允许所选端口。
+可参考 `.env.example` 设置 `SIGNALING_HOST` 和 `SIGNALING_PORT`。跨设备联调时，防火墙需要允许所选端口。
 
 公网 Worker 本地检查及部署：
 
@@ -140,7 +145,7 @@ npm install
 npm run dev
 ```
 
-生产构建默认使用 `wss://signal.xqbbp.dpdns.org`，开发模式默认使用 `ws://localhost:8787`。如需跨设备本地联调，可在 `.env.local` 中把 `VITE_REMOTE_BP_SIGNALING_URL` 设为局域网地址，例如 `ws://192.168.1.20:8787`。在“开始 BP”页点击“创建远程 BP”，管理卡片会显示房间码、信令状态、先手/后手连接状态和 revision。
+BPbox 的开发与生产构建默认都使用 `wss://signal.xqbbp.dpdns.org`。如需本地或跨设备局域网联调，可在 `.env.local` 中把 `VITE_REMOTE_BP_SIGNALING_URL` 显式设为 `ws://localhost:8787` 或局域网地址，例如 `ws://192.168.1.20:8787`。在“开始 BP”页点击“创建远程 BP”，管理卡片会显示房间码、信令状态、先手/后手连接状态和 revision。
 
 ### Web
 
@@ -162,6 +167,9 @@ npm run dev -- --host 0.0.0.0
 6. 等待资源计数完成，确认角色阶段显示头像/立绘、光锥阶段自动切换为光锥池并显示小图，且浏览器拿不到任何 BPbox 本地路径。
 7. 尝试让非当前操作者提交，或使用过期 revision；应收到拒绝且 BPbox 状态不被修改。
 8. 断开一个浏览器，检查槽位释放和连接状态；重新加入后以 BPbox 最新状态覆盖页面。
+9. 静置数十分钟，确认信令心跳与 DataChannel Ping 持续，revision 不增加、选手不离房。
+10. 分别踢出先手和后手，确认仅对应窗口显示“已被房主踢出”，旧客户端不重连，新选手可立即补位。
+11. 关闭房间，确认两窗口都显示“房间已关闭”且不再重连。
 
 ## 验证命令
 
@@ -177,6 +185,5 @@ cd XBQ-BPweb && npm run build
 - 生产 TURN 服务与凭据下发。
 - 独立二进制资源通道与传输取消；当前为有界 Base64 分片。
 - `IndexedDBAssetCache`。
-- 跨信令断线的稳定 session 身份恢复。
 - 更完整的审计日志和监控。
 - 公网上线后的 NAT、企业网络与移动网络覆盖测试。

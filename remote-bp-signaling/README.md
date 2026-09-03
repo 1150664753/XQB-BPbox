@@ -15,7 +15,7 @@ npm run typecheck
 npm test
 ```
 
-`npm test` 会启动本地 Wrangler runtime，验证创建房间、先后手加入、重复身份拒绝、OFFER/ANSWER/ICE 转发、断开释放槽位以及房主离开后关闭房间。
+`npm test` 会启动本地 Wrangler runtime，验证创建房间、先后手加入、重复身份拒绝、OFFER/ANSWER/ICE 转发、心跳、房主信令恢复、踢出与补位，以及房主显式关闭房间。
 
 ## 部署
 
@@ -50,7 +50,9 @@ wss://signal.xqbbp.dpdns.org
 https://signal.xqbbp.dpdns.org/health
 ```
 
-房主连接基础地址，由 Worker 生成房间码；选手连接时使用 `?roomId=ABCDEFG` 定位相同 Durable Object。WebSocket 内的 `CREATE_ROOM`、`JOIN_ROOM`、`OFFER`、`ANSWER` 与 `ICE_CANDIDATE` 消息格式保持不变。
+房主连接基础地址，由 Worker 生成房间码；选手连接时使用 `?roomId=ABCDEFG` 定位相同 Durable Object。房间没有固定空闲 TTL，房主与选手每 20 秒发送轻量信令心跳。房主信令 WebSocket 异常断开时房间与选手槽位保留，可使用仅房主持有的 `resumeToken` 恢复；只有房主发送 `LEAVE_ROOM` 才会广播 `ROOM_CLOSED` 并释放房间。
+
+新增的信令消息包括 `RESUME_ROOM`、`KICK_PEER`、`HEARTBEAT`、`ROOM_RESUMED`、`HOST_DISCONNECTED` 和 `HOST_RECONNECTED`。踢出只释放指定的 `FIRST` 或 `SECOND` 槽位，不影响另一名选手。
 
 网页发布地址为 `https://xqbbp.dpdns.org`。生产构建默认使用公网 WSS；本地开发默认使用 `ws://localhost:8787`，也可以在 `.env.local` 中通过 `VITE_REMOTE_BP_SIGNALING_URL` 显式覆盖。
 

@@ -5086,6 +5086,8 @@ function StartBpPanel({
   const selectedCharacterIdRef = useRef(selectedCharacterId)
   const selectedLightConeIdRef = useRef(selectedLightConeId)
   const wasLiveWaitingExtraClickRef = useRef(false)
+  const liveWaitingExtraClickRef = useRef(false)
+  const publishedWaitingForHostRef = useRef(false)
   const pairedSelectionRef = useRef(pairedSelection)
   const pairedConfirmationsRef = useRef(pairedConfirmations)
   const remoteSideMappingRef = useRef(remoteSideMapping)
@@ -5221,6 +5223,7 @@ function StartBpPanel({
       rail: pairedSelectionRef.current.rail?.id ?? null
     },
     pairedConfirmations: pairedConfirmationsRef.current,
+    waitingForHost: liveWaitingExtraClickRef.current,
     canConfirm: Boolean(
       selectedCharacterIdRef.current ||
       selectedLightConeIdRef.current ||
@@ -5430,6 +5433,7 @@ function StartBpPanel({
     [bpMode, liveCompletedDelayedChangeKeys, liveDelayClickProgress, liveDisplaySettings, runtime]
   )
   const liveWaitingExtraClick = bpMode === 'live' && livePendingDelayedChanges.length > 0
+  liveWaitingExtraClickRef.current = liveWaitingExtraClick
   const liveExtraClickRemaining = livePendingDelayedChanges.reduce(
     (maxRemaining, pendingChange) => Math.max(maxRemaining, pendingChange.remainingClicks),
     0
@@ -5477,6 +5481,12 @@ function StartBpPanel({
     },
     [remoteDispatcher, remoteHost]
   )
+
+  useEffect(() => {
+    if (publishedWaitingForHostRef.current === liveWaitingExtraClick) return
+    publishedWaitingForHostRef.current = liveWaitingExtraClick
+    noteRemoteAuthorityChange('waiting-for-host-changed')
+  }, [liveWaitingExtraClick, noteRemoteAuthorityChange])
 
   const startFlow = async (flow: FlowConfig): Promise<void> => {
     const normalizedFlow = normalizeFlowConfig(flow)

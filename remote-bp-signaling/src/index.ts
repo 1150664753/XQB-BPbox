@@ -2,14 +2,19 @@ import { DurableObject } from "cloudflare:workers";
 
 const MAX_SIGNALING_MESSAGE_BYTES = 64 * 1024;
 
-const ROOM_TTL_MS = 2 * 60 * 60 * 1000;
 const MAX_ROOM_CONNECTIONS = 3;
+const MAX_TRANSIENT_UNASSIGNED_CONNECTIONS = 4;
+const PERSISTENT_ROOM_EXPIRES_AT = "9999-12-31T23:59:59.999Z";
+const ROOM_METADATA_KEY = "room";
 const ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const ROOM_CODE_PATTERN = /^[A-Z2-9]{6}$/;
 const CLIENT_MESSAGE_TYPES = new Set([
   "CREATE_ROOM",
+  "RESUME_ROOM",
   "JOIN_ROOM",
   "LEAVE_ROOM",
+  "KICK_PEER",
+  "HEARTBEAT",
   "OFFER",
   "ANSWER",
   "ICE_CANDIDATE",
@@ -18,7 +23,15 @@ const PLAYER_ROLES = new Set(["FIRST", "SECOND"]);
 const ALL_ROLES = new Set(["HOST", "FIRST", "SECOND"]);
 
 type SignalingRole = "HOST" | "FIRST" | "SECOND";
-type ConnectionMode = "CREATE" | "JOIN";
+type ConnectionMode = "CREATE" | "JOIN" | "RESUME";
+
+interface RoomMetadata {
+  roomCode: string;
+  sessionId: string;
+  resumeToken: string;
+  displayName: string;
+  createdAt: number;
+}
 
 interface SessionDescription {
   type: "offer" | "answer";
@@ -54,7 +67,9 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 function isString(value: unknown, min: number, max: number): value is string {
-  return typeof value === "string" && value.length >= min && value.length <= max;
+  return (
+    typeof value === "string" && value.length >= min && value.length <= max
+  );
 }
 
 function normalizeRoomCode(value: unknown): string {
@@ -142,7 +157,10 @@ function parseClientMessage(raw: string): SignalingMessage {
   const payload = value.payload;
   switch (value.type) {
     case "CREATE_ROOM":
-      if (payload.displayName !== undefined && !isString(payload.displayName, 1, 64)) {
+      if (
+        payload.displayName !== undefined &&
+        !isString(payload.displayName, 1, 64)
+      ) {
         throw new Error("INVALID_DISPLAY_NAME");
       }
       return {
@@ -150,11 +168,29 @@ function parseClientMessage(raw: string): SignalingMessage {
         ...(value.requestId ? { requestId: value.requestId } : {}),
         payload: { displayName: payload.displayName },
       };
+    case "RESUME_ROOM": {
+      const roomCode = normalizeRoomCode(payload.roomCode);
+      if (!ROOM_CODE_PATTERN.test(roomCode))
+        throw new Error("INVALID_ROOM_CODE");
+      if (!isString(payload.resumeToken, 16, 128)) {
+        throw new Error("INVALID_RESUME_TOKEN");
+      }
+      return {
+        type: value.type,
+        ...(value.requestId ? { requestId: value.requestId } : {}),
+        payload: { roomCode, resumeToken: payload.resumeToken },
+      };
+    }
     case "JOIN_ROOM": {
       const roomCode = normalizeRoomCode(payload.roomCode);
-      if (!ROOM_CODE_PATTERN.test(roomCode)) throw new Error("INVALID_ROOM_CODE");
-      if (!PLAYER_ROLES.has(String(payload.side))) throw new Error("INVALID_SIDE");
-      if (payload.displayName !== undefined && !isString(payload.displayName, 1, 64)) {
+      if (!ROOM_CODE_PATTERN.test(roomCode))
+        throw new Error("INVALID_ROOM_CODE");
+      if (!PLAYER_ROLES.has(String(payload.side)))
+        throw new Error("INVALID_SIDE");
+      if (
+        payload.displayName !== undefined &&
+        !isString(payload.displayName, 1, 64)
+      ) {
         throw new Error("INVALID_DISPLAY_NAME");
       }
       return {
@@ -172,6 +208,22 @@ function parseClientMessage(raw: string): SignalingMessage {
         type: value.type,
         ...(value.requestId ? { requestId: value.requestId } : {}),
         payload: {},
+      };
+    case "KICK_PEER":
+      if (!PLAYER_ROLES.has(String(payload.side)))
+        throw new Error("INVALID_SIDE");
+      return {
+        type: value.type,
+        ...(value.requestId ? { requestId: value.requestId } : {}),
+        payload: { side: payload.side },
+      };
+    case "HEARTBEAT":
+      return {
+        type: value.type,
+        ...(value.requestId ? { requestId: value.requestId } : {}),
+        payload: {
+          sentAt: isString(payload.sentAt, 10, 64) ? payload.sentAt : "",
+        },
       };
     case "OFFER":
     case "ANSWER": {
@@ -232,7 +284,10 @@ export default {
       return jsonResponse({ ok: false, error: "METHOD_NOT_ALLOWED" }, 405);
     }
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
-      return jsonResponse({ ok: false, error: "WEBSOCKET_UPGRADE_REQUIRED" }, 426);
+      return jsonResponse(
+        { ok: false, error: "WEBSOCKET_UPGRADE_REQUIRED" },
+        426,
+      );
     }
 
     const roomParameters = url.searchParams.getAll("roomId");
@@ -240,12 +295,27 @@ export default {
       return jsonResponse({ ok: false, error: "INVALID_ROOM_CODE" }, 400);
     }
     const requestedRoomCode = normalizeRoomCode(roomParameters[0]);
-    if (roomParameters.length === 1 && !ROOM_CODE_PATTERN.test(requestedRoomCode)) {
+    if (
+      roomParameters.length === 1 &&
+      !ROOM_CODE_PATTERN.test(requestedRoomCode)
+    ) {
       return jsonResponse({ ok: false, error: "INVALID_ROOM_CODE" }, 400);
     }
 
     const roomCode = requestedRoomCode || createRoomCode();
-    const mode: ConnectionMode = requestedRoomCode ? "JOIN" : "CREATE";
+    const requestedMode = url.searchParams.get("mode");
+    if (requestedMode && requestedMode !== "resume") {
+      return jsonResponse({ ok: false, error: "INVALID_CONNECTION_MODE" }, 400);
+    }
+    const mode: ConnectionMode =
+      requestedMode === "resume"
+        ? "RESUME"
+        : requestedRoomCode
+          ? "JOIN"
+          : "CREATE";
+    if (mode === "RESUME" && !requestedRoomCode) {
+      return jsonResponse({ ok: false, error: "INVALID_ROOM_CODE" }, 400);
+    }
     const roomId = env.BP_ROOMS.idFromName(roomCode);
     const room = env.BP_ROOMS.get(roomId);
     const headers = new Headers(request.headers);
@@ -261,17 +331,30 @@ export class BpRoom extends DurableObject<Env> {
       request.method !== "GET" ||
       request.headers.get("Upgrade")?.toLowerCase() !== "websocket"
     ) {
-      return jsonResponse({ ok: false, error: "WEBSOCKET_UPGRADE_REQUIRED" }, 426);
+      return jsonResponse(
+        { ok: false, error: "WEBSOCKET_UPGRADE_REQUIRED" },
+        426,
+      );
     }
 
     const roomCode = normalizeRoomCode(request.headers.get("X-XQB-Room-Code"));
     const mode = request.headers.get("X-XQB-Connection-Mode");
-    if (!ROOM_CODE_PATTERN.test(roomCode) || (mode !== "CREATE" && mode !== "JOIN")) {
+    if (
+      !ROOM_CODE_PATTERN.test(roomCode) ||
+      (mode !== "CREATE" && mode !== "JOIN" && mode !== "RESUME")
+    ) {
       return jsonResponse({ ok: false, error: "INVALID_ROUTING_CONTEXT" }, 400);
     }
 
     const sockets = this.ctx.getWebSockets();
-    if (sockets.length >= MAX_ROOM_CONNECTIONS) {
+    const occupiedConnections = sockets.filter((socket) =>
+      Boolean(this.getAttachment(socket)?.role),
+    ).length;
+    const unassignedConnections = sockets.length - occupiedConnections;
+    if (unassignedConnections >= MAX_TRANSIENT_UNASSIGNED_CONNECTIONS) {
+      return jsonResponse({ ok: false, error: "ROOM_CONNECTION_LIMIT" }, 429);
+    }
+    if (occupiedConnections >= MAX_ROOM_CONNECTIONS && mode !== "RESUME") {
       return jsonResponse({ ok: false, error: "ROOM_CONNECTION_LIMIT" }, 429);
     }
     if (
@@ -300,9 +383,16 @@ export class BpRoom extends DurableObject<Env> {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  async webSocketMessage(socket: WebSocket, data: string | ArrayBuffer): Promise<void> {
+  async webSocketMessage(
+    socket: WebSocket,
+    data: string | ArrayBuffer,
+  ): Promise<void> {
     if (typeof data !== "string") {
-      this.sendError(socket, "BINARY_NOT_ALLOWED", "信令服务只接受 JSON 文本消息");
+      this.sendError(
+        socket,
+        "BINARY_NOT_ALLOWED",
+        "信令服务只接受 JSON 文本消息",
+      );
       if (!this.getAttachment(socket)?.role) this.closeUnassigned(socket);
       return;
     }
@@ -322,11 +412,24 @@ export class BpRoom extends DurableObject<Env> {
         case "CREATE_ROOM":
           await this.createRoom(socket, message);
           return;
+        case "RESUME_ROOM":
+          await this.resumeRoom(socket, message);
+          return;
         case "JOIN_ROOM":
           await this.joinRoom(socket, message);
           return;
         case "LEAVE_ROOM":
           await this.leave(socket, "left", message.requestId, true);
+          return;
+        case "KICK_PEER":
+          await this.kickPeer(socket, message);
+          return;
+        case "HEARTBEAT":
+          if (!this.requireAttachment(socket).role)
+            throw new Error("NOT_IN_ROOM");
+          this.send(socket, "HEARTBEAT_ACK", {
+            sentAt: message.payload.sentAt,
+          });
           return;
         case "OFFER":
         case "ANSWER":
@@ -336,7 +439,12 @@ export class BpRoom extends DurableObject<Env> {
       }
     } catch (error) {
       const code = error instanceof Error ? error.message : "SIGNALING_ERROR";
-      this.sendError(socket, code, this.processingMessage(code), message.requestId);
+      this.sendError(
+        socket,
+        code,
+        this.processingMessage(code),
+        message.requestId,
+      );
       if (!this.getAttachment(socket)?.role) this.closeUnassigned(socket);
     }
   }
@@ -363,28 +471,45 @@ export class BpRoom extends DurableObject<Env> {
     await this.closeRoom("ROOM_EXPIRED", "房间已失效");
   }
 
-  private async createRoom(socket: WebSocket, message: SignalingMessage): Promise<void> {
+  private async createRoom(
+    socket: WebSocket,
+    message: SignalingMessage,
+  ): Promise<void> {
     const attachment = this.requireAttachment(socket);
     if (attachment.role) throw new Error("ALREADY_IN_ROOM");
-    if (attachment.mode !== "CREATE") throw new Error("INVALID_CONNECTION_MODE");
+    if (attachment.mode !== "CREATE")
+      throw new Error("INVALID_CONNECTION_MODE");
     if (this.findByRole("HOST", socket)) throw new Error("HOST_OCCUPIED");
 
+    const existing =
+      await this.ctx.storage.get<RoomMetadata>(ROOM_METADATA_KEY);
+    if (existing) throw new Error("HOST_OCCUPIED");
+    // A room explicitly closed by an older deployment may still have a legacy
+    // TTL alarm. New rooms are host-controlled and must not inherit that alarm.
+    await this.ctx.storage.deleteAlarm();
     const now = Date.now();
-    const expiresAt = now + ROOM_TTL_MS;
     const sessionId = crypto.randomUUID();
+    const resumeToken = crypto.randomUUID();
+    const displayName =
+      typeof message.payload.displayName === "string"
+        ? message.payload.displayName
+        : "XQB-BPBox";
     this.setAttachment(socket, {
       ...attachment,
       role: "HOST",
       sessionId,
-      displayName:
-        typeof message.payload.displayName === "string"
-          ? message.payload.displayName
-          : "XQB-BPBox",
+      displayName,
       joinedAt: now,
       createdAt: now,
-      expiresAt,
+      expiresAt: null,
     });
-    await this.ctx.storage.setAlarm(expiresAt);
+    await this.ctx.storage.put<RoomMetadata>(ROOM_METADATA_KEY, {
+      roomCode: attachment.roomCode,
+      sessionId,
+      resumeToken,
+      displayName,
+      createdAt: now,
+    });
     this.send(
       socket,
       "ROOM_CREATED",
@@ -393,13 +518,83 @@ export class BpRoom extends DurableObject<Env> {
         sessionId,
         role: "HOST",
         createdAt: new Date(now).toISOString(),
-        expiresAt: new Date(expiresAt).toISOString(),
+        expiresAt: PERSISTENT_ROOM_EXPIRES_AT,
+        resumeToken,
       },
       message.requestId,
     );
   }
 
-  private async joinRoom(socket: WebSocket, message: SignalingMessage): Promise<void> {
+  private async resumeRoom(
+    socket: WebSocket,
+    message: SignalingMessage,
+  ): Promise<void> {
+    const attachment = this.requireAttachment(socket);
+    if (attachment.role) throw new Error("ALREADY_IN_ROOM");
+    if (attachment.mode !== "RESUME")
+      throw new Error("INVALID_CONNECTION_MODE");
+    if (message.payload.roomCode !== attachment.roomCode) {
+      throw new Error("ROOM_ID_MISMATCH");
+    }
+    const metadata =
+      await this.ctx.storage.get<RoomMetadata>(ROOM_METADATA_KEY);
+    if (!metadata) throw new Error("ROOM_NOT_FOUND");
+    if (message.payload.resumeToken !== metadata.resumeToken) {
+      throw new Error("INVALID_RESUME_TOKEN");
+    }
+
+    const previousHost = this.findByRole("HOST", socket);
+    if (previousHost) {
+      const previousAttachment = this.requireAttachment(previousHost);
+      this.clearIdentity(previousHost, previousAttachment);
+      try {
+        previousHost.close(4001, "host session resumed");
+      } catch {
+        // The previous socket may already be closed.
+      }
+    }
+    this.setAttachment(socket, {
+      ...attachment,
+      role: "HOST",
+      sessionId: metadata.sessionId,
+      displayName: metadata.displayName,
+      joinedAt: Date.now(),
+      createdAt: metadata.createdAt,
+      expiresAt: null,
+    });
+    this.send(
+      socket,
+      "ROOM_RESUMED",
+      {
+        roomCode: metadata.roomCode,
+        sessionId: metadata.sessionId,
+        role: "HOST",
+        createdAt: new Date(metadata.createdAt).toISOString(),
+        expiresAt: PERSISTENT_ROOM_EXPIRES_AT,
+      },
+      message.requestId,
+    );
+
+    for (const playerRole of ["FIRST", "SECOND"] as const) {
+      const playerSocket = this.findByRole(playerRole);
+      if (!playerSocket) continue;
+      const player = this.requireAttachment(playerSocket);
+      this.send(socket, "PEER_JOINED", {
+        role: playerRole,
+        sessionId: player.sessionId,
+        displayName: player.displayName,
+        joinedAt: player.joinedAt
+          ? new Date(player.joinedAt).toISOString()
+          : undefined,
+      });
+      this.send(playerSocket, "HOST_RECONNECTED", {});
+    }
+  }
+
+  private async joinRoom(
+    socket: WebSocket,
+    message: SignalingMessage,
+  ): Promise<void> {
     const attachment = this.requireAttachment(socket);
     if (attachment.role) throw new Error("ALREADY_IN_ROOM");
     if (attachment.mode !== "JOIN") throw new Error("INVALID_CONNECTION_MODE");
@@ -407,13 +602,12 @@ export class BpRoom extends DurableObject<Env> {
       throw new Error("ROOM_ID_MISMATCH");
     }
 
+    const metadata =
+      await this.ctx.storage.get<RoomMetadata>(ROOM_METADATA_KEY);
+    if (!metadata) throw new Error("ROOM_NOT_FOUND");
     const hostSocket = this.findByRole("HOST");
-    if (!hostSocket) throw new Error("ROOM_NOT_FOUND");
+    if (!hostSocket) throw new Error("HOST_UNAVAILABLE");
     const host = this.requireAttachment(hostSocket);
-    if (!host.expiresAt || host.expiresAt <= Date.now()) {
-      await this.closeRoom("ROOM_EXPIRED", "房间已失效");
-      return;
-    }
 
     const role = message.payload.side as "FIRST" | "SECOND";
     if (this.findByRole(role)) throw new Error(`${role}_OCCUPIED`);
@@ -433,7 +627,7 @@ export class BpRoom extends DurableObject<Env> {
       displayName,
       joinedAt: now,
       createdAt: host.createdAt,
-      expiresAt: host.expiresAt,
+      expiresAt: null,
     });
     this.send(
       socket,
@@ -442,7 +636,7 @@ export class BpRoom extends DurableObject<Env> {
         roomCode: attachment.roomCode,
         sessionId,
         role,
-        expiresAt: new Date(host.expiresAt).toISOString(),
+        expiresAt: PERSISTENT_ROOM_EXPIRES_AT,
       },
       message.requestId,
     );
@@ -452,6 +646,30 @@ export class BpRoom extends DurableObject<Env> {
       displayName,
       joinedAt: new Date(now).toISOString(),
     });
+  }
+
+  private async kickPeer(
+    socket: WebSocket,
+    message: SignalingMessage,
+  ): Promise<void> {
+    const host = this.requireAttachment(socket);
+    if (host.role !== "HOST") throw new Error("HOST_ONLY");
+    const role = message.payload.side as "FIRST" | "SECOND";
+    const target = this.findByRole(role);
+    if (!target) throw new Error("PEER_NOT_CONNECTED");
+    const targetAttachment = this.requireAttachment(target);
+    this.sendError(target, "KICKED", "已被房主踢出", undefined, false);
+    this.clearIdentity(target, targetAttachment);
+    this.send(socket, "PEER_LEFT", {
+      role,
+      sessionId: targetAttachment.sessionId,
+      reason: "kicked",
+    });
+    try {
+      target.close(4003, "KICKED");
+    } catch {
+      // The client may already have closed the socket.
+    }
   }
 
   private relay(socket: WebSocket, message: SignalingMessage): void {
@@ -494,8 +712,12 @@ export class BpRoom extends DurableObject<Env> {
 
     this.clearIdentity(socket, attachment);
     if (attachment.role === "HOST") {
-      if (acknowledge) this.send(socket, "ROOM_LEFT", {}, requestId);
-      await this.closeRoom("ROOM_CLOSED", "房主已离开，房间失效", socket);
+      if (acknowledge) {
+        this.send(socket, "ROOM_LEFT", {}, requestId);
+        await this.closeRoom("ROOM_CLOSED", "房主已关闭房间", socket);
+      } else {
+        this.broadcast("HOST_DISCONNECTED", { reason }, socket);
+      }
     } else {
       const host = this.findByRole("HOST");
       if (host) {
@@ -534,6 +756,7 @@ export class BpRoom extends DurableObject<Env> {
       }
     }
     await this.ctx.storage.deleteAlarm();
+    await this.ctx.storage.delete(ROOM_METADATA_KEY);
   }
 
   private closeUnassigned(socket: WebSocket): void {
@@ -544,7 +767,10 @@ export class BpRoom extends DurableObject<Env> {
     }
   }
 
-  private findByRole(role: SignalingRole, excluded?: WebSocket): WebSocket | null {
+  private findByRole(
+    role: SignalingRole,
+    excluded?: WebSocket,
+  ): WebSocket | null {
     for (const socket of this.ctx.getWebSockets()) {
       if (socket === excluded) continue;
       if (this.getAttachment(socket)?.role === role) return socket;
@@ -564,11 +790,17 @@ export class BpRoom extends DurableObject<Env> {
     return value as unknown as ConnectionAttachment;
   }
 
-  private setAttachment(socket: WebSocket, attachment: ConnectionAttachment): void {
+  private setAttachment(
+    socket: WebSocket,
+    attachment: ConnectionAttachment,
+  ): void {
     socket.serializeAttachment(attachment);
   }
 
-  private clearIdentity(socket: WebSocket, attachment: ConnectionAttachment): void {
+  private clearIdentity(
+    socket: WebSocket,
+    attachment: ConnectionAttachment,
+  ): void {
     this.setAttachment(socket, {
       ...attachment,
       role: null,
@@ -598,6 +830,17 @@ export class BpRoom extends DurableObject<Env> {
     }
   }
 
+  private broadcast(
+    type: string,
+    payload: Record<string, unknown>,
+    excluded?: WebSocket,
+  ): void {
+    for (const socket of this.ctx.getWebSockets()) {
+      if (socket === excluded || !this.getAttachment(socket)?.role) continue;
+      this.send(socket, type, payload);
+    }
+  }
+
   private sendError(
     socket: WebSocket,
     code: string,
@@ -615,6 +858,7 @@ export class BpRoom extends DurableObject<Env> {
       UNKNOWN_MESSAGE_TYPE: "未知信令消息类型",
       INVALID_ROOM_CODE: "房间码格式无效",
       INVALID_SIDE: "请选择先手或后手",
+      INVALID_RESUME_TOKEN: "房主恢复凭证无效",
     };
     return messages[code] ?? "信令消息格式无效";
   }
@@ -626,6 +870,9 @@ export class BpRoom extends DurableObject<Env> {
       FIRST_OCCUPIED: "先手已被占用",
       SECOND_OCCUPIED: "后手已被占用",
       HOST_OCCUPIED: "房主已存在",
+      HOST_UNAVAILABLE: "房主连接暂时不可用",
+      HOST_ONLY: "只有房主可以执行此操作",
+      INVALID_RESUME_TOKEN: "房主恢复凭证无效",
       PEER_NOT_CONNECTED: "目标客户端尚未连接",
       ALREADY_IN_ROOM: "当前连接已经加入房间",
       NOT_IN_ROOM: "当前连接尚未加入房间",

@@ -118,6 +118,7 @@ export function createInitialMockState(roomId: string): RemoteBpState {
     phase: phaseFor(firstStep.operation),
     currentActor: firstStep.actor,
     currentOperation: firstStep.operation,
+    waitingForHost: false,
     currentStep: {
       id: "mock-step-1",
       index: 1,
@@ -125,6 +126,7 @@ export function createInitialMockState(roomId: string): RemoteBpState {
       label: `第 1 步 · ${firstStep.actor === "first" ? "先手" : "后手"} ${firstStep.operation}`,
       targetType: firstStep.targetType,
     },
+    playerConnections: { first: "connected", second: "connected" },
     sideMapping: { first: "star", second: "rail" },
     teams: {
       first: { side: "first", name: "先手选手", shortName: "FIRST" },

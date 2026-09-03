@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = "1.1.1" as const;
+export const PROTOCOL_VERSION = "1.2.1" as const;
 
 export const CLIENT_MESSAGE_TYPES = {
   HELLO: "HELLO",
@@ -19,6 +19,8 @@ export const HOST_MESSAGE_TYPES = {
   ASSET_CHUNK: "ASSET_CHUNK",
   ASSET_COMPLETE: "ASSET_COMPLETE",
   PONG: "PONG",
+  KICKED: "KICKED",
+  ROOM_CLOSED: "ROOM_CLOSED",
   ERROR: "ERROR",
 } as const;
 

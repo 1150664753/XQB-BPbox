@@ -5,12 +5,15 @@ import { pathToFileURL } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
 
 export const MAX_SIGNALING_MESSAGE_BYTES = 64 * 1024;
-const DEFAULT_ROOM_TTL_MS = 2 * 60 * 60 * 1000;
+const PERSISTENT_ROOM_EXPIRES_AT = "9999-12-31T23:59:59.999Z";
 const ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const CLIENT_MESSAGE_TYPES = new Set([
   "CREATE_ROOM",
+  "RESUME_ROOM",
   "JOIN_ROOM",
   "LEAVE_ROOM",
+  "KICK_PEER",
+  "HEARTBEAT",
   "OFFER",
   "ANSWER",
   "ICE_CANDIDATE",
@@ -116,6 +119,18 @@ export function parseClientMessage(raw) {
         payload: { displayName: payload.displayName },
       };
     }
+    case "RESUME_ROOM": {
+      const roomCode = normalizeRoomCode(payload.roomCode);
+      if (!/^[A-Z2-9]{6}$/.test(roomCode)) throw new Error("INVALID_ROOM_CODE");
+      if (!isString(payload.resumeToken, 16, 128)) {
+        throw new Error("INVALID_RESUME_TOKEN");
+      }
+      return {
+        type: value.type,
+        requestId: value.requestId,
+        payload: { roomCode, resumeToken: payload.resumeToken },
+      };
+    }
     case "JOIN_ROOM": {
       const roomCode = normalizeRoomCode(payload.roomCode);
       const side = payload.side;
@@ -135,6 +150,21 @@ export function parseClientMessage(raw) {
     }
     case "LEAVE_ROOM":
       return { type: value.type, requestId: value.requestId, payload: {} };
+    case "KICK_PEER":
+      if (!PLAYER_ROLES.has(payload.side)) throw new Error("INVALID_SIDE");
+      return {
+        type: value.type,
+        requestId: value.requestId,
+        payload: { side: payload.side },
+      };
+    case "HEARTBEAT":
+      return {
+        type: value.type,
+        requestId: value.requestId,
+        payload: {
+          sentAt: isString(payload.sentAt, 10, 64) ? payload.sentAt : "",
+        },
+      };
     case "OFFER":
     case "ANSWER": {
       if (!ALL_ROLES.has(payload.targetRole))
@@ -206,13 +236,6 @@ export function createSignalingServer(options = {}) {
     configuredPort <= 65_535
       ? configuredPort
       : 8787;
-  const configuredRoomTtlMs =
-    options.roomTtlMs ??
-    Number(process.env.SIGNALING_ROOM_TTL_MS ?? DEFAULT_ROOM_TTL_MS);
-  const roomTtlMs =
-    Number.isFinite(configuredRoomTtlMs) && configuredRoomTtlMs >= 60_000
-      ? configuredRoomTtlMs
-      : DEFAULT_ROOM_TTL_MS;
   const rooms = new Map();
   const clients = new WeakMap();
   const httpServer = createServer((request, response) => {
@@ -242,10 +265,11 @@ export function createSignalingServer(options = {}) {
       if (!participant) continue;
       clients.delete(participant.socket);
       sendError(participant.socket, code, message, undefined, false);
+      participant.socket.close(1000, code);
     }
   };
 
-  const leave = (socket, reason = "left") => {
+  const leave = (socket, reason = "left", closeHostedRoom = false) => {
     const identity = clients.get(socket);
     if (!identity) return;
     const room = rooms.get(identity.roomCode);
@@ -253,24 +277,34 @@ export function createSignalingServer(options = {}) {
     if (!room) return;
 
     if (identity.role === "HOST") {
-      expireRoom(room, "ROOM_CLOSED", "房主已离开，房间失效");
+      room.host = null;
+      if (closeHostedRoom) {
+        expireRoom(room, "ROOM_CLOSED", "房主已关闭房间");
+      } else {
+        for (const participant of [room.firstPlayer, room.secondPlayer]) {
+          if (participant)
+            send(participant.socket, "HOST_DISCONNECTED", { reason });
+        }
+      }
       return;
     }
 
     if (identity.role === "FIRST") room.firstPlayer = null;
     else room.secondPlayer = null;
-    send(room.host.socket, "PEER_LEFT", {
-      role: identity.role,
-      sessionId: identity.sessionId,
-      reason,
-    });
+    if (room.host) {
+      send(room.host.socket, "PEER_LEFT", {
+        role: identity.role,
+        sessionId: identity.sessionId,
+        reason,
+      });
+    }
   };
 
   const resolveRelayTarget = (socket, targetRole) => {
     const identity = clients.get(socket);
     if (!identity) throw new Error("NOT_IN_ROOM");
     const room = rooms.get(identity.roomCode);
-    if (!room || room.expiresAt <= Date.now()) throw new Error("ROOM_EXPIRED");
+    if (!room) throw new Error("ROOM_NOT_FOUND");
     const allowed =
       (identity.role === "HOST" && PLAYER_ROLES.has(targetRole)) ||
       (PLAYER_ROLES.has(identity.role) && targetRole === "HOST");
@@ -320,10 +354,11 @@ export function createSignalingServer(options = {}) {
             const room = {
               roomCode,
               host: participant,
+              hostSessionId: participant.sessionId,
               firstPlayer: null,
               secondPlayer: null,
               createdAt: now,
-              expiresAt: now + Math.max(60_000, roomTtlMs),
+              resumeToken: randomUUID(),
             };
             rooms.set(roomCode, room);
             clients.set(socket, {
@@ -339,20 +374,66 @@ export function createSignalingServer(options = {}) {
                 sessionId: participant.sessionId,
                 role: "HOST",
                 createdAt: new Date(room.createdAt).toISOString(),
-                expiresAt: new Date(room.expiresAt).toISOString(),
+                expiresAt: PERSISTENT_ROOM_EXPIRES_AT,
+                resumeToken: room.resumeToken,
               },
               message.requestId,
             );
+            return;
+          }
+          case "RESUME_ROOM": {
+            if (clients.has(socket)) throw new Error("ALREADY_IN_ROOM");
+            const room = rooms.get(message.payload.roomCode);
+            if (!room) throw new Error("ROOM_NOT_FOUND");
+            if (room.resumeToken !== message.payload.resumeToken) {
+              throw new Error("INVALID_RESUME_TOKEN");
+            }
+            if (room.host) {
+              clients.delete(room.host.socket);
+              room.host.socket.close(4001, "host session resumed");
+            }
+            const participant = {
+              role: "HOST",
+              sessionId: room.hostSessionId,
+              displayName: "XQB-BPBox",
+              socket,
+              joinedAt: Date.now(),
+            };
+            room.host = participant;
+            clients.set(socket, {
+              roomCode: room.roomCode,
+              role: "HOST",
+              sessionId: participant.sessionId,
+            });
+            send(
+              socket,
+              "ROOM_RESUMED",
+              {
+                roomCode: room.roomCode,
+                sessionId: participant.sessionId,
+                role: "HOST",
+                createdAt: new Date(room.createdAt).toISOString(),
+                expiresAt: PERSISTENT_ROOM_EXPIRES_AT,
+              },
+              message.requestId,
+            );
+            for (const player of [room.firstPlayer, room.secondPlayer]) {
+              if (!player) continue;
+              send(socket, "PEER_JOINED", {
+                role: player.role,
+                sessionId: player.sessionId,
+                displayName: player.displayName,
+                joinedAt: new Date(player.joinedAt).toISOString(),
+              });
+              send(player.socket, "HOST_RECONNECTED", {});
+            }
             return;
           }
           case "JOIN_ROOM": {
             if (clients.has(socket)) throw new Error("ALREADY_IN_ROOM");
             const room = rooms.get(message.payload.roomCode);
             if (!room) throw new Error("ROOM_NOT_FOUND");
-            if (room.expiresAt <= Date.now()) {
-              expireRoom(room);
-              throw new Error("ROOM_EXPIRED");
-            }
+            if (!room.host) throw new Error("HOST_UNAVAILABLE");
             const slotKey =
               message.payload.side === "FIRST" ? "firstPlayer" : "secondPlayer";
             if (room[slotKey])
@@ -379,7 +460,7 @@ export function createSignalingServer(options = {}) {
                 roomCode: room.roomCode,
                 sessionId: participant.sessionId,
                 role: participant.role,
-                expiresAt: new Date(room.expiresAt).toISOString(),
+                expiresAt: PERSISTENT_ROOM_EXPIRES_AT,
               },
               message.requestId,
             );
@@ -392,8 +473,39 @@ export function createSignalingServer(options = {}) {
             return;
           }
           case "LEAVE_ROOM":
-            leave(socket);
+            leave(socket, "left", true);
             send(socket, "ROOM_LEFT", {}, message.requestId);
+            return;
+          case "KICK_PEER": {
+            const identity = clients.get(socket);
+            if (!identity || identity.role !== "HOST")
+              throw new Error("HOST_ONLY");
+            const room = rooms.get(identity.roomCode);
+            if (!room) throw new Error("ROOM_NOT_FOUND");
+            const slotKey =
+              message.payload.side === "FIRST" ? "firstPlayer" : "secondPlayer";
+            const player = room[slotKey];
+            if (!player) throw new Error("PEER_NOT_CONNECTED");
+            room[slotKey] = null;
+            clients.delete(player.socket);
+            sendError(
+              player.socket,
+              "KICKED",
+              "已被房主踢出",
+              undefined,
+              false,
+            );
+            send(socket, "PEER_LEFT", {
+              role: player.role,
+              sessionId: player.sessionId,
+              reason: "kicked",
+            });
+            player.socket.close(4003, "KICKED");
+            return;
+          }
+          case "HEARTBEAT":
+            if (!clients.has(socket)) throw new Error("NOT_IN_ROOM");
+            send(socket, "HEARTBEAT_ACK", { sentAt: message.payload.sentAt });
             return;
           case "OFFER":
           case "ANSWER":
@@ -434,6 +546,9 @@ export function createSignalingServer(options = {}) {
           NOT_IN_ROOM: "当前连接尚未加入房间",
           INVALID_RELAY_TARGET: "不允许向该角色转发信令",
           INVALID_RELAY_DIRECTION: "不允许以该身份发送此类 WebRTC 信令",
+          HOST_UNAVAILABLE: "房主连接暂时不可用",
+          HOST_ONLY: "只有房主可以执行此操作",
+          INVALID_RESUME_TOKEN: "房主恢复凭证无效",
         };
         sendError(
           socket,
@@ -444,17 +559,6 @@ export function createSignalingServer(options = {}) {
       }
     });
   });
-
-  const sweepTimer = setInterval(
-    () => {
-      const now = Date.now();
-      for (const room of rooms.values()) {
-        if (room.expiresAt <= now) expireRoom(room);
-      }
-    },
-    Math.min(30_000, Math.max(1_000, Math.floor(roomTtlMs / 4))),
-  );
-  sweepTimer.unref();
 
   return {
     rooms,
@@ -470,7 +574,6 @@ export function createSignalingServer(options = {}) {
       return typeof address === "object" && address ? address.port : port;
     },
     async close() {
-      clearInterval(sweepTimer);
       for (const socket of webSocketServer.clients) socket.terminate();
       await new Promise((resolve) => webSocketServer.close(() => resolve()));
       if (httpServer.listening) {

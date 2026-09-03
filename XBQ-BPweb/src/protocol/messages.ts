@@ -78,6 +78,8 @@ export interface HostPayloadMap {
     clientTime: string;
     hostTime: string;
   };
+  [HOST_MESSAGE_TYPES.KICKED]: { message: string };
+  [HOST_MESSAGE_TYPES.ROOM_CLOSED]: { message: string };
   [HOST_MESSAGE_TYPES.ERROR]: {
     code: string;
     message: string;

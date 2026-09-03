@@ -29,6 +29,8 @@ export interface RemoteBpStateSerializeInput {
   pairedConfirmations?: Partial<Record<BpSide, boolean>>
   teamNames?: Partial<Record<RemotePlayerSide, string | null>>
   canConfirm?: boolean
+  waitingForHost?: boolean
+  playerConnections?: RemoteBpState['playerConnections']
   updatedAt?: string
 }
 
@@ -257,6 +259,7 @@ export function serializeRemoteBpState(input: RemoteBpStateSerializeInput): Remo
     first: Boolean(selectionTargets.first && !confirmedSides.first),
     second: Boolean(selectionTargets.second && !confirmedSides.second)
   }
+  const waitingForHost = Boolean(input.waitingForHost && input.runtime.status === 'running')
 
   return {
     schemaVersion: 1,
@@ -270,9 +273,14 @@ export function serializeRemoteBpState(input: RemoteBpStateSerializeInput): Remo
         : input.runtime.status === 'running'
           ? 'running'
           : 'waiting',
-    phase: phaseFor(input.runtime),
-    currentActor: step ? internalSideToRemoteSide(step.side, mapping) : null,
-    currentOperation: operationFor(input.runtime),
+    phase: waitingForHost ? 'WAITING' : phaseFor(input.runtime),
+    currentActor: waitingForHost
+      ? null
+      : step
+        ? internalSideToRemoteSide(step.side, mapping)
+        : null,
+    currentOperation: waitingForHost ? 'WAIT' : operationFor(input.runtime),
+    waitingForHost,
     currentStep: step
       ? {
           id: `step-${step.index}`,
@@ -282,6 +290,10 @@ export function serializeRemoteBpState(input: RemoteBpStateSerializeInput): Remo
           targetType: targetTypeFor(step.targetType)
         }
       : null,
+    playerConnections: input.playerConnections ?? {
+      first: 'empty',
+      second: 'empty'
+    },
     sideMapping: mapping,
     teams: {
       first: teamForRemote('first'),
@@ -326,9 +338,11 @@ export function serializeRemoteBpState(input: RemoteBpStateSerializeInput): Remo
     unavailableCharacterIds,
     availableLightConeIds,
     unavailableLightConeIds,
-    availableTargetIdsBySide,
-    canConfirm: Boolean(input.canConfirm || canConfirmBySide.first || canConfirmBySide.second),
-    canConfirmBySide,
+    availableTargetIdsBySide: waitingForHost ? { first: [], second: [] } : availableTargetIdsBySide,
+    canConfirm: waitingForHost
+      ? false
+      : Boolean(input.canConfirm || canConfirmBySide.first || canConfirmBySide.second),
+    canConfirmBySide: waitingForHost ? { first: false, second: false } : canConfirmBySide,
     countdown: null,
     updatedAt: input.updatedAt ?? input.runtime.createdAt
   }

@@ -2,6 +2,7 @@ import { useAssetUrl } from "../hooks/useAssetUrl";
 import type { RemoteAssetManager } from "../services/assets/RemoteAssetManager";
 import type {
   PlayerSide,
+  PlayerConnectionState,
   RemoteLightConeDto,
   RemoteLightConeResultEntry,
   RemoteBpResultEntry,
@@ -57,6 +58,7 @@ interface TeamResultsProps {
   name: string;
   active: boolean;
   operation: string;
+  connectionState: PlayerConnectionState | "kicked" | "room-closed";
   bans: Array<RemoteBpResultEntry | RemoteLightConeResultEntry>;
   picks: Array<RemoteBpResultEntry | RemoteLightConeResultEntry>;
   characters: RemoteCharacterDto[];
@@ -70,6 +72,7 @@ export function TeamResults({
   name,
   active,
   operation,
+  connectionState,
   bans,
   picks,
   characters,
@@ -77,6 +80,15 @@ export function TeamResults({
   targetType,
   assetManager,
 }: TeamResultsProps) {
+  const connectionLabel = {
+    empty: "未连接",
+    connecting: "连接中",
+    connected: "已连接",
+    reconnecting: "重连中",
+    disconnected: "未连接",
+    kicked: "被踢出",
+    "room-closed": "房间已关闭",
+  }[connectionState];
   return (
     <section
       className={`team-results team-results--${side}${active ? " team-results--active" : ""}`}
@@ -84,6 +96,12 @@ export function TeamResults({
       <div className="team-results__heading">
         <div className="team-mark">{side === "first" ? "先手" : "后手"}</div>
         <strong>{name}</strong>
+        <span
+          className={`player-connection player-connection--${connectionState}`}
+        >
+          <i aria-hidden="true" />
+          {connectionLabel}
+        </span>
         {active ? <span className="turn-pill">{operation}</span> : null}
       </div>
       <div className="result-line">

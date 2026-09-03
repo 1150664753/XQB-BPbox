@@ -102,13 +102,24 @@ export class RemoteBpHost {
         }
       }),
       dependencies.transport.onPeerConnected((peer) => {
-        this.updatePeer(peer, true)
+        this.updatePeer(peer, 'connected')
         void Promise.all([
           this.broadcastState('STATE_UPDATE'),
           this.sendManifestToPeer(peer.peerId)
         ])
       }),
-      dependencies.transport.onPeerDisconnected((peer) => this.updatePeer(peer, false)),
+      dependencies.transport.onPeerConnecting((peer) => {
+        this.updatePeer(peer, 'connecting')
+        void this.broadcastState('STATE_UPDATE')
+      }),
+      dependencies.transport.onPeerReconnecting((peer) => {
+        this.updatePeer(peer, 'reconnecting')
+        void this.broadcastState('STATE_UPDATE')
+      }),
+      dependencies.transport.onPeerDisconnected((peer) => {
+        this.updatePeer(peer, 'disconnected')
+        void this.broadcastState('STATE_UPDATE')
+      }),
       dependencies.transport.onStatusChange((status) => {
         this.patch({
           connectionState: status.connectionState,
@@ -194,6 +205,14 @@ export class RemoteBpHost {
   async stopRoom(): Promise<RemoteBpRoomState> {
     if (this.state.lifecycle === 'idle') return this.getRoomState()
     this.patch({ lifecycle: 'stopping' })
+    try {
+      await this.dependencies.transport.broadcast({
+        type: 'ROOM_CLOSED',
+        payload: { message: '房间已被房主关闭' }
+      })
+    } catch {
+      // Signaling ROOM_CLOSED is the fallback when the DataChannel is unavailable.
+    }
     await this.dependencies.transport.stop()
     this.assetTransferQueues.clear()
     this.assetManifestRefresh = null
@@ -246,6 +265,25 @@ export class RemoteBpHost {
       })
       return rejected
     }
+    if (peer) {
+      const player = peer.side === 'first' ? this.state.firstPlayer : this.state.secondPlayer
+      if (player.peerId !== peer.peerId || player.connectionState !== 'connected') {
+        const rejected: RemoteBpActionResult = {
+          actionId: action.actionId,
+          accepted: false,
+          code: 'SESSION_NOT_READY',
+          message: '该选手连接已失效',
+          reason: '该选手连接已失效',
+          resultingRevision: this.dependencies.dispatcher.getRevision(),
+          stateChanged: false
+        }
+        await this.dependencies.transport.send(peer.peerId, {
+          type: 'ACTION_RESULT',
+          payload: rejected
+        })
+        return rejected
+      }
+    }
 
     const result = await this.dependencies.dispatcher.dispatch(
       action,
@@ -273,6 +311,10 @@ export class RemoteBpHost {
       roomId: this.state.roomId,
       sessionId: `host-${this.state.roomId}`,
       mapping: this.state.mapping,
+      playerConnections: {
+        first: this.state.firstPlayer.connectionState,
+        second: this.state.secondPlayer.connectionState
+      },
       teamNames: {
         first: this.state.firstPlayer.displayName,
         second: this.state.secondPlayer.displayName
@@ -282,6 +324,26 @@ export class RemoteBpHost {
 
   async getAssetManifest(): Promise<AssetManifest> {
     return this.dependencies.getAssetManifest()
+  }
+
+  async kickPlayer(side: RemotePlayerSide): Promise<RemoteBpRoomState> {
+    if (this.state.lifecycle !== 'active') return this.getRoomState()
+    const key = side === 'first' ? 'firstPlayer' : 'secondPlayer'
+    const player = this.state[key]
+    if (!player.peerId) return this.getRoomState()
+
+    try {
+      await this.dependencies.transport.send(player.peerId, {
+        type: 'KICKED',
+        payload: { message: '已被房主踢出' }
+      })
+    } catch {
+      // Signaling KICKED is the fallback when the DataChannel is unavailable.
+    }
+    await this.dependencies.transport.kick(side)
+    this.patch({ [key]: emptyPlayer(side) })
+    await this.broadcastState('STATE_UPDATE')
+    return this.getRoomState()
   }
 
   async refreshAssetManifest(): Promise<AssetManifest | null> {
@@ -425,21 +487,25 @@ export class RemoteBpHost {
     return manifest
   }
 
-  private updatePeer(peer: RemoteHostPeer, connected: boolean): void {
+  private updatePeer(
+    peer: RemoteHostPeer,
+    connectionState: 'connecting' | 'connected' | 'reconnecting' | 'disconnected'
+  ): void {
     const key = peer.side === 'first' ? 'firstPlayer' : 'secondPlayer'
+    if (connectionState === 'disconnected') {
+      if (this.state[key].peerId && this.state[key].peerId !== peer.peerId) return
+      this.patch({ [key]: emptyPlayer(peer.side) })
+      return
+    }
+    const samePeer = this.state[key].peerId === peer.peerId
     this.patch({
-      [key]: connected
-        ? {
-            side: peer.side,
-            peerId: peer.peerId,
-            displayName: peer.displayName ?? null,
-            connectionState: 'connected',
-            joinedAt: new Date().toISOString()
-          }
-        : {
-            ...this.state[key],
-            connectionState: 'disconnected'
-          }
+      [key]: {
+        side: peer.side,
+        peerId: peer.peerId,
+        displayName: peer.displayName ?? this.state[key].displayName,
+        connectionState,
+        joinedAt: samePeer ? this.state[key].joinedAt : new Date().toISOString()
+      }
     })
   }
 

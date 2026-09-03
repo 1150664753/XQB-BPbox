@@ -274,6 +274,16 @@ function checkSerializer(): void {
   assert.deepEqual(first, second)
   assert.equal(first.currentActor, 'first')
   assert.equal(first.sideMapping.first, 'star')
+  const waiting = serializeRemoteBpState({
+    ...input,
+    waitingForHost: true,
+    playerConnections: { first: 'connected', second: 'reconnecting' }
+  })
+  assert.equal(waiting.waitingForHost, true)
+  assert.equal(waiting.currentOperation, 'WAIT')
+  assert.equal(waiting.currentActor, null)
+  assert.deepEqual(waiting.availableTargetIdsBySide, { first: [], second: [] })
+  assert.equal(waiting.playerConnections.second, 'reconnecting')
   const serialized = JSON.stringify(first)
   assert.equal(serialized.includes('upCharacterPvPath'), false)
   assert.equal(serialized.includes('eventHistory'), false)
@@ -454,6 +464,21 @@ async function checkRemoteHost(): Promise<void> {
     transport.broadcasts.filter((message) => message.type === 'ASSET_MANIFEST').length,
     initialManifestBroadcasts + 1
   )
+  transport.simulatePeerConnecting({ peerId: 'peer-first', side: 'first' })
+  transport.simulatePeerConnected({ peerId: 'peer-first', side: 'first' })
+  const revisionBeforeHeartbeat = dispatcher.getRevision()
+  transport.simulateMessage({
+    type: 'PING',
+    peerId: 'peer-first',
+    side: 'first',
+    clientTime: now
+  })
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  assert.equal(dispatcher.getRevision(), revisionBeforeHeartbeat)
+  assert.equal(
+    transport.sent.some((entry) => entry.peerId === 'peer-first' && entry.message.type === 'PONG'),
+    true
+  )
   const result = await host.handleRemoteAction(banAction('host-ban', 'first'), {
     peerId: 'peer-first',
     side: 'first'
@@ -489,7 +514,26 @@ async function checkRemoteHost(): Promise<void> {
     })
   )
   assert.deepEqual(reconstructed, Buffer.from(transferData))
+  await host.kickPlayer('first')
+  assert.equal(host.getRoomState().firstPlayer.connectionState, 'empty')
+  assert.equal(
+    transport.sent.some(
+      (entry) => entry.peerId === 'peer-first' && entry.message.type === 'KICKED'
+    ),
+    true
+  )
+  const kickedAction = await host.handleRemoteAction(banAction('kicked-action', 'first', 2), {
+    peerId: 'peer-first',
+    side: 'first'
+  })
+  assert.equal(kickedAction.code, 'SESSION_NOT_READY')
+  assert.equal(dispatcher.getRevision(), 2)
+  transport.simulatePeerConnected({ peerId: 'peer-second', side: 'second' })
   await host.stopRoom()
+  assert.equal(
+    transport.broadcasts.some((message) => message.type === 'ROOM_CLOSED'),
+    true
+  )
   host.destroy()
 }
 

@@ -19,7 +19,8 @@ function reservePort() {
       const port = typeof address === "object" && address ? address.port : null;
       server.close((error) => {
         if (error) reject(error);
-        else if (port === null) reject(new Error("Unable to reserve a test port"));
+        else if (port === null)
+          reject(new Error("Unable to reserve a test port"));
         else resolve(port);
       });
     });
@@ -31,6 +32,29 @@ function nextMessage(socket) {
     const onMessage = (data) => {
       cleanup();
       resolve(JSON.parse(data.toString("utf8")));
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      socket.off("message", onMessage);
+      socket.off("error", onError);
+    };
+    socket.on("message", onMessage);
+    socket.on("error", onError);
+  });
+}
+
+function nextMessages(socket, count) {
+  return new Promise((resolve, reject) => {
+    const messages = [];
+    const onMessage = (data) => {
+      messages.push(JSON.parse(data.toString("utf8")));
+      if (messages.length === count) {
+        cleanup();
+        resolve(messages);
+      }
     };
     const onError = (error) => {
       cleanup();
@@ -122,7 +146,17 @@ async function main() {
     const created = await createdMessage;
     assert.equal(created.type, "ROOM_CREATED");
     assert.match(created.payload.roomCode, /^[A-Z2-9]{6}$/);
+    assert.match(created.payload.resumeToken, /^[0-9a-f-]{36}$/i);
     const roomUrl = `${wsUrl}?roomId=${created.payload.roomCode}`;
+
+    const heartbeatAck = nextMessage(host);
+    host.send(
+      JSON.stringify({
+        type: "HEARTBEAT",
+        payload: { sentAt: new Date().toISOString() },
+      }),
+    );
+    assert.equal((await heartbeatAck).type, "HEARTBEAT_ACK");
 
     const first = await connect(roomUrl);
     sockets.push(first);
@@ -194,7 +228,11 @@ async function main() {
         type: "ICE_CANDIDATE",
         payload: {
           targetRole: "FIRST",
-          candidate: { candidate: "host-candidate", sdpMid: "0", sdpMLineIndex: 0 },
+          candidate: {
+            candidate: "host-candidate",
+            sdpMid: "0",
+            sdpMLineIndex: 0,
+          },
         },
       }),
     );
@@ -206,7 +244,11 @@ async function main() {
         type: "ICE_CANDIDATE",
         payload: {
           targetRole: "HOST",
-          candidate: { candidate: "first-candidate", sdpMid: "0", sdpMLineIndex: 0 },
+          candidate: {
+            candidate: "first-candidate",
+            sdpMid: "0",
+            sdpMLineIndex: 0,
+          },
         },
       }),
     );
@@ -245,9 +287,64 @@ async function main() {
     assert.equal((await secondPeerJoinedMessage).payload.role, "SECOND");
     await expectUpgradeStatus(roomUrl, 429);
 
-    const firstClosedMessage = nextMessage(replacement);
+    const firstHostDisconnected = nextMessage(replacement);
+    const secondHostDisconnected = nextMessage(second);
+    host.close(1000, "temporary host disconnect");
+    const [firstDisconnected, secondDisconnected] = await Promise.all([
+      firstHostDisconnected,
+      secondHostDisconnected,
+    ]);
+    assert.equal(firstDisconnected.type, "HOST_DISCONNECTED");
+    assert.equal(secondDisconnected.type, "HOST_DISCONNECTED");
+
+    const resumedHost = await connect(`${roomUrl}&mode=resume`);
+    sockets.push(resumedHost);
+    const resumedMessages = nextMessages(resumedHost, 3);
+    const firstHostReconnected = nextMessage(replacement);
+    const secondHostReconnected = nextMessage(second);
+    resumedHost.send(
+      JSON.stringify({
+        type: "RESUME_ROOM",
+        payload: {
+          roomCode: created.payload.roomCode,
+          resumeToken: created.payload.resumeToken,
+        },
+      }),
+    );
+    const [roomResumed, firstResumedPeer, secondResumedPeer] =
+      await resumedMessages;
+    assert.equal(roomResumed.type, "ROOM_RESUMED");
+    assert.deepEqual(
+      new Set([firstResumedPeer.payload.role, secondResumedPeer.payload.role]),
+      new Set(["FIRST", "SECOND"]),
+    );
+    assert.equal((await firstHostReconnected).type, "HOST_RECONNECTED");
+    assert.equal((await secondHostReconnected).type, "HOST_RECONNECTED");
+
+    const kicked = nextMessage(replacement);
+    const kickedPeerLeft = nextMessage(resumedHost);
+    resumedHost.send(
+      JSON.stringify({ type: "KICK_PEER", payload: { side: "FIRST" } }),
+    );
+    assert.equal((await kicked).payload.code, "KICKED");
+    assert.equal((await kickedPeerLeft).payload.reason, "kicked");
+
+    const newFirst = await connect(roomUrl);
+    sockets.push(newFirst);
+    const newFirstJoined = nextMessage(newFirst);
+    const newFirstPeerJoined = nextMessage(resumedHost);
+    newFirst.send(
+      JSON.stringify({
+        type: "JOIN_ROOM",
+        payload: { roomCode: created.payload.roomCode, side: "FIRST" },
+      }),
+    );
+    assert.equal((await newFirstJoined).payload.role, "FIRST");
+    assert.equal((await newFirstPeerJoined).payload.role, "FIRST");
+
+    const firstClosedMessage = nextMessage(newFirst);
     const secondClosedMessage = nextMessage(second);
-    host.close(1000, "close room");
+    resumedHost.send(JSON.stringify({ type: "LEAVE_ROOM", payload: {} }));
     const [firstClosed, secondClosed] = await Promise.all([
       firstClosedMessage,
       secondClosedMessage,
@@ -256,7 +353,7 @@ async function main() {
     assert.equal(secondClosed.payload.code, "ROOM_CLOSED");
 
     console.log(
-      "Cloudflare signaling self-check passed: room lifecycle, slots, relay, ICE, cleanup",
+      "Cloudflare signaling self-check passed: persistent room, resume, kick, heartbeat, cleanup",
     );
   } finally {
     for (const socket of sockets) {

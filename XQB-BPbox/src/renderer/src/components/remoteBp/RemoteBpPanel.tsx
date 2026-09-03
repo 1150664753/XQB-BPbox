@@ -37,9 +37,10 @@ function createMockRoomId(): string {
 }
 
 const playerStateLabel: Record<RemoteBpRoomState['firstPlayer']['connectionState'], string> = {
-  empty: '等待加入',
+  empty: '未连接',
   connecting: '连接中',
   connected: '已连接',
+  reconnecting: '重连中',
   disconnected: '未连接'
 }
 
@@ -63,34 +64,59 @@ const lifecycleLabel: Record<RemoteBpRoomState['lifecycle'], string> = {
 
 export default function RemoteBpPanel({ host }: { host: RemoteBpHost }): React.JSX.Element {
   const [room, setRoom] = useState<RemoteBpRoomState>(() => host.getRoomState())
-  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
+  const [copyFeedback, setCopyFeedback] = useState<{
+    roomId: string | null
+    state: 'idle' | 'copied' | 'error'
+  }>({ roomId: null, state: 'idle' })
+  const copyState = copyFeedback.roomId === room.roomId ? copyFeedback.state : 'idle'
 
   useEffect(() => host.subscribe(setRoom), [host])
 
   useEffect(() => {
-    setCopyState('idle')
-  }, [room.roomId])
-
-  useEffect(() => {
     if (copyState === 'idle') return
 
-    const timeoutId = window.setTimeout(() => setCopyState('idle'), 1800)
+    const timeoutId = window.setTimeout(
+      () => setCopyFeedback({ roomId: room.roomId, state: 'idle' }),
+      1800
+    )
     return () => window.clearTimeout(timeoutId)
-  }, [copyState])
+  }, [copyState, room.roomId])
 
   const copyRoomCode = async (): Promise<void> => {
     if (!room.roomId) return
 
     try {
       await writeClipboardText(room.roomId)
-      setCopyState('copied')
+      setCopyFeedback({ roomId: room.roomId, state: 'copied' })
     } catch {
-      setCopyState('error')
+      setCopyFeedback({ roomId: room.roomId, state: 'error' })
     }
   }
 
   const isActive = room.lifecycle === 'active'
   const isBusy = room.lifecycle === 'starting' || room.lifecycle === 'stopping'
+
+  const playerRow = (side: 'first' | 'second'): React.JSX.Element => {
+    const player = side === 'first' ? room.firstPlayer : room.secondPlayer
+    const occupied = player.peerId !== null
+    return (
+      <div className="remote-bp-player-row">
+        <span>
+          {side === 'first' ? '先手' : '后手'}：{playerStateLabel[player.connectionState]}
+        </span>
+        <button
+          type="button"
+          className="remote-bp-kick-button"
+          disabled={!isActive || !occupied || isBusy}
+          onClick={() => void host.kickPlayer(side)}
+          title={`踢出${side === 'first' ? '先手' : '后手'}`}
+          aria-label={`踢出${side === 'first' ? '先手' : '后手'}`}
+        >
+          ×
+        </button>
+      </div>
+    )
+  }
 
   return (
     <section className="bp-session-card remote-bp-card">
@@ -119,14 +145,12 @@ export default function RemoteBpPanel({ host }: { host: RemoteBpHost }): React.J
       </header>
 
       <div className="remote-bp-status-grid">
-        <span>先手：{playerStateLabel[room.firstPlayer.connectionState]}</span>
-        <span>后手：{playerStateLabel[room.secondPlayer.connectionState]}</span>
+        {playerRow('first')}
+        {playerRow('second')}
         <span>Revision：{room.lastPublishedRevision ?? '—'}</span>
         <span>资源：{room.assetCount}</span>
         <span>信令：{signalingStateLabel[room.connectionState]}</span>
-        <span>
-          失效时间：{room.expiresAt ? new Date(room.expiresAt).toLocaleTimeString() : '—'}
-        </span>
+        <span>房间寿命：由房主控制</span>
       </div>
 
       {room.error ? <small className="remote-bp-error">{room.error}</small> : null}

@@ -53,6 +53,43 @@
   white-space: nowrap;
 }
 
+.remote-bp-player-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.remote-bp-player-row > span {
+  flex: 1 1 auto;
+}
+
+.remote-bp-kick-button {
+  display: grid;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid #efb1b1;
+  border-radius: 50%;
+  background: #fff7f7;
+  color: #b42318;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.remote-bp-kick-button:hover:not(:disabled) {
+  border-color: #d92d20;
+  background: #fff0f0;
+}
+
+.remote-bp-kick-button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
 .remote-bp-error {
   color: #b42318;
 }

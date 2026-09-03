@@ -35,6 +35,9 @@ export interface WebRtcRemoteBpConnectionOptions {
 }
 
 const MAX_SIGNALING_MESSAGE_BYTES = 64 * 1024;
+const SIGNALING_HEARTBEAT_INTERVAL_MS = 20_000;
+const WEBRTC_RECOVERY_GRACE_MS = 10_000;
+const MAX_RECONNECT_DELAY_MS = 15_000;
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -138,6 +141,12 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
   private connectReject: ((error: Error) => void) | null = null;
   private connectTimer: number | null = null;
   private pingTimer: number | null = null;
+  private signalingHeartbeatTimer: number | null = null;
+  private reconnectTimer: number | null = null;
+  private recoveryTimer: number | null = null;
+  private reconnectAttempt = 0;
+  private hasEverConnected = false;
+  private terminalState: "kicked" | "room-closed" | null = null;
   private intentionalClose = false;
 
   constructor(private readonly options: WebRtcRemoteBpConnectionOptions) {}
@@ -164,38 +173,11 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
       roomId: options.roomId.trim().toUpperCase(),
     };
     this.confirmed = null;
+    this.terminalState = null;
+    this.hasEverConnected = false;
+    this.reconnectAttempt = 0;
     this.setConnectionState("connecting", "正在连接信令服务器");
-    const socket = new WebSocket(
-      createSignalingUrl(this.options.signalingUrl, this.requested.roomId),
-    );
-    this.socket = socket;
-    socket.addEventListener("message", (event) =>
-      this.handleSignalingRaw(event.data),
-    );
-    socket.addEventListener("close", () => this.handleSocketClose());
-
-    await new Promise<void>((resolve, reject) => {
-      const timer = window.setTimeout(
-        () => reject(new Error("连接信令服务器超时")),
-        this.options.connectTimeoutMs ?? 10_000,
-      );
-      socket.addEventListener(
-        "open",
-        () => {
-          window.clearTimeout(timer);
-          resolve();
-        },
-        { once: true },
-      );
-      socket.addEventListener(
-        "error",
-        () => {
-          window.clearTimeout(timer);
-          reject(new Error("连接服务器失败"));
-        },
-        { once: true },
-      );
-    }).catch((error: unknown) => {
+    await this.openSignalingSocket().catch((error: unknown) => {
       const normalized =
         error instanceof Error ? error : new Error(String(error));
       this.intentionalClose = true;
@@ -209,10 +191,11 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
       this.connectReject = reject;
       this.connectTimer = window.setTimeout(() => {
         if (this.connectReject === reject) {
-          this.connectResolve = null;
-          this.connectReject = null;
-          this.setConnectionState("failed", "建立 WebRTC DataChannel 超时");
-          reject(new Error("建立 WebRTC DataChannel 超时"));
+          const error = new Error("建立 WebRTC DataChannel 超时");
+          reject(error);
+          this.intentionalClose = true;
+          this.cleanup(false);
+          this.setConnectionState("failed", error.message);
         }
       }, this.options.connectTimeoutMs ?? 20_000);
     });
@@ -235,6 +218,7 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
     if (this.socket?.readyState === WebSocket.OPEN)
       this.sendSignal("LEAVE_ROOM", {});
     this.cleanup(true);
+    this.terminalState = null;
     this.setConnectionState("disconnected", "已主动离开房间");
   }
 
@@ -288,6 +272,7 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
           throw new Error("信令服务器返回的加入结果无效");
         }
         this.confirmed = { roomId, sessionId, assignedSide };
+        this.startSignalingHeartbeat();
         this.createPeerConnection();
         this.setConnectionState(
           "connecting",
@@ -340,16 +325,66 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
           message: text,
           recoverable: message.payload.recoverable !== false,
         });
+        if (code === "KICKED") {
+          this.terminate("kicked", "已被房主踢出");
+          return;
+        }
+        if (code === "ROOM_CLOSED" || code === "ROOM_EXPIRED") {
+          this.terminate(
+            "room-closed",
+            code === "ROOM_EXPIRED" ? "房间已失效" : "房间已关闭",
+          );
+          return;
+        }
+        if (
+          code === "ROOM_NOT_FOUND" &&
+          (this.hasEverConnected || this.snapshot.state === "reconnecting")
+        ) {
+          this.terminate("room-closed", "房间已关闭或不存在");
+          return;
+        }
+        if (
+          [
+            "HOST_UNAVAILABLE",
+            "PEER_NOT_CONNECTED",
+            "FIRST_OCCUPIED",
+            "SECOND_OCCUPIED",
+          ].includes(code) &&
+          (this.hasEverConnected || this.snapshot.state === "reconnecting")
+        ) {
+          this.restartSignaling("房主连接暂时不可用，正在重连");
+          return;
+        }
         if (this.connectReject) {
           this.connectReject(error);
           this.clearConnectWaiter();
-          this.setConnectionState("failed", text);
-        }
-        if (code === "ROOM_CLOSED" || code === "ROOM_EXPIRED") {
+          this.intentionalClose = true;
+          this.cleanup(false);
           this.setConnectionState("failed", text);
         }
         return;
       }
+      case "HOST_DISCONNECTED":
+        this.setConnectionState(
+          "reconnecting",
+          "房主信令连接暂时中断，正在等待恢复",
+        );
+        return;
+      case "HOST_RECONNECTED":
+        if (
+          this.dataChannel?.readyState === "open" &&
+          this.peerConnection?.connectionState === "connected"
+        ) {
+          this.onDataChannelReady();
+        } else {
+          this.setConnectionState(
+            "reconnecting",
+            "房主已恢复，正在重建点对点连接",
+          );
+        }
+        return;
+      case "HEARTBEAT_ACK":
+        return;
       case "ROOM_LEFT":
         return;
       default:
@@ -358,7 +393,7 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
   }
 
   private createPeerConnection(): void {
-    this.peerConnection?.close();
+    this.closePeer();
     const peerConnection = new RTCPeerConnection({
       iceServers: this.options.iceServers,
     });
@@ -379,19 +414,18 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
       });
     });
     peerConnection.addEventListener("connectionstatechange", () => {
+      if (this.peerConnection !== peerConnection) return;
       switch (peerConnection.connectionState) {
         case "connected":
+          this.clearRecoveryTimer();
           if (this.dataChannel?.readyState === "open")
             this.onDataChannelReady();
           break;
         case "disconnected":
-          this.setConnectionState(
-            "reconnecting",
-            "点对点连接暂时中断，正在恢复",
-          );
+          this.beginRecoveryWindow("点对点连接暂时中断，正在恢复");
           break;
         case "failed":
-          this.setConnectionState("failed", "WebRTC 连接失败");
+          this.restartSignaling("WebRTC 连接失败，正在重连");
           break;
         case "closed":
           if (!this.intentionalClose)
@@ -399,15 +433,31 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
           break;
       }
     });
+    peerConnection.addEventListener("iceconnectionstatechange", () => {
+      if (this.peerConnection !== peerConnection) return;
+      if (peerConnection.iceConnectionState === "disconnected") {
+        this.beginRecoveryWindow("ICE 连接暂时中断，正在恢复");
+      } else if (peerConnection.iceConnectionState === "failed") {
+        this.restartSignaling("ICE 连接失败，正在重连");
+      } else if (
+        (peerConnection.iceConnectionState === "connected" ||
+          peerConnection.iceConnectionState === "completed") &&
+        this.dataChannel?.readyState === "open"
+      ) {
+        this.clearRecoveryTimer();
+        this.onDataChannelReady();
+      }
+    });
   }
 
   private installDataChannel(channel: RTCDataChannel): void {
-    this.dataChannel?.close();
+    const previousChannel = this.dataChannel;
     this.dataChannel = channel;
+    previousChannel?.close();
     channel.addEventListener("open", () => this.onDataChannelReady());
     channel.addEventListener("close", () => {
-      if (!this.intentionalClose)
-        this.setConnectionState("reconnecting", "DataChannel 已断开");
+      if (!this.intentionalClose && this.dataChannel === channel)
+        this.restartSignaling("DataChannel 已断开，正在重连");
     });
     channel.addEventListener("message", (event) =>
       this.handleDataMessage(event.data),
@@ -417,12 +467,15 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
   private onDataChannelReady(): void {
     if (!this.confirmed || this.dataChannel?.readyState !== "open") return;
     const wasReconnecting = this.snapshot.state === "reconnecting";
+    this.clearRecoveryTimer();
+    this.reconnectAttempt = 0;
+    this.hasEverConnected = true;
     this.setConnectionState("connected", null);
     this.connectResolve?.(this.confirmed);
     this.clearConnectWaiter();
     this.startPing();
     void this.requestState();
-    if (wasReconnecting) void this.requestState();
+    if (wasReconnecting) this.incomingAssets.reset();
   }
 
   private handleDataMessage(data: unknown): void {
@@ -489,6 +542,12 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
           this.events.emit("connectionStateChanged", this.snapshot);
           break;
         }
+        case "KICKED":
+          this.terminate("kicked", message.payload.message);
+          break;
+        case "ROOM_CLOSED":
+          this.terminate("room-closed", message.payload.message);
+          break;
         case "ERROR":
           this.events.emit("error", message.payload);
           break;
@@ -572,23 +631,13 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
     }
   }
 
-  private handleSocketClose(): void {
-    if (this.intentionalClose) return;
-    if (!this.confirmed) {
-      const error = new Error("连接服务器失败");
-      this.connectReject?.(error);
-      this.clearConnectWaiter();
-      this.setConnectionState("failed", error.message);
-      return;
-    }
-    if (this.dataChannel?.readyState !== "open") {
-      this.setConnectionState("reconnecting", "信令连接中断");
-      window.setTimeout(() => {
-        if (!this.intentionalClose && this.dataChannel?.readyState !== "open") {
-          this.setConnectionState("failed", "无法恢复远程连接，请重新加入房间");
-        }
-      }, 3_000);
-    }
+  private handleSocketClose(socket: WebSocket): void {
+    if (this.socket !== socket) return;
+    this.socket = null;
+    this.stopSignalingHeartbeat();
+    if (this.intentionalClose || this.terminalState || !this.requested) return;
+    this.setConnectionState("reconnecting", "信令连接中断，正在重连");
+    this.scheduleReconnect();
   }
 
   private fail(error: Error): void {
@@ -623,16 +672,170 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
     this.connectReject = null;
   }
 
+  private async openSignalingSocket(): Promise<void> {
+    if (!this.requested) throw new Error("缺少房间连接信息");
+    const socket = new WebSocket(
+      createSignalingUrl(this.options.signalingUrl, this.requested.roomId),
+    );
+    this.socket = socket;
+    socket.addEventListener("message", (event) => {
+      if (this.socket === socket) this.handleSignalingRaw(event.data);
+    });
+    socket.addEventListener("close", () => this.handleSocketClose(socket));
+    await new Promise<void>((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        if (this.socket === socket) this.socket = null;
+        socket.close();
+        reject(new Error("连接信令服务器超时"));
+      }, this.options.connectTimeoutMs ?? 10_000);
+      socket.addEventListener(
+        "open",
+        () => {
+          window.clearTimeout(timer);
+          resolve();
+        },
+        { once: true },
+      );
+      socket.addEventListener(
+        "error",
+        () => {
+          window.clearTimeout(timer);
+          if (this.socket === socket) this.socket = null;
+          socket.close();
+          reject(new Error("连接服务器失败"));
+        },
+        { once: true },
+      );
+    });
+  }
+
+  private scheduleReconnect(): void {
+    if (
+      this.intentionalClose ||
+      this.terminalState ||
+      !this.requested ||
+      this.reconnectTimer !== null
+    )
+      return;
+    const delay = Math.min(
+      MAX_RECONNECT_DELAY_MS,
+      1_000 * 2 ** this.reconnectAttempt,
+    );
+    this.reconnectAttempt += 1;
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = null;
+      void this.reconnect();
+    }, delay);
+  }
+
+  private async reconnect(): Promise<void> {
+    if (this.intentionalClose || this.terminalState || !this.requested) return;
+    try {
+      await this.openSignalingSocket();
+      this.confirmed = null;
+      this.sendSignal(
+        "JOIN_ROOM",
+        {
+          roomCode: this.requested.roomId,
+          side: sideToRole(this.requested.side),
+          displayName:
+            this.requested.displayName ??
+            (this.requested.side === "first" ? "先手网页选手" : "后手网页选手"),
+        },
+        createMessageId(),
+      );
+    } catch {
+      this.scheduleReconnect();
+    }
+  }
+
+  private restartSignaling(reason: string): void {
+    if (this.intentionalClose || this.terminalState || !this.requested) return;
+    this.setConnectionState("reconnecting", reason);
+    this.closePeer();
+    const socket = this.socket;
+    this.socket = null;
+    this.stopSignalingHeartbeat();
+    socket?.close(4000, "reconnect");
+    this.scheduleReconnect();
+  }
+
+  private beginRecoveryWindow(reason: string): void {
+    if (this.intentionalClose || this.terminalState) return;
+    this.setConnectionState("reconnecting", reason);
+    if (this.recoveryTimer !== null) return;
+    this.recoveryTimer = window.setTimeout(() => {
+      this.recoveryTimer = null;
+      const connectionState = this.peerConnection?.connectionState;
+      const iceState = this.peerConnection?.iceConnectionState;
+      if (connectionState === "disconnected" || iceState === "disconnected") {
+        this.restartSignaling("网络恢复等待超时，正在重新加入房间");
+      }
+    }, WEBRTC_RECOVERY_GRACE_MS);
+  }
+
+  private terminate(state: "kicked" | "room-closed", reason: string): void {
+    if (this.terminalState) return;
+    this.terminalState = state;
+    this.connectReject?.(new Error(reason));
+    this.intentionalClose = true;
+    this.cleanup(false);
+    this.setConnectionState(state, reason);
+  }
+
+  private startSignalingHeartbeat(): void {
+    this.stopSignalingHeartbeat();
+    const heartbeat = () => {
+      if (this.socket?.readyState !== WebSocket.OPEN) return;
+      try {
+        this.sendSignal("HEARTBEAT", { sentAt: new Date().toISOString() });
+      } catch {
+        // The close event owns reconnect scheduling.
+      }
+    };
+    heartbeat();
+    this.signalingHeartbeatTimer = window.setInterval(
+      heartbeat,
+      SIGNALING_HEARTBEAT_INTERVAL_MS,
+    );
+  }
+
+  private stopSignalingHeartbeat(): void {
+    if (this.signalingHeartbeatTimer !== null)
+      window.clearInterval(this.signalingHeartbeatTimer);
+    this.signalingHeartbeatTimer = null;
+  }
+
+  private clearRecoveryTimer(): void {
+    if (this.recoveryTimer !== null) window.clearTimeout(this.recoveryTimer);
+    this.recoveryTimer = null;
+  }
+
+  private closePeer(): void {
+    this.clearRecoveryTimer();
+    const channel = this.dataChannel;
+    this.dataChannel = null;
+    channel?.close();
+    const peerConnection = this.peerConnection;
+    this.peerConnection = null;
+    peerConnection?.close();
+    this.pendingCandidates = [];
+  }
+
   private cleanup(emitPeerState: boolean): void {
     if (this.connectTimer !== null) window.clearTimeout(this.connectTimer);
     if (this.pingTimer !== null) window.clearInterval(this.pingTimer);
+    if (this.signalingHeartbeatTimer !== null)
+      window.clearInterval(this.signalingHeartbeatTimer);
+    if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer);
+    if (this.recoveryTimer !== null) window.clearTimeout(this.recoveryTimer);
     this.connectTimer = null;
     this.pingTimer = null;
-    this.dataChannel?.close();
-    this.peerConnection?.close();
+    this.signalingHeartbeatTimer = null;
+    this.reconnectTimer = null;
+    this.recoveryTimer = null;
+    this.closePeer();
     this.socket?.close(1000, "client cleanup");
-    this.dataChannel = null;
-    this.peerConnection = null;
     this.socket = null;
     this.pendingCandidates = [];
     this.incomingAssets.reset();

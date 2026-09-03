@@ -39,6 +39,9 @@ const MAX_SIGNALING_MESSAGE_BYTES = 64 * 1024
 const DATA_CHANNEL_HIGH_WATER_MARK = 1024 * 1024
 const DATA_CHANNEL_LOW_WATER_MARK = 256 * 1024
 const DATA_CHANNEL_DRAIN_TIMEOUT_MS = 15_000
+const SIGNALING_HEARTBEAT_INTERVAL_MS = 20_000
+const PEER_RECOVERY_GRACE_MS = 10_000
+const MAX_RECONNECT_DELAY_MS = 15_000
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -56,6 +59,13 @@ function roleToSide(role: SignalingRole): 'first' | 'second' | null {
 
 function sideToRole(side: 'first' | 'second'): 'FIRST' | 'SECOND' {
   return side === 'first' ? 'FIRST' : 'SECOND'
+}
+
+function createResumeUrl(baseUrl: string, roomId: string): string {
+  const url = new URL(baseUrl)
+  url.searchParams.set('roomId', roomId)
+  url.searchParams.set('mode', 'resume')
+  return url.toString()
 }
 
 function parseSignalingMessage(raw: string): SignalingEnvelope {
@@ -118,14 +128,24 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
   readonly kind = 'webrtc' as const
   private readonly messageListeners = new Set<(message: RemoteHostIncomingMessage) => void>()
   private readonly connectedListeners = new Set<(peer: RemoteHostPeer) => void>()
+  private readonly connectingListeners = new Set<(peer: RemoteHostPeer) => void>()
+  private readonly reconnectingListeners = new Set<(peer: RemoteHostPeer) => void>()
   private readonly disconnectedListeners = new Set<(peer: RemoteHostPeer) => void>()
   private readonly statusListeners = new Set<(status: RemoteHostTransportStatus) => void>()
   private readonly peers = new Map<'first' | 'second', HostPeerSession>()
   private readonly sendQueues = new Map<string, Promise<void>>()
+  private readonly pendingKicks = new Set<'first' | 'second'>()
   private socket: WebSocket | null = null
   private stopping = false
   private startResolve: ((result: RemoteHostTransportStartResult) => void) | null = null
   private startReject: ((error: Error) => void) | null = null
+  private roomId: string | null = null
+  private resumeToken: string | null = null
+  private heartbeatTimer: number | null = null
+  private reconnectTimer: number | null = null
+  private reconnectAttempt = 0
+  private resumeInFlight = false
+  private resumeResolve: (() => void) | null = null
 
   constructor(private readonly options: WebRtcRemoteHostTransportOptions) {}
 
@@ -133,33 +153,8 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
     if (this.socket) throw new Error('WebRTC transport 已经启动')
     this.stopping = false
     this.emitStatus({ connectionState: 'connecting', error: null })
-    const socket = new WebSocket(this.options.signalingUrl)
-    this.socket = socket
-    socket.addEventListener('message', (event) => this.handleSignalingRaw(event.data))
-    socket.addEventListener('close', () => this.handleSocketClosed())
-
-    await new Promise<void>((resolve, reject) => {
-      const timer = window.setTimeout(
-        () => reject(new Error('连接信令服务器超时')),
-        this.options.connectTimeoutMs ?? 10_000
-      )
-      socket.addEventListener(
-        'open',
-        () => {
-          window.clearTimeout(timer)
-          resolve()
-        },
-        { once: true }
-      )
-      socket.addEventListener(
-        'error',
-        () => {
-          window.clearTimeout(timer)
-          reject(new Error('连接信令服务器失败'))
-        },
-        { once: true }
-      )
-    })
+    console.info('[Remote BP signaling] WebSocket connect start', this.options.signalingUrl)
+    await this.openSocket(this.options.signalingUrl)
 
     const requestId = globalThis.crypto.randomUUID()
     const created = new Promise<RemoteHostTransportStartResult>((resolve, reject) => {
@@ -169,23 +164,64 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
         if (this.startReject === reject) {
           this.startResolve = null
           this.startReject = null
+          const socket = this.socket
+          this.socket = null
+          socket?.close(4000, 'create room timeout')
           reject(new Error('创建远程房间超时'))
         }
       }, this.options.connectTimeoutMs ?? 10_000)
     })
+    console.info('[Remote BP signaling] CREATE_ROOM send')
     this.sendSignal('CREATE_ROOM', { displayName: 'XQB-BPBox' }, requestId)
     return created
   }
 
   async stop(): Promise<void> {
     this.stopping = true
+    this.clearReconnectTimer()
+    this.stopHeartbeat()
+    if (this.socket?.readyState !== WebSocket.OPEN && this.roomId && this.resumeToken) {
+      try {
+        await this.openSocket(createResumeUrl(this.options.signalingUrl, this.roomId))
+        const resumed = new Promise<void>((resolve) => {
+          this.resumeResolve = resolve
+          window.setTimeout(resolve, 5_000)
+        })
+        this.sendSignal('RESUME_ROOM', {
+          roomCode: this.roomId,
+          resumeToken: this.resumeToken
+        })
+        await resumed
+      } catch {
+        // The DataChannel ROOM_CLOSED message remains the best-effort fallback.
+      }
+    }
     if (this.socket?.readyState === WebSocket.OPEN) {
-      this.sendSignal('LEAVE_ROOM', {})
+      try {
+        this.sendSignal('LEAVE_ROOM', {})
+      } catch {
+        // The signaling socket may have closed between the readyState check and send.
+      }
     }
     for (const side of [...this.peers.keys()]) this.removePeer(side, true)
     this.socket?.close(1000, 'host stopped')
     this.socket = null
+    this.roomId = null
+    this.resumeToken = null
+    this.reconnectAttempt = 0
+    this.resumeInFlight = false
+    this.resumeResolve = null
+    this.pendingKicks.clear()
     this.emitStatus({ connectionState: 'offline', error: null })
+  }
+
+  async kick(side: 'first' | 'second'): Promise<void> {
+    const peer = this.peers.get(side)
+    if (!peer) return
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      this.sendSignal('KICK_PEER', { side: sideToRole(side) })
+    } else this.pendingKicks.add(side)
+    this.removePeer(side, true)
   }
 
   async send(peerId: string, message: RemoteHostOutgoingMessage): Promise<void> {
@@ -215,6 +251,16 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
     return () => this.connectedListeners.delete(listener)
   }
 
+  onPeerConnecting(listener: (peer: RemoteHostPeer) => void): () => void {
+    this.connectingListeners.add(listener)
+    return () => this.connectingListeners.delete(listener)
+  }
+
+  onPeerReconnecting(listener: (peer: RemoteHostPeer) => void): () => void {
+    this.reconnectingListeners.add(listener)
+    return () => this.reconnectingListeners.delete(listener)
+  }
+
   onPeerDisconnected(listener: (peer: RemoteHostPeer) => void): () => void {
     this.disconnectedListeners.add(listener)
     return () => this.disconnectedListeners.delete(listener)
@@ -233,7 +279,11 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
     let message: SignalingEnvelope
     try {
       message = parseSignalingMessage(data)
-      void this.handleSignalingMessage(message)
+      void this.handleSignalingMessage(message).catch((error: unknown) => {
+        const normalized = error instanceof Error ? error : new Error(String(error))
+        if (this.roomId) this.restartSignaling(normalized.message)
+        else this.emitStatus({ connectionState: 'failed', error: normalized.message })
+      })
     } catch (error) {
       this.emitStatus({
         connectionState: 'failed',
@@ -248,13 +298,20 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
         const roomCode = message.payload.roomCode
         const createdAt = message.payload.createdAt
         const expiresAt = message.payload.expiresAt
+        const resumeToken = message.payload.resumeToken
         if (
           !isString(roomCode, 6, 6) ||
           !/^[A-Z2-9]{6}$/.test(roomCode) ||
           !isString(createdAt, 10, 64) ||
-          !isString(expiresAt, 10, 64)
+          !isString(expiresAt, 10, 64) ||
+          !isString(resumeToken, 16, 128)
         )
           throw new Error('信令服务器返回的房间信息无效')
+        console.info('[Remote BP signaling] ROOM_CREATED received', roomCode)
+        this.roomId = roomCode
+        this.resumeToken = resumeToken
+        this.reconnectAttempt = 0
+        this.startHeartbeat()
         this.emitStatus({ connectionState: 'connected', error: null })
         this.startResolve?.({
           roomId: roomCode,
@@ -266,7 +323,27 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
         this.startReject = null
         return
       }
+      case 'ROOM_RESUMED': {
+        const roomCode = message.payload.roomCode
+        if (!isString(roomCode, 6, 6) || roomCode !== this.roomId) {
+          throw new Error('恢复的房间信息无效')
+        }
+        this.resumeInFlight = false
+        this.reconnectAttempt = 0
+        this.resumeResolve?.()
+        this.resumeResolve = null
+        if (!this.stopping) {
+          this.startHeartbeat()
+          this.emitStatus({ connectionState: 'connected', error: null })
+          for (const side of this.pendingKicks) {
+            this.sendSignal('KICK_PEER', { side: sideToRole(side) })
+          }
+          this.pendingKicks.clear()
+        }
+        return
+      }
       case 'PEER_JOINED': {
+        if (this.stopping) return
         const role = message.payload.role
         const side = roleToSide(role as SignalingRole)
         const sessionId = message.payload.sessionId
@@ -274,6 +351,19 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
         const displayName = isString(message.payload.displayName, 1, 64)
           ? message.payload.displayName
           : undefined
+        const existing = this.peers.get(side)
+        if (
+          existing?.peerId === sessionId &&
+          existing.dataChannel.readyState === 'open' &&
+          existing.peerConnection.connectionState !== 'failed' &&
+          existing.peerConnection.connectionState !== 'closed'
+        ) {
+          // A signaling-only outage does not invalidate an otherwise healthy P2P
+          // channel. Keep it in place so resuming the room cannot tear down a live
+          // player connection just because the server re-announced the seat.
+          this.announceConnected(existing)
+          return
+        }
         await this.createPeer(side, sessionId, displayName)
         return
       }
@@ -313,14 +403,27 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
           ? message.payload.message
           : '信令服务错误'
         const error = new Error(`${text} (${code})`)
+        const wasStarting = this.startReject !== null
         if (this.startReject) {
           this.startReject(error)
           this.startResolve = null
           this.startReject = null
         }
-        this.emitStatus({ connectionState: 'failed', error: error.message })
+        if (this.resumeInFlight && (code === 'ROOM_NOT_FOUND' || code === 'INVALID_RESUME_TOKEN')) {
+          this.resumeInFlight = false
+          this.stopping = true
+          this.clearReconnectTimer()
+          this.stopHeartbeat()
+          this.emitStatus({ connectionState: 'failed', error: error.message })
+          return
+        }
+        if (wasStarting) this.emitStatus({ connectionState: 'failed', error: error.message })
+        else console.warn('[Remote BP signaling] recoverable error', code, text)
         return
       }
+      case 'HEARTBEAT_ACK':
+      case 'HOST_RECONNECTED':
+        return
       case 'ROOM_LEFT':
         return
       default:
@@ -333,7 +436,7 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
     peerId: string,
     displayName?: string
   ): Promise<void> {
-    this.removePeer(side, true)
+    this.removePeer(side, false)
     const peerConnection = new RTCPeerConnection({ iceServers: this.options.iceServers })
     const dataChannel = peerConnection.createDataChannel('xqb-remote-bp', { ordered: true })
     dataChannel.bufferedAmountLowThreshold = DATA_CHANNEL_LOW_WATER_MARK
@@ -349,8 +452,9 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
       restartTimer: null
     }
     this.peers.set(side, peer)
+    this.connectingListeners.forEach((listener) => listener(peer))
     dataChannel.addEventListener('open', () => this.announceConnected(peer))
-    dataChannel.addEventListener('close', () => this.announceDisconnected(peer))
+    dataChannel.addEventListener('close', () => this.handleDataChannelClosed(peer))
     dataChannel.addEventListener('message', (event) => this.handleDataMessage(peer, event.data))
     peerConnection.addEventListener('icecandidate', (event) => {
       if (!event.candidate) return
@@ -363,17 +467,27 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
       if (peerConnection.connectionState === 'connected') {
         if (peer.restartTimer !== null) window.clearTimeout(peer.restartTimer)
         peer.restartTimer = null
+        if (dataChannel.readyState === 'open') this.announceConnected(peer)
         return
       }
       if (peerConnection.connectionState === 'disconnected') {
-        this.announceDisconnected(peer)
+        this.announceReconnecting(peer)
+        if (peer.restartTimer !== null) window.clearTimeout(peer.restartTimer)
         peer.restartTimer = window.setTimeout(() => {
-          if (peerConnection.connectionState === 'disconnected') void this.createOffer(peer, true)
-        }, 2_000)
+          if (
+            this.peers.get(side) === peer &&
+            peerConnection.connectionState === 'disconnected' &&
+            this.socket?.readyState === WebSocket.OPEN
+          ) {
+            void this.createOffer(peer, true).catch(() => this.scheduleReconnect())
+          }
+        }, PEER_RECOVERY_GRACE_MS)
       }
       if (peerConnection.connectionState === 'failed') {
-        this.announceDisconnected(peer)
-        void this.createOffer(peer, true)
+        this.announceReconnecting(peer)
+        if (this.socket?.readyState === WebSocket.OPEN) {
+          void this.createOffer(peer, true).catch(() => this.scheduleReconnect())
+        }
       }
     })
     await this.createOffer(peer)
@@ -447,26 +561,47 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
   }
 
   private announceConnected(peer: HostPeerSession): void {
+    if (this.peers.get(peer.side) !== peer) return
     if (peer.announced) return
     peer.announced = true
     this.connectedListeners.forEach((listener) => listener(peer))
   }
 
-  private announceDisconnected(peer: HostPeerSession): void {
-    if (!peer.announced) return
-    peer.announced = false
-    this.disconnectedListeners.forEach((listener) => listener(peer))
+  private announceReconnecting(peer: HostPeerSession): void {
+    if (this.peers.get(peer.side) !== peer) return
+    if (peer.announced) peer.announced = false
+    this.reconnectingListeners.forEach((listener) => listener(peer))
+  }
+
+  private handleDataChannelClosed(peer: HostPeerSession): void {
+    if (this.stopping || this.peers.get(peer.side) !== peer) return
+    this.announceReconnecting(peer)
+    if (peer.restartTimer !== null) window.clearTimeout(peer.restartTimer)
+    peer.restartTimer = window.setTimeout(() => {
+      if (this.peers.get(peer.side) !== peer || this.socket?.readyState !== WebSocket.OPEN) return
+      void this.createPeer(peer.side, peer.peerId, peer.displayName).catch(() =>
+        this.scheduleReconnect()
+      )
+    }, 1_000)
   }
 
   private removePeer(side: 'first' | 'second', notify: boolean): void {
     const peer = this.peers.get(side)
     if (!peer) return
     if (peer.restartTimer !== null) window.clearTimeout(peer.restartTimer)
-    if (notify) this.announceDisconnected(peer)
+    this.peers.delete(side)
+    if (notify) {
+      peer.announced = true
+      this.announceDisconnectedRemoved(peer)
+    }
     this.sendQueues.delete(peer.peerId)
     peer.dataChannel.close()
     peer.peerConnection.close()
-    this.peers.delete(side)
+  }
+
+  private announceDisconnectedRemoved(peer: HostPeerSession): void {
+    peer.announced = false
+    this.disconnectedListeners.forEach((listener) => listener(peer))
   }
 
   private async sendNow(peerId: string, raw: string): Promise<void> {
@@ -506,18 +641,116 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
     this.socket.send(raw)
   }
 
-  private handleSocketClosed(): void {
+  private handleSocketClosed(event: CloseEvent, socket: WebSocket): void {
+    console.warn('[Remote BP signaling] WebSocket close', {
+      url: this.options.signalingUrl,
+      code: event.code,
+      reason: event.reason,
+      wasClean: event.wasClean
+    })
+    if (this.socket !== socket) return
+    this.socket = null
+    this.stopHeartbeat()
     if (this.stopping) return
     this.startReject?.(new Error('信令服务器连接已断开'))
     this.startResolve = null
     this.startReject = null
-    for (const side of [...this.peers.keys()]) this.removePeer(side, true)
     this.emitStatus({ connectionState: 'reconnecting', error: '信令服务器连接已断开' })
-    window.setTimeout(() => {
-      if (!this.stopping && this.socket?.readyState !== WebSocket.OPEN) {
-        this.emitStatus({ connectionState: 'failed', error: '无法恢复信令连接，请重新创建房间' })
+    this.scheduleReconnect()
+  }
+
+  private restartSignaling(reason: string): void {
+    if (this.stopping || !this.roomId || !this.resumeToken) return
+    this.emitStatus({ connectionState: 'reconnecting', error: reason })
+    const socket = this.socket
+    this.socket = null
+    this.stopHeartbeat()
+    socket?.close(4000, 'reconnect')
+    this.scheduleReconnect()
+  }
+
+  private async openSocket(url: string): Promise<void> {
+    const socket = new WebSocket(url)
+    this.socket = socket
+    socket.addEventListener('message', (event) => {
+      if (this.socket === socket) this.handleSignalingRaw(event.data)
+    })
+    socket.addEventListener('close', (event) => this.handleSocketClosed(event, socket))
+    await new Promise<void>((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        if (this.socket === socket) this.socket = null
+        socket.close()
+        reject(new Error('连接信令服务器超时'))
+      }, this.options.connectTimeoutMs ?? 10_000)
+      socket.addEventListener(
+        'open',
+        () => {
+          window.clearTimeout(timer)
+          console.info('[Remote BP signaling] WebSocket open', url)
+          resolve()
+        },
+        { once: true }
+      )
+      socket.addEventListener(
+        'error',
+        () => {
+          window.clearTimeout(timer)
+          console.error('[Remote BP signaling] WebSocket error', url)
+          if (this.socket === socket) this.socket = null
+          socket.close()
+          reject(new Error('连接信令服务器失败'))
+        },
+        { once: true }
+      )
+    })
+  }
+
+  private scheduleReconnect(): void {
+    if (this.stopping || !this.roomId || !this.resumeToken || this.reconnectTimer !== null) return
+    const delay = Math.min(MAX_RECONNECT_DELAY_MS, 1_000 * 2 ** this.reconnectAttempt)
+    this.reconnectAttempt += 1
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = null
+      void this.resumeRoom()
+    }, delay)
+  }
+
+  private async resumeRoom(): Promise<void> {
+    if (this.stopping || !this.roomId || !this.resumeToken) return
+    try {
+      await this.openSocket(createResumeUrl(this.options.signalingUrl, this.roomId))
+      this.resumeInFlight = true
+      this.sendSignal('RESUME_ROOM', {
+        roomCode: this.roomId,
+        resumeToken: this.resumeToken
+      })
+    } catch {
+      this.scheduleReconnect()
+    }
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat()
+    const heartbeat = (): void => {
+      if (this.socket?.readyState !== WebSocket.OPEN) return
+      try {
+        this.sendSignal('HEARTBEAT', { sentAt: new Date().toISOString() })
+      } catch {
+        // The close event owns reconnect scheduling.
       }
-    }, 3_000)
+    }
+    heartbeat()
+    this.heartbeatTimer = window.setInterval(heartbeat, SIGNALING_HEARTBEAT_INTERVAL_MS)
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer !== null) window.clearInterval(this.heartbeatTimer)
+    this.heartbeatTimer = null
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer)
+    this.reconnectTimer = null
   }
 
   private emitStatus(status: RemoteHostTransportStatus): void {

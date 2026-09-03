@@ -61,9 +61,23 @@ export class RemoteBpSessionStore {
       pendingActionId: null,
     };
     this.unsubscribers = [
-      connection.on("connectionStateChanged", (next) =>
-        this.patch({ connection: next }),
-      ),
+      connection.on("connectionStateChanged", (next) => {
+        const terminalMessage =
+          next.state === "kicked"
+            ? "已被房主踢出"
+            : next.state === "room-closed"
+              ? "房间已关闭"
+              : null;
+        this.patch({
+          connection: next,
+          ...(terminalMessage
+            ? {
+                pendingActionId: null,
+                feedback: { tone: "error" as const, message: terminalMessage },
+              }
+            : {}),
+        });
+      }),
       connection.on("bpStateReceived", (state) => this.acceptState(state)),
       connection.on("bpStateUpdated", (state) => this.acceptState(state)),
       connection.on("actionResult", (result) =>

@@ -57,10 +57,6 @@ export function JoinPage({
       <section className="join-shell">
         <div className="join-intro">
           <h1>进入远程 BP 房间</h1>
-          <p>
-            选择先手或后手，与房主的 XQB-BPBox
-            建立连接。身份最终由信令服务器确认。
-          </p>
         </div>
 
         <form className="join-card" onSubmit={handleSubmit}>
@@ -160,11 +156,6 @@ export function JoinPage({
           </div>
         </form>
       </section>
-
-      <footer className="join-footer">
-        <span>网页端不保存或裁决正式 BP 状态</span>
-        <span>状态以 XQB-BPBox 为准</span>
-      </footer>
     </main>
   );
 }

@@ -7,6 +7,8 @@ const stateLabels: Record<ConnectionSnapshot["state"], string> = {
   reconnecting: "重连中",
   disconnected: "已断开",
   failed: "连接失败",
+  kicked: "被踢出",
+  "room-closed": "房间已关闭",
 };
 
 export function ConnectionBadge({

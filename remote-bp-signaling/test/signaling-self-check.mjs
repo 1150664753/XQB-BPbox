@@ -23,6 +23,29 @@ function nextMessage(socket) {
   });
 }
 
+function nextMessages(socket, count) {
+  return new Promise((resolve, reject) => {
+    const messages = [];
+    const onMessage = (data) => {
+      messages.push(JSON.parse(data.toString("utf8")));
+      if (messages.length === count) {
+        cleanup();
+        resolve(messages);
+      }
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      socket.off("message", onMessage);
+      socket.off("error", onError);
+    };
+    socket.on("message", onMessage);
+    socket.on("error", onError);
+  });
+}
+
 async function connect(url) {
   const socket = new WebSocket(url);
   await new Promise((resolve, reject) => {
@@ -42,7 +65,6 @@ async function main() {
   const server = createSignalingServer({
     host: "127.0.0.1",
     port: 0,
-    roomTtlMs: 60_000,
   });
   const port = await server.listen();
   const url = `ws://127.0.0.1:${port}`;
@@ -57,6 +79,16 @@ async function main() {
   const created = await nextMessage(host);
   assert.equal(created.type, "ROOM_CREATED");
   assert.match(created.payload.roomCode, /^[A-Z2-9]{6}$/);
+  assert.match(created.payload.resumeToken, /^[0-9a-f-]{36}$/i);
+
+  const heartbeatAck = nextMessage(host);
+  host.send(
+    JSON.stringify({
+      type: "HEARTBEAT",
+      payload: { sentAt: new Date().toISOString() },
+    }),
+  );
+  assert.equal((await heartbeatAck).type, "HEARTBEAT_ACK");
 
   first.send(
     JSON.stringify({
@@ -110,14 +142,57 @@ async function main() {
   assert.equal(secondJoined.payload.role, "SECOND");
   assert.equal(secondPeerJoined.payload.role, "SECOND");
 
+  const hostDisconnected = nextMessage(second);
   host.close();
-  const roomClosed = await nextMessage(second);
-  assert.equal(roomClosed.payload.code, "ROOM_CLOSED");
-  second.close();
+  assert.equal((await hostDisconnected).type, "HOST_DISCONNECTED");
+
+  const resumedHost = await connect(url);
+  const resumedMessages = nextMessages(resumedHost, 2);
+  const hostReconnected = nextMessage(second);
+  resumedHost.send(
+    JSON.stringify({
+      type: "RESUME_ROOM",
+      requestId: "resume-host",
+      payload: {
+        roomCode: created.payload.roomCode,
+        resumeToken: created.payload.resumeToken,
+      },
+    }),
+  );
+  const [roomResumed, resumedPeer] = await resumedMessages;
+  assert.equal(roomResumed.type, "ROOM_RESUMED");
+  assert.equal(resumedPeer.payload.role, "SECOND");
+  assert.equal((await hostReconnected).type, "HOST_RECONNECTED");
+
+  const kicked = nextMessage(second);
+  const kickedPeerLeft = nextMessage(resumedHost);
+  resumedHost.send(
+    JSON.stringify({ type: "KICK_PEER", payload: { side: "SECOND" } }),
+  );
+  assert.equal((await kicked).payload.code, "KICKED");
+  assert.equal((await kickedPeerLeft).payload.reason, "kicked");
+
+  const replacementSecond = await connect(url);
+  const replacementJoined = nextMessage(replacementSecond);
+  const replacementPeerJoined = nextMessage(resumedHost);
+  replacementSecond.send(
+    JSON.stringify({
+      type: "JOIN_ROOM",
+      payload: { roomCode: created.payload.roomCode, side: "SECOND" },
+    }),
+  );
+  assert.equal((await replacementJoined).payload.role, "SECOND");
+  assert.equal((await replacementPeerJoined).payload.role, "SECOND");
+
+  const roomClosed = nextMessage(replacementSecond);
+  resumedHost.send(JSON.stringify({ type: "LEAVE_ROOM", payload: {} }));
+  assert.equal((await roomClosed).payload.code, "ROOM_CLOSED");
+  replacementSecond.close();
+  resumedHost.close();
   duplicate.close();
   await server.close();
   console.log(
-    "Signaling self-check passed: room lifecycle, slots, relay, validation",
+    "Signaling self-check passed: persistent room, resume, kick, heartbeat, cleanup",
   );
 }
 

@@ -1,5 +1,10 @@
 import type { AssetManifest, AssetManifestEntry } from "../types/assets";
-import type { BpActionResult, PlayerSide, RemoteBpState } from "../types/bp";
+import type {
+  BpActionResult,
+  PlayerConnectionState,
+  PlayerSide,
+  RemoteBpState,
+} from "../types/bp";
 import { PROTOCOL_VERSION } from "./constants";
 
 export const MAX_REMOTE_BP_MESSAGE_BYTES = 512 * 1024;
@@ -49,6 +54,8 @@ export type ValidatedHostMessage =
       };
     }
   | { type: "PONG"; payload: { clientTime: string; hostTime: string } }
+  | { type: "KICKED"; payload: { message: string } }
+  | { type: "ROOM_CLOSED"; payload: { message: string } }
   | {
       type: "ERROR";
       payload: {
@@ -85,6 +92,18 @@ function isIsoDate(value: unknown): value is string {
 
 function isSide(value: unknown): value is PlayerSide {
   return value === "first" || value === "second";
+}
+
+function isPlayerConnectionState(
+  value: unknown,
+): value is PlayerConnectionState {
+  return [
+    "empty",
+    "connecting",
+    "connected",
+    "reconnecting",
+    "disconnected",
+  ].includes(String(value));
 }
 
 function isNullableString(value: unknown, max = 256): value is string | null {
@@ -148,6 +167,23 @@ function parseState(value: unknown): RemoteBpState | null {
     !["waiting", "running", "complete", "paused"].includes(String(value.status))
   )
     return null;
+  const waitingForHost = value.waitingForHost === true;
+  let playerConnections: RemoteBpState["playerConnections"] = {
+    first: "disconnected",
+    second: "disconnected",
+  };
+  if (isObject(value.playerConnections)) {
+    if (
+      !isPlayerConnectionState(value.playerConnections.first) ||
+      !isPlayerConnectionState(value.playerConnections.second)
+    ) {
+      return null;
+    }
+    playerConnections = {
+      first: value.playerConnections.first,
+      second: value.playerConnections.second,
+    };
+  }
   if (
     !["WAITING", "BAN", "PICK", "PROTECT", "BORROW", "COMPLETE"].includes(
       String(value.phase),
@@ -324,7 +360,11 @@ function parseState(value: unknown): RemoteBpState | null {
     )
       return null;
   }
-  return value as unknown as RemoteBpState;
+  return {
+    ...(value as unknown as RemoteBpState),
+    waitingForHost,
+    playerConnections,
+  };
 }
 
 function parseActionResult(value: unknown): BpActionResult | null {
@@ -513,6 +553,12 @@ export function parseHostMessage(raw: string): ValidatedHostMessage {
           hostTime: value.payload.hostTime,
         },
       };
+    case "KICKED":
+    case "ROOM_CLOSED":
+      if (!isString(value.payload.message, 1, 512)) {
+        throw new Error(`INVALID_${value.type}`);
+      }
+      return { type: value.type, payload: { message: value.payload.message } };
     case "ERROR":
       if (
         !isString(value.payload.code, 1, 64) ||

@@ -89,7 +89,9 @@ export interface RemoteBpState {
   phase: RemoteBpPhase
   currentActor: RemotePlayerSide | null
   currentOperation: RemoteBpOperation
+  waitingForHost: boolean
   currentStep: RemoteBpStep | null
+  playerConnections: Record<RemotePlayerSide, RemotePlayerConnectionState>
   sideMapping: RemoteSideMapping
   teams: Record<RemotePlayerSide, RemoteBpTeam>
   characters: RemoteCharacterDto[]
@@ -199,7 +201,12 @@ export interface RemoteAssetBinary {
 }
 
 export type RemoteRoomLifecycleState = 'idle' | 'starting' | 'active' | 'stopping' | 'error'
-export type RemotePlayerConnectionState = 'empty' | 'connecting' | 'connected' | 'disconnected'
+export type RemotePlayerConnectionState =
+  | 'empty'
+  | 'connecting'
+  | 'connected'
+  | 'reconnecting'
+  | 'disconnected'
 
 export interface RemoteRoomPlayerState {
   side: RemotePlayerSide

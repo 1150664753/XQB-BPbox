@@ -63,6 +63,8 @@ export type RemoteHostOutgoingMessage =
       payload: { transferId: string; assetId: string; hash: string; totalBytes: number }
     }
   | { type: 'PONG'; payload: { clientTime: string; hostTime: string } }
+  | { type: 'KICKED'; payload: { message: string } }
+  | { type: 'ROOM_CLOSED'; payload: { message: string } }
   | {
       type: 'ERROR'
       payload: { code: string; message: string; recoverable?: boolean; assetId?: string }
@@ -90,10 +92,13 @@ export interface RemoteHostTransport {
   readonly kind: 'mock' | 'webrtc'
   start(room: RemoteBpRoomState): Promise<RemoteHostTransportStartResult | void>
   stop(): Promise<void>
+  kick(side: RemotePlayerSide): Promise<void>
   send(peerId: string, message: RemoteHostOutgoingMessage): Promise<void>
   broadcast(message: RemoteHostOutgoingMessage): Promise<void>
   onMessage(listener: (message: RemoteHostIncomingMessage) => void): () => void
   onPeerConnected(listener: (peer: RemoteHostPeer) => void): () => void
+  onPeerConnecting(listener: (peer: RemoteHostPeer) => void): () => void
+  onPeerReconnecting(listener: (peer: RemoteHostPeer) => void): () => void
   onPeerDisconnected(listener: (peer: RemoteHostPeer) => void): () => void
   onStatusChange(listener: (status: RemoteHostTransportStatus) => void): () => void
 }
@@ -104,6 +109,8 @@ export class MockRemoteHostTransport implements RemoteHostTransport {
   readonly broadcasts: RemoteHostOutgoingMessage[] = []
   private readonly messageListeners = new Set<(message: RemoteHostIncomingMessage) => void>()
   private readonly connectedListeners = new Set<(peer: RemoteHostPeer) => void>()
+  private readonly connectingListeners = new Set<(peer: RemoteHostPeer) => void>()
+  private readonly reconnectingListeners = new Set<(peer: RemoteHostPeer) => void>()
   private readonly disconnectedListeners = new Set<(peer: RemoteHostPeer) => void>()
   private readonly statusListeners = new Set<(status: RemoteHostTransportStatus) => void>()
   private active = false
@@ -116,6 +123,10 @@ export class MockRemoteHostTransport implements RemoteHostTransport {
   async stop(): Promise<void> {
     this.active = false
     this.statusListeners.forEach((listener) => listener({ connectionState: 'offline' }))
+  }
+
+  async kick(side: RemotePlayerSide): Promise<void> {
+    this.disconnectedListeners.forEach((listener) => listener({ peerId: `mock-${side}`, side }))
   }
 
   async send(peerId: string, message: RemoteHostOutgoingMessage): Promise<void> {
@@ -138,6 +149,16 @@ export class MockRemoteHostTransport implements RemoteHostTransport {
     return () => this.connectedListeners.delete(listener)
   }
 
+  onPeerConnecting(listener: (peer: RemoteHostPeer) => void): () => void {
+    this.connectingListeners.add(listener)
+    return () => this.connectingListeners.delete(listener)
+  }
+
+  onPeerReconnecting(listener: (peer: RemoteHostPeer) => void): () => void {
+    this.reconnectingListeners.add(listener)
+    return () => this.reconnectingListeners.delete(listener)
+  }
+
   onPeerDisconnected(listener: (peer: RemoteHostPeer) => void): () => void {
     this.disconnectedListeners.add(listener)
     return () => this.disconnectedListeners.delete(listener)
@@ -154,6 +175,14 @@ export class MockRemoteHostTransport implements RemoteHostTransport {
 
   simulatePeerConnected(peer: RemoteHostPeer): void {
     this.connectedListeners.forEach((listener) => listener(peer))
+  }
+
+  simulatePeerConnecting(peer: RemoteHostPeer): void {
+    this.connectingListeners.forEach((listener) => listener(peer))
+  }
+
+  simulatePeerReconnecting(peer: RemoteHostPeer): void {
+    this.reconnectingListeners.forEach((listener) => listener(peer))
   }
 
   simulatePeerDisconnected(peer: RemoteHostPeer): void {

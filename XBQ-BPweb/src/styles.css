@@ -139,6 +139,15 @@ a {
 .connection-badge--failed .connection-badge__dot {
   background: var(--red);
 }
+.connection-badge--kicked,
+.connection-badge--room-closed {
+  color: #ffb3bd;
+}
+.connection-badge--kicked .connection-badge__dot,
+.connection-badge--room-closed .connection-badge__dot {
+  background: var(--red);
+  box-shadow: 0 0 0 3px rgba(229, 72, 104, 0.13);
+}
 
 @keyframes pulse {
   50% {
@@ -635,6 +644,12 @@ a {
   --prompt-accent-mid: #b98a2e;
   --prompt-accent-hot: #fff0a8;
 }
+.operation-prompt--wait {
+  --prompt-accent: #8090a4;
+  --prompt-accent-deep: #334154;
+  --prompt-accent-mid: #68788d;
+  --prompt-accent-hot: #d7e0eb;
+}
 .operation-prompt--first::before {
   opacity: 0.92;
   background: linear-gradient(
@@ -1087,6 +1102,40 @@ a {
 }
 .team-results__heading strong {
   font-size: 13px;
+}
+.player-connection {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #8497ae;
+  font-size: 9px;
+  white-space: nowrap;
+}
+.player-connection i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #65758a;
+}
+.player-connection--connected {
+  color: #aeeedb;
+}
+.player-connection--connected i {
+  background: var(--green);
+  box-shadow: 0 0 7px rgba(40, 211, 159, 0.5);
+}
+.player-connection--connecting i,
+.player-connection--reconnecting i {
+  background: var(--gold);
+  animation: pulse 1.1s infinite;
+}
+.player-connection--kicked,
+.player-connection--room-closed {
+  color: #ff9baa;
+}
+.player-connection--kicked i,
+.player-connection--room-closed i {
+  background: var(--red);
 }
 .turn-pill {
   margin-left: auto;

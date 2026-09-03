@@ -55,6 +55,24 @@ export function BpPage({
     : null;
   const pairedOperation =
     state.currentOperation === "PROTECT" || state.currentOperation === "BORROW";
+  const displayOperation = state.waitingForHost ? "WAIT" : promptOperation;
+  const playerConnection = (side: "first" | "second") => {
+    if (session.connection.state === "room-closed")
+      return "room-closed" as const;
+    if (side === room.side && session.connection.state === "kicked")
+      return "kicked" as const;
+    if (side === room.side && session.connection.state === "connecting")
+      return "connecting" as const;
+    if (side === room.side && session.connection.state === "reconnecting")
+      return "reconnecting" as const;
+    if (
+      side === room.side &&
+      ["idle", "disconnected", "failed"].includes(session.connection.state)
+    ) {
+      return "disconnected" as const;
+    }
+    return state.playerConnections[side];
+  };
   const canAct =
     state.status === "running" &&
     (pairedOperation || state.currentActor === room.side);
@@ -176,14 +194,16 @@ export function BpPage({
       <div className="bp-content">
         <div className="bp-sticky-stack">
           <section
-            className={`operation-prompt${promptOperation ? ` operation-prompt--${promptOperation.toLowerCase()}` : ""}${pairedOperation ? " operation-prompt--paired" : state.currentActor ? ` operation-prompt--${state.currentActor}` : ""}`}
+            className={`operation-prompt${displayOperation ? ` operation-prompt--${displayOperation.toLowerCase()}` : ""}${pairedOperation ? " operation-prompt--paired" : state.currentActor ? ` operation-prompt--${state.currentActor}` : ""}`}
             aria-live="polite"
           >
             <EnergyFlowBackground
               mode={pairedOperation ? "paired" : (state.currentActor ?? "idle")}
             />
             <strong>
-              {promptOperation === "BORROW" ? "LOAN" : (promptOperation ?? "")}
+              {displayOperation === "BORROW"
+                ? "LOAN"
+                : (displayOperation ?? "")}
             </strong>
           </section>
 
@@ -193,6 +213,7 @@ export function BpPage({
               name={state.teams.first.name}
               active={pairedOperation || state.currentActor === "first"}
               operation={operationLabel(state.currentOperation)}
+              connectionState={playerConnection("first")}
               bans={firstBans}
               picks={firstPicks}
               characters={state.characters}
@@ -209,6 +230,7 @@ export function BpPage({
               name={state.teams.second.name}
               active={pairedOperation || state.currentActor === "second"}
               operation={operationLabel(state.currentOperation)}
+              connectionState={playerConnection("second")}
               bans={secondBans}
               picks={secondPicks}
               characters={state.characters}
@@ -373,11 +395,17 @@ export function BpPage({
           />
           <strong>
             {session.feedback?.message ??
-              (state.confirmedSides[room.side]
-                ? "已确认，等待另一方确认"
-                : canAct
-                  ? `轮到你操作，请选择${showingLightCones ? "光锥" : "角色"}`
-                  : "等待对方与房主同步操作")}
+              (session.connection.state === "kicked"
+                ? "已被房主踢出，连接不会自动恢复"
+                : session.connection.state === "room-closed"
+                  ? "房间已关闭，连接不会自动恢复"
+                  : state.waitingForHost
+                    ? "等待 BPbox 房主完成额外操作"
+                    : state.confirmedSides[room.side]
+                      ? "已确认，等待另一方确认"
+                      : canAct
+                        ? `轮到你操作，请选择${showingLightCones ? "光锥" : "角色"}`
+                        : "等待对方与房主同步操作")}
           </strong>
           <span>
             资源 {assetSnapshot.readyCount}/{assetSnapshot.totalCount}

@@ -7,6 +7,12 @@ export interface JsonObject {
 }
 
 export type PlayerSide = "first" | "second";
+export type PlayerConnectionState =
+  | "empty"
+  | "connecting"
+  | "connected"
+  | "reconnecting"
+  | "disconnected";
 export type InternalBpSide = "star" | "rail";
 export interface RemoteSideMapping {
   first: InternalBpSide;
@@ -105,7 +111,9 @@ export interface RemoteBpState {
   phase: RemoteBpPhase;
   currentActor: PlayerSide | null;
   currentOperation: RemoteBpOperation;
+  waitingForHost: boolean;
   currentStep: RemoteBpStep | null;
+  playerConnections: Record<PlayerSide, PlayerConnectionState>;
   sideMapping: RemoteSideMapping;
   teams: Record<PlayerSide, RemoteBpTeam>;
   characters: RemoteCharacterDto[];
