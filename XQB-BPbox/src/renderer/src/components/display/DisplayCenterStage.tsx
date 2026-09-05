@@ -9,7 +9,7 @@ function DisplayCenterStage({ state }: DisplayCenterStageProps): React.JSX.Eleme
   const stepText = currentStep
     ? currentStep.action === 'protect' || currentStep.action === 'borrow'
       ? `第 ${currentStep.index} 步 ${currentStep.action === 'protect' ? '保护' : '租借'}`
-      : `第 ${currentStep.index} 步 ${currentStep.side === 'star' ? '左侧队' : '右侧队'} ${
+      : `第 ${currentStep.index} 步 ${currentStep.side === 'star' ? '先手' : '后手'} ${
           currentStep.action === 'pick' ? 'Pick' : 'Ban'
         }`
     : '等待 BP 开始'

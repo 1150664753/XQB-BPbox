@@ -23,6 +23,8 @@ import { normalizeDisplayAudioVolumePercent } from '../../shared/displayAudioVol
 import type {
   DisplayBackgroundLayer,
   DisplayPageChange,
+  DisplayProtectRentFrameLayoutKey,
+  DisplayProtectRentFrameLayouts,
   DisplaySecondaryBanCounts,
   DisplaySecondaryPickCounts,
   DisplaySettings,
@@ -54,11 +56,17 @@ type MigratedSlotGroups = {
   [Key in DisplaySlotGroupKey]?: Array<Partial<DisplaySlotGroup>>
 }
 
+type MigratedProtectRentFrameLayouts = {
+  [Key in DisplayProtectRentFrameLayoutKey]?: Partial<DisplaySlotLayout>
+}
+
 type MigratedDisplaySettings = Omit<
   Partial<DisplaySettings>,
-  'chantVideoSlot' | 'slotEffects' | 'slotGroups' | 'slotLayouts'
+  'chantVideoSlot' | 'protectRentFrameLayouts' | 'slotEffects' | 'slotGroups' | 'slotLayouts'
 > & {
   chantVideoSlot?: Partial<DisplayVideoSlotLayout>
+  protectRentFrameLayouts?: MigratedProtectRentFrameLayouts
+  protectRentFrameLayout?: Partial<DisplaySlotLayout>
   slotEffects?: MigratedSlotEffects
   slotGroups?: MigratedSlotGroups
   slotLayouts?: MigratedSlotLayouts
@@ -242,6 +250,65 @@ const defaultSlotEffects: DisplaySlotEffects = {
   }
 }
 
+const defaultProtectRentFrameLayouts: DisplayProtectRentFrameLayouts = {
+  starProtect: {
+    x: 345,
+    y: 700,
+    width: 270,
+    height: 110,
+    gap: 15,
+    gaps: [],
+    layer: 12,
+    direction: 'horizontal',
+    frameImage: '',
+    frameImageUrl: null,
+    effectVideo: '',
+    effectVideoUrl: null
+  },
+  railProtect: {
+    x: 1035,
+    y: 700,
+    width: 270,
+    height: 110,
+    gap: 15,
+    gaps: [],
+    layer: 12,
+    direction: 'horizontal',
+    frameImage: '',
+    frameImageUrl: null,
+    effectVideo: '',
+    effectVideoUrl: null
+  },
+  starBorrow: {
+    x: 345,
+    y: 850,
+    width: 270,
+    height: 110,
+    gap: 15,
+    gaps: [],
+    layer: 12,
+    direction: 'horizontal',
+    frameImage: '',
+    frameImageUrl: null,
+    effectVideo: '',
+    effectVideoUrl: null
+  },
+  railBorrow: {
+    x: 1035,
+    y: 850,
+    width: 270,
+    height: 110,
+    gap: 15,
+    gaps: [],
+    layer: 12,
+    direction: 'horizontal',
+    frameImage: '',
+    frameImageUrl: null,
+    effectVideo: '',
+    effectVideoUrl: null
+  }
+}
+
 const defaultDisplaySettings: DisplaySettings = {
   stageWidth: currentStageWidth,
   stageHeight: currentStageHeight,
@@ -268,7 +335,10 @@ const defaultDisplaySettings: DisplaySettings = {
     rail: 0
   },
   chantVideoSlot: defaultChantVideoSlot,
-  slotEffects: defaultSlotEffects
+  slotEffects: defaultSlotEffects,
+  showProtectRentFrame: false,
+  protectRentFrameDisplayMode: 'avatar',
+  protectRentFrameLayouts: defaultProtectRentFrameLayouts
 }
 
 const defaultDisplaySettingsFileName = 'display-settings.json'
@@ -421,9 +491,10 @@ function normalizeSlotLayout(
   key: keyof DisplaySlotLayouts,
   value: Partial<DisplaySlotLayout> | undefined,
   copyExternalFile: boolean,
-  assetOwnerKey: string = key
+  assetOwnerKey: string = key,
+  fallback: DisplaySlotLayout = defaultSlotLayouts[key]
 ): DisplaySlotLayout {
-  const defaults = defaultSlotLayouts[key]
+  const defaults = fallback
   const frameImage =
     copyExternalFile && isExternalFilePath(value?.frameImage)
       ? (prepareAssetValue(value?.frameImage, 'display', assetOwnerKey, `${assetOwnerKey}-frame`) ??
@@ -708,7 +779,65 @@ function normalizeBackgroundLayers(
   )
 }
 
+function migratedProtectRentFrameLayout(
+  layout: Partial<DisplaySlotLayout> | undefined,
+  key: DisplayProtectRentFrameLayoutKey
+): Partial<DisplaySlotLayout> | undefined {
+  if (!layout) {
+    return undefined
+  }
+
+  const slotIndex: Record<DisplayProtectRentFrameLayoutKey, number> = {
+    starProtect: 0,
+    starBorrow: 1,
+    railProtect: 2,
+    railBorrow: 3
+  }
+  const index = slotIndex[key]
+  const width = Math.max(1, numberOrFallback(layout.width, 270))
+  const height = Math.max(1, numberOrFallback(layout.height, 110))
+  const defaultGap = Math.max(0, numberOrFallback(layout.gap, 20))
+  const offset = Array.from({ length: index }).reduce<number>(
+    (total, _, gapIndex) =>
+      total +
+      (layout.direction === 'vertical' ? height : width) +
+      Math.max(0, numberOrFallback(layout.gaps?.[gapIndex], defaultGap)),
+    0
+  )
+
+  return {
+    ...layout,
+    x: numberOrFallback(layout.x, 375) + (layout.direction === 'vertical' ? 0 : offset),
+    y: numberOrFallback(layout.y, 850) + (layout.direction === 'vertical' ? offset : 0),
+    width,
+    height,
+    gaps: []
+  }
+}
+
+function normalizeProtectRentFrameLayouts(
+  settings: DisplaySettings & MigratedDisplaySettings,
+  copyExternalFile: boolean
+): DisplayProtectRentFrameLayouts {
+  const layouts = settings.protectRentFrameLayouts as MigratedProtectRentFrameLayouts | undefined
+  const keys = Object.keys(defaultProtectRentFrameLayouts) as DisplayProtectRentFrameLayoutKey[]
+
+  return keys.reduce((normalizedLayouts, key) => {
+    const layout =
+      layouts?.[key] ?? migratedProtectRentFrameLayout(settings.protectRentFrameLayout, key)
+    normalizedLayouts[key] = normalizeSlotLayout(
+      'starBan',
+      layout,
+      copyExternalFile,
+      `protect-rent-${key}`,
+      defaultProtectRentFrameLayouts[key]
+    )
+    return normalizedLayouts
+  }, {} as DisplayProtectRentFrameLayouts)
+}
+
 function withDisplayAsset(settings: DisplaySettings, copyExternalFile: boolean): DisplaySettings {
+  const migratedSettings = settings as DisplaySettings & MigratedDisplaySettings
   const hasBackgroundLayers =
     Array.isArray(settings.backgroundLayers) && settings.backgroundLayers.length > 0
   const backgroundImage =
@@ -722,6 +851,10 @@ function withDisplayAsset(settings: DisplaySettings, copyExternalFile: boolean):
     settings.slotLayouts,
     settings.secondaryPickCounts,
     settings.secondaryBanCounts,
+    copyExternalFile
+  )
+  const protectRentFrameLayouts = normalizeProtectRentFrameLayouts(
+    migratedSettings,
     copyExternalFile
   )
 
@@ -752,7 +885,11 @@ function withDisplayAsset(settings: DisplaySettings, copyExternalFile: boolean):
       rail: slotGroups.railBan[1]?.slotCount ?? 0
     },
     chantVideoSlot: normalizeVideoSlotLayout(settings.chantVideoSlot),
-    slotEffects: normalizeSlotEffects(settings.slotEffects, copyExternalFile)
+    slotEffects: normalizeSlotEffects(settings.slotEffects, copyExternalFile),
+    showProtectRentFrame: settings.showProtectRentFrame === true,
+    protectRentFrameDisplayMode:
+      settings.protectRentFrameDisplayMode === 'sideHeads' ? 'sideHeads' : 'avatar',
+    protectRentFrameLayouts
   }
 }
 
@@ -769,6 +906,9 @@ function readSettings(fileName?: string): DisplaySettings {
   const merged = { ...defaultDisplaySettings, ...migrated } as DisplaySettings
   if (!migrated.slotGroups) {
     delete merged.slotGroups
+  }
+  if (!migrated.protectRentFrameLayouts && migrated.protectRentFrameLayout) {
+    delete (merged as Partial<DisplaySettings>).protectRentFrameLayouts
   }
   return withDisplayAsset(merged, false)
 }
@@ -815,6 +955,14 @@ function writeSettings(settings: DisplaySettings, fileName?: string): DisplaySet
       ban: stripSlotEffectUrls(normalized.slotEffects.ban),
       protect: stripSlotEffectUrls(normalized.slotEffects.protect),
       borrow: stripSlotEffectUrls(normalized.slotEffects.borrow)
+    },
+    showProtectRentFrame: normalized.showProtectRentFrame,
+    protectRentFrameDisplayMode: normalized.protectRentFrameDisplayMode,
+    protectRentFrameLayouts: {
+      starProtect: stripSlotLayoutUrls(normalized.protectRentFrameLayouts.starProtect),
+      railProtect: stripSlotLayoutUrls(normalized.protectRentFrameLayouts.railProtect),
+      starBorrow: stripSlotLayoutUrls(normalized.protectRentFrameLayouts.starBorrow),
+      railBorrow: stripSlotLayoutUrls(normalized.protectRentFrameLayouts.railBorrow)
     }
   }
 

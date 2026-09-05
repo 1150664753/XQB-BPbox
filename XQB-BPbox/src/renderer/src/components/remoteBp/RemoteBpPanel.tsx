@@ -101,8 +101,10 @@ export default function RemoteBpPanel({ host }: { host: RemoteBpHost }): React.J
     const occupied = player.peerId !== null
     return (
       <div className="remote-bp-player-row">
-        <span>
-          {side === 'first' ? '先手' : '后手'}：{playerStateLabel[player.connectionState]}
+        <strong>{side === 'first' ? '先手' : '后手'}</strong>
+        <span className={`remote-bp-player-state is-${player.connectionState}`}>
+          <i aria-hidden="true" />
+          {playerStateLabel[player.connectionState]}
         </span>
         <button
           type="button"
@@ -120,10 +122,17 @@ export default function RemoteBpPanel({ host }: { host: RemoteBpHost }): React.J
 
   return (
     <section className="bp-session-card remote-bp-card">
-      <header>
-        <span>远程 BP</span>
-        <div className="remote-bp-room-code-row">
-          <strong>{room.roomId ?? '未创建房间'}</strong>
+      <header className="bp-card-header remote-bp-header">
+        <h2>远程 BP</h2>
+        <span className={`remote-bp-lifecycle is-${room.lifecycle}`}>
+          {lifecycleLabel[room.lifecycle]}
+        </span>
+      </header>
+
+      <div className="remote-bp-room-code-row">
+        <span>房间</span>
+        <strong>{room.roomId ?? '未创建'}</strong>
+        <div className="remote-bp-room-actions">
           {room.roomId ? (
             <button
               type="button"
@@ -135,25 +144,24 @@ export default function RemoteBpPanel({ host }: { host: RemoteBpHost }): React.J
             </button>
           ) : null}
         </div>
-        <small>
-          {isActive
-            ? room.transport === 'mock'
-              ? 'Mock 已启动'
-              : '远程房间已启动'
-            : lifecycleLabel[room.lifecycle]}
-        </small>
-      </header>
+      </div>
 
-      <div className="remote-bp-status-grid">
+      <div className="remote-bp-metrics">
+        <span>Revision</span>
+        <strong>{room.lastPublishedRevision ?? '—'}</strong>
+        <span>资源</span>
+        <strong>{room.assetCount}</strong>
+        <span>信令</span>
+        <strong>{signalingStateLabel[room.connectionState]}</strong>
+      </div>
+
+      <div className="remote-bp-players">
         {playerRow('first')}
         {playerRow('second')}
-        <span>Revision：{room.lastPublishedRevision ?? '—'}</span>
-        <span>资源：{room.assetCount}</span>
-        <span>信令：{signalingStateLabel[room.connectionState]}</span>
-        <span>房间寿命：由房主控制</span>
       </div>
 
       {room.error ? <small className="remote-bp-error">{room.error}</small> : null}
+      <small className="remote-bp-lifetime">房间寿命：由房主控制</small>
       <div className="bp-card-actions">
         <button
           type="button"
@@ -168,7 +176,12 @@ export default function RemoteBpPanel({ host }: { host: RemoteBpHost }): React.J
         >
           {room.transport === 'mock' ? '开启 Mock 房间' : '创建远程 BP'}
         </button>
-        <button type="button" disabled={!isActive || isBusy} onClick={() => void host.stopRoom()}>
+        <button
+          type="button"
+          className="secondary"
+          disabled={!isActive || isBusy}
+          onClick={() => void host.stopRoom()}
+        >
           关闭房间
         </button>
       </div>

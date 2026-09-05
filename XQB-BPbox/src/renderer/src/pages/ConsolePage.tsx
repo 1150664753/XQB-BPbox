@@ -14,10 +14,13 @@ import type {
   BpTeamTarget,
   DisplayBackgroundLayer,
   DisplayPageChange,
+  DisplayProtectRentFrameLayoutKey,
+  DisplayProtectRentFrameLayouts,
   DisplaySettings,
   DisplaySettingsListItem,
   DisplaySlotEffectConfig,
   DisplaySlotEffects,
+  DisplaySlotEffectVideoMode,
   DisplaySlotEffectLayout,
   DisplaySlotLayout,
   DisplaySlotLayouts,
@@ -261,6 +264,65 @@ const defaultSlotGroups: DisplaySlotGroups = {
     { ...defaultSlotLayouts.railBan, slotCount: 0 },
     { ...defaultSlotLayouts.railBanSecond, slotCount: 0 }
   ]
+}
+
+const defaultProtectRentFrameLayouts: DisplayProtectRentFrameLayouts = {
+  starProtect: {
+    x: 345,
+    y: 700,
+    width: 270,
+    height: 110,
+    gap: 15,
+    gaps: [],
+    layer: 12,
+    direction: 'horizontal',
+    frameImage: '',
+    frameImageUrl: null,
+    effectVideo: '',
+    effectVideoUrl: null
+  },
+  railProtect: {
+    x: 1035,
+    y: 700,
+    width: 270,
+    height: 110,
+    gap: 15,
+    gaps: [],
+    layer: 12,
+    direction: 'horizontal',
+    frameImage: '',
+    frameImageUrl: null,
+    effectVideo: '',
+    effectVideoUrl: null
+  },
+  starBorrow: {
+    x: 345,
+    y: 850,
+    width: 270,
+    height: 110,
+    gap: 15,
+    gaps: [],
+    layer: 12,
+    direction: 'horizontal',
+    frameImage: '',
+    frameImageUrl: null,
+    effectVideo: '',
+    effectVideoUrl: null
+  },
+  railBorrow: {
+    x: 1035,
+    y: 850,
+    width: 270,
+    height: 110,
+    gap: 15,
+    gaps: [],
+    layer: 12,
+    direction: 'horizontal',
+    frameImage: '',
+    frameImageUrl: null,
+    effectVideo: '',
+    effectVideoUrl: null
+  }
 }
 
 const defaultChantVideoSlot: DisplayVideoSlotLayout = {
@@ -531,7 +593,10 @@ const emptyDisplaySettings: DisplaySettings = {
     rail: 0
   },
   chantVideoSlot: defaultChantVideoSlot,
-  slotEffects: defaultSlotEffects
+  slotEffects: defaultSlotEffects,
+  showProtectRentFrame: false,
+  protectRentFrameDisplayMode: 'avatar',
+  protectRentFrameLayouts: defaultProtectRentFrameLayouts
 }
 
 function emptyCharacterForm(): CharacterPayload {
@@ -600,12 +665,12 @@ function createRuntime(flow: FlowConfig): BpRuntimeState {
     followingStep: normalizedFlow.steps[1] ?? null,
     slotCounts: countFlowSlots(normalizedFlow),
     starTeam: {
-      name: '左侧队',
+      name: '先手',
       picks: [],
       bans: []
     },
     railTeam: {
-      name: '右侧队',
+      name: '后手',
       picks: [],
       bans: []
     },
@@ -640,17 +705,16 @@ function stepLabel(step: FlowStep | null): string {
   }
 
   if (step.action === 'protect') {
-    return `第 ${step.index} 步：双方保护已 Pick 角色`
+    return `第 ${step.index} 步 · 双方保护`
   }
 
   if (step.action === 'borrow') {
-    return `第 ${step.index} 步：双方租借对方已 Pick 角色`
+    return `第 ${step.index} 步 · 双方租借`
   }
 
-  const side = step.side === 'star' ? '左侧队' : '右侧队'
-  const action = step.action === 'pick' ? 'Pick' : 'Ban'
-  const target = step.targetType === 'character' ? '角色' : '光锥'
-  return `第 ${step.index} 步：${side} ${action} ${target}`
+  const side = step.side === 'star' ? '先手' : '后手'
+  const action = step.action === 'pick' ? 'PICK' : 'BAN'
+  return `第 ${step.index} 步 · ${side} ${action}`
 }
 
 function characterImage(character: Character, side: 'star' | 'rail' = 'star'): string | null {
@@ -3022,11 +3086,11 @@ function FlowConfigPanel({
           <div className="flow-summary flow-summary-inline">
             <strong>当前槽位</strong>
             <span>
-              左侧队：Pick {countFlowSlots(currentFlow).star.picks} / Ban{' '}
+              先手：Pick {countFlowSlots(currentFlow).star.picks} / Ban{' '}
               {countFlowSlots(currentFlow).star.bans}
             </span>
             <span>
-              右侧队：Pick {countFlowSlots(currentFlow).rail.picks} / Ban{' '}
+              后手：Pick {countFlowSlots(currentFlow).rail.picks} / Ban{' '}
               {countFlowSlots(currentFlow).rail.bans}
             </span>
           </div>
@@ -3051,8 +3115,8 @@ function FlowConfigPanel({
                       updateStep(index, 'side', event.target.value as FlowStep['side'])
                     }
                   >
-                    <option value="star">左侧队</option>
-                    <option value="rail">右侧队</option>
+                    <option value="star">先手</option>
+                    <option value="rail">后手</option>
                   </select>
                 ) : (
                   <input value="双方" disabled />
@@ -3127,13 +3191,13 @@ function SlotLayoutEditor({
   groupNumber,
   layout,
   slotCount,
-  slotCountIsAuto,
   gapCount,
   onNumberChange,
   onGapChange,
   onSlotCountChange,
   onDirectionChange,
-  onChooseFrame
+  onChooseFrame,
+  onClearFrame
 }: {
   label: string
   groupNumber: number
@@ -3146,6 +3210,7 @@ function SlotLayoutEditor({
   onSlotCountChange?: (value: number) => void
   onDirectionChange: (direction: DisplaySlotLayout['direction']) => void
   onChooseFrame: () => void
+  onClearFrame: () => void
 }): React.JSX.Element {
   return (
     <section className="slot-layout-editor">
@@ -3169,10 +3234,7 @@ function SlotLayoutEditor({
       <div className="slot-layout-numbers">
         {onSlotCountChange ? (
           <label className="slot-count-field">
-            <span>
-              数量
-              {slotCountIsAuto ? <em>自动</em> : null}
-            </span>
+            <span>数量</span>
             <input
               type="number"
               min="0"
@@ -3220,12 +3282,24 @@ function SlotLayoutEditor({
         </div>
       ) : null}
 
-      <div className="asset-field compact">
+      <div className="asset-field compact slot-frame-asset-field">
         <span>框图</span>
         <strong title={layout.frameImage}>{fileName(layout.frameImage)}</strong>
-        <button type="button" onClick={onChooseFrame}>
-          选择
-        </button>
+        <div className="slot-frame-actions">
+          <button type="button" onClick={onChooseFrame}>
+            选择
+          </button>
+          <button
+            type="button"
+            className="slot-frame-clear-button secondary"
+            aria-label={`清除${label}框图`}
+            title="清除框图"
+            onClick={onClearFrame}
+            disabled={!layout.frameImage && !layout.frameImageUrl}
+          >
+            清除
+          </button>
+        </div>
       </div>
     </section>
   )
@@ -3254,7 +3328,7 @@ function SlotEffectEditor({
   onClearAudio: (key: SlotEffectKey) => void
   onEffectChange: (key: SlotEffectKey, patch: Partial<DisplaySlotEffectConfig>) => void
   onLayoutChange: (key: SlotEffectKey, layoutKey: SlotEffectLayoutNumberKey, value: number) => void
-  onPreview: (key: SlotEffectKey) => void
+  onPreview: (key: SlotEffectKey, videoMode: DisplaySlotEffectVideoMode) => void
 }): React.JSX.Element {
   return (
     <section className="editor-panel display-settings-panel display-effects-panel slot-effect-panel">
@@ -3339,7 +3413,7 @@ function SlotEffectEditor({
               ) : null}
             </div>
             {pairedEffect ? (
-              <div className="asset-field compact">
+              <div className="asset-field compact slot-effect-video-field">
                 <span>循环特效</span>
                 <strong title={effect.pendingVideo}>{fileName(effect.pendingVideo)}</strong>
                 <button type="button" onClick={() => onChooseVideo(key, 'pendingVideo')}>
@@ -3348,20 +3422,21 @@ function SlotEffectEditor({
                 <button
                   type="button"
                   onClick={() => onClearVideo(key, 'pendingVideo')}
-                  disabled={!effect.pendingVideo}
+                  disabled={!effect.pendingVideo && !effect.pendingVideoUrl}
                 >
                   清除
                 </button>
                 <button
                   type="button"
-                  onClick={() => onPreview(key)}
+                  className="slot-effect-preview-button"
+                  onClick={() => onPreview(key, 'pending')}
                   disabled={!effect.pendingVideo && !effect.pendingVideoUrl}
                 >
-                  播放
+                  预览
                 </button>
               </div>
             ) : (
-              <div className="asset-field compact">
+              <div className="asset-field compact slot-effect-video-field">
                 <span>待选特效</span>
                 <strong title={effect.pendingVideo}>{fileName(effect.pendingVideo)}</strong>
                 <button type="button" onClick={() => onChooseVideo(key, 'pendingVideo')}>
@@ -3370,16 +3445,17 @@ function SlotEffectEditor({
                 <button
                   type="button"
                   onClick={() => onClearVideo(key, 'pendingVideo')}
-                  disabled={!effect.pendingVideo}
+                  disabled={!effect.pendingVideo && !effect.pendingVideoUrl}
                 >
                   清除
                 </button>
                 <button
                   type="button"
-                  onClick={() => onPreview(key)}
+                  className="slot-effect-preview-button"
+                  onClick={() => onPreview(key, 'pending')}
                   disabled={!effect.pendingVideo && !effect.pendingVideoUrl}
                 >
-                  播放
+                  预览
                 </button>
               </div>
             )}
@@ -3417,7 +3493,7 @@ function SlotEffectEditor({
                 </label>
               ))}
             </div>
-            <div className="asset-field compact">
+            <div className="asset-field compact slot-effect-video-field">
               <span>确选特效</span>
               <strong title={effect.selectedVideo}>{fileName(effect.selectedVideo)}</strong>
               <button type="button" onClick={() => onChooseVideo(key, 'selectedVideo')}>
@@ -3426,9 +3502,17 @@ function SlotEffectEditor({
               <button
                 type="button"
                 onClick={() => onClearVideo(key, 'selectedVideo')}
-                disabled={!effect.selectedVideo}
+                disabled={!effect.selectedVideo && !effect.selectedVideoUrl}
               >
                 清除
+              </button>
+              <button
+                type="button"
+                className="slot-effect-preview-button"
+                onClick={() => onPreview(key, 'selected')}
+                disabled={!effect.selectedVideo && !effect.selectedVideoUrl}
+              >
+                预览
               </button>
             </div>
             <div className="asset-field compact">
@@ -3459,6 +3543,7 @@ function VideoSlotEditor({
   onVisibleChange,
   onAddChange,
   onChangeChange,
+  onPreviewChange,
   onRemoveChange
 }: {
   layout: DisplayVideoSlotLayout
@@ -3467,6 +3552,7 @@ function VideoSlotEditor({
   onVisibleChange: (visible: boolean) => void
   onAddChange: () => void
   onChangeChange: (id: string, patch: Partial<DisplayPageChange>) => void
+  onPreviewChange: (change: DisplayPageChange) => void
   onRemoveChange: (id: string) => void
 }): React.JSX.Element {
   return (
@@ -3612,6 +3698,14 @@ function VideoSlotEditor({
                   />
                 </label>
               ))}
+              <button
+                type="button"
+                className="chant-video-preview-button"
+                title={`在预览页显示 ${change.videoWidth} × ${change.videoHeight} 的唱名视频框`}
+                onClick={() => onPreviewChange(change)}
+              >
+                预览框
+              </button>
               <button type="button" className="danger" onClick={() => onRemoveChange(change.id)}>
                 删除
               </button>
@@ -3839,16 +3933,59 @@ function normalizeLocalPageChange(
   }
 }
 
+function mergeProtectRentFrameSettings(
+  fallbackSettings: DisplaySettings,
+  incomingSettings: DisplaySettings
+): DisplaySettings {
+  const incoming = incomingSettings as Partial<DisplaySettings>
+  const fallbackLayouts = fallbackSettings.protectRentFrameLayouts ?? defaultProtectRentFrameLayouts
+  const incomingLayouts = incoming.protectRentFrameLayouts
+
+  return {
+    ...incomingSettings,
+    showProtectRentFrame:
+      typeof incoming.showProtectRentFrame === 'boolean'
+        ? incoming.showProtectRentFrame
+        : fallbackSettings.showProtectRentFrame,
+    protectRentFrameDisplayMode:
+      incoming.protectRentFrameDisplayMode === 'avatar' ||
+      incoming.protectRentFrameDisplayMode === 'sideHeads'
+        ? incoming.protectRentFrameDisplayMode
+        : fallbackSettings.protectRentFrameDisplayMode,
+    protectRentFrameLayouts: {
+      starProtect: {
+        ...fallbackLayouts.starProtect,
+        ...(incomingLayouts?.starProtect ?? {})
+      },
+      railProtect: {
+        ...fallbackLayouts.railProtect,
+        ...(incomingLayouts?.railProtect ?? {})
+      },
+      starBorrow: {
+        ...fallbackLayouts.starBorrow,
+        ...(incomingLayouts?.starBorrow ?? {})
+      },
+      railBorrow: {
+        ...fallbackLayouts.railBorrow,
+        ...(incomingLayouts?.railBorrow ?? {})
+      }
+    }
+  }
+}
+
 function mergeLiveDisplaySettings(
   localSettings: DisplaySettings,
   liveSettings: DisplaySettings
 ): DisplaySettings {
-  const livePageChanges = Array.isArray(liveSettings.pageChanges) ? liveSettings.pageChanges : []
+  const mergedSettings = mergeProtectRentFrameSettings(localSettings, liveSettings)
+  const livePageChanges = Array.isArray(mergedSettings.pageChanges)
+    ? mergedSettings.pageChanges
+    : []
   const fallbackVideoSlot = localSettings.chantVideoSlot ?? defaultChantVideoSlot
 
   return {
-    ...liveSettings,
-    slotGroups: liveSettings.slotGroups ?? localSettings.slotGroups,
+    ...mergedSettings,
+    slotGroups: mergedSettings.slotGroups ?? localSettings.slotGroups,
     pageChanges: localSettings.pageChanges.map((pageChange, index) =>
       normalizeLocalPageChange(
         {
@@ -3910,12 +4047,17 @@ function DisplaySettingsPanel({
   onMessage: (type: MessageType, text: string) => void
 }): React.JSX.Element {
   const [settings, setSettings] = useState<DisplaySettings>(emptyDisplaySettings)
+  const settingsRef = useRef(settings)
   const [displayFlowList, setDisplayFlowList] = useState<FlowListItem[]>([])
   const [selectedDisplayFlowFile, setSelectedDisplayFlowFile] = useState('')
   const [displayTriggerFlow, setDisplayTriggerFlow] = useState<FlowConfig>(() =>
     normalizeFlowConfig(currentFlow)
   )
   const liveUpdateSequenceRef = useRef(0)
+
+  useEffect(() => {
+    settingsRef.current = settings
+  }, [settings])
 
   const loadSelectedSettings = useCallback(async (): Promise<void> => {
     const loadSequence = liveUpdateSequenceRef.current + 1
@@ -3924,7 +4066,12 @@ function DisplaySettingsPanel({
     if (loadSequence !== liveUpdateSequenceRef.current) {
       return
     }
-    setSettings(nextSettings)
+    const nextSettingsWithFallback = mergeProtectRentFrameSettings(
+      settingsRef.current,
+      nextSettings
+    )
+    settingsRef.current = nextSettingsWithFallback
+    setSettings(nextSettingsWithFallback)
 
     if (nextSettings.triggerFlowFile) {
       setSelectedDisplayFlowFile(nextSettings.triggerFlowFile)
@@ -3942,16 +4089,17 @@ function DisplaySettingsPanel({
     }
 
     if (selectedSettingsFile) {
-      const liveSettings = await window.bpAPI.displaySettings.updateLive(nextSettings)
+      const liveSettings = await window.bpAPI.displaySettings.updateLive(nextSettingsWithFallback)
       if (loadSequence !== liveUpdateSequenceRef.current) {
         return
       }
-      setSettings(mergeLiveDisplaySettings(nextSettings, liveSettings))
+      const mergedSettings = mergeLiveDisplaySettings(nextSettingsWithFallback, liveSettings)
+      settingsRef.current = mergedSettings
+      setSettings(mergedSettings)
     }
   }, [currentFlow, onMessage, selectedSettingsFile])
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadSelectedSettings().catch((error: unknown) => onMessage('error', String(error)))
   }, [loadSelectedSettings, onMessage])
 
@@ -3993,23 +4141,33 @@ function DisplaySettingsPanel({
 
   useEffect(() => {
     if (!selectedDisplayFlowFile) {
+      const normalizedFlow = normalizeFlowConfig(currentFlow)
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      setDisplayTriggerFlow(normalizeFlowConfig(currentFlow))
+      setDisplayTriggerFlow(normalizedFlow)
     }
   }, [currentFlow, selectedDisplayFlowFile])
 
   const loadDisplayTriggerFlow = async (fileName: string): Promise<void> => {
     setSelectedDisplayFlowFile(fileName)
-    setSettings((current) => ({ ...current, triggerFlowFile: fileName }))
 
     if (!fileName) {
-      setDisplayTriggerFlow(normalizeFlowConfig(currentFlow))
+      const normalizedFlow = normalizeFlowConfig(currentFlow)
+      setDisplayTriggerFlow(normalizedFlow)
+      setSettings((current) => ({
+        ...current,
+        triggerFlowFile: fileName
+      }))
       return
     }
 
     const flow = await window.bpAPI.flows.load(fileName)
     if (flow) {
-      setDisplayTriggerFlow(normalizeFlowConfig(flow))
+      const normalizedFlow = normalizeFlowConfig(flow)
+      setDisplayTriggerFlow(normalizedFlow)
+      setSettings((current) => ({
+        ...current,
+        triggerFlowFile: fileName
+      }))
       onMessage('success', `展示页响应来源流程：${flow.name}`)
     }
   }
@@ -4017,12 +4175,15 @@ function DisplaySettingsPanel({
   const updateLive = async (nextSettings: DisplaySettings): Promise<void> => {
     const updateSequence = liveUpdateSequenceRef.current + 1
     liveUpdateSequenceRef.current = updateSequence
+    settingsRef.current = nextSettings
     setSettings(nextSettings)
     const liveSettings = await window.bpAPI.displaySettings.updateLive(nextSettings)
     if (updateSequence !== liveUpdateSequenceRef.current) {
       return
     }
-    setSettings(mergeLiveDisplaySettings(nextSettings, liveSettings))
+    const mergedSettings = mergeLiveDisplaySettings(nextSettings, liveSettings)
+    settingsRef.current = mergedSettings
+    setSettings(mergedSettings)
   }
 
   const backgroundLayers = useMemo<DisplayBackgroundLayer[]>(() => {
@@ -4125,7 +4286,10 @@ function DisplaySettingsPanel({
   }
 
   const saveSettings = async (): Promise<void> => {
-    const nextSettings = { ...settings, triggerFlowFile: selectedDisplayFlowFile }
+    const nextSettings = {
+      ...settings,
+      triggerFlowFile: selectedDisplayFlowFile
+    }
     const targetFile = selectedSettingsFile || defaultDisplaySettingsFileName
     const savedSettings = await window.bpAPI.displaySettings.save(nextSettings, targetFile)
     setSettings(mergeLiveDisplaySettings(nextSettings, savedSettings))
@@ -4134,13 +4298,36 @@ function DisplaySettingsPanel({
     onMessage('success', '展示页设置已保存')
   }
 
-  const openPreviewWindow = async (): Promise<void> => {
+  const openPreviewWindow = async (slotEffect?: {
+    key: SlotEffectKey
+    videoMode: DisplaySlotEffectVideoMode
+  }): Promise<void> => {
     try {
-      const nextSettings = { ...settings, triggerFlowFile: selectedDisplayFlowFile }
+      const nextSettings = {
+        ...settings,
+        triggerFlowFile: selectedDisplayFlowFile
+      }
       const liveSettings = await window.bpAPI.displaySettings.updateLive(nextSettings)
       setSettings(mergeLiveDisplaySettings(nextSettings, liveSettings))
 
-      const opened = await window.bpAPI.bp.openPreviewWindow(previewState)
+      const effectConfig = slotEffect ? liveSettings.slotEffects?.[slotEffect.key] : null
+      const opened = await window.bpAPI.bp.openPreviewWindow(
+        slotEffect && effectConfig
+          ? {
+              ...previewState,
+              status: 'idle',
+              currentStep: null,
+              followingStep: null,
+              actions: [],
+              slotEffectPreview: {
+                action: slotEffect.key,
+                videoMode: slotEffect.videoMode,
+                config: effectConfig,
+                nonce: Date.now()
+              }
+            }
+          : previewState
+      )
       onMessage(opened ? 'success' : 'error', opened ? '预览页窗口已打开' : '预览页窗口打开失败')
     } catch (error) {
       onMessage('error', error instanceof Error ? error.message : String(error))
@@ -4290,7 +4477,23 @@ function DisplaySettingsPanel({
     removePageChange(id)
   }
 
+  const previewChantVideoChange = async (change: DisplayPageChange): Promise<void> => {
+    await updateLive(settings)
+    const opened = await window.bpAPI.bp.openPreviewWindow({
+      ...previewState,
+      currentEvents: [],
+      executedPageChangeIds: [change.id],
+      currentPageChangeIds: []
+    })
+    const changeName = change.name || '唱名视频变化'
+    onMessage(
+      opened ? 'success' : 'error',
+      opened ? `已在预览页显示“${changeName}”的框位置与大小` : '预览页窗口打开失败'
+    )
+  }
+
   const slotGroups = settings.slotGroups ?? defaultSlotGroups
+  const protectRentFrameLayouts = settings.protectRentFrameLayouts ?? defaultProtectRentFrameLayouts
 
   const applySlotGroups = (nextSlotGroups: DisplaySlotGroups): void => {
     const slotLayoutFromGroup = (group: DisplaySlotGroup): DisplaySlotLayout => {
@@ -4399,6 +4602,41 @@ function DisplaySettingsPanel({
     }
 
     applySlotGroups({ ...slotGroups, [key]: nextGroups })
+  }
+
+  const updateProtectRentFrameLayout = (
+    key: DisplayProtectRentFrameLayoutKey,
+    patch: Partial<DisplaySlotLayout>
+  ): void => {
+    const nextSettings: DisplaySettings = {
+      ...settings,
+      protectRentFrameLayouts: {
+        ...protectRentFrameLayouts,
+        [key]: {
+          ...protectRentFrameLayouts[key],
+          ...patch
+        }
+      }
+    }
+
+    updateLive(nextSettings).catch((error: unknown) => onMessage('error', String(error)))
+  }
+
+  const chooseProtectRentFrameImage = async (
+    key: DisplayProtectRentFrameLayoutKey
+  ): Promise<void> => {
+    const result = await window.bpAPI.files.selectImage()
+    if (!result.canceled && result.path) {
+      updateProtectRentFrameLayout(key, { frameImage: result.path, frameImageUrl: null })
+    }
+  }
+
+  const updateProtectRentFrameOptions = (
+    patch: Partial<Pick<DisplaySettings, 'showProtectRentFrame' | 'protectRentFrameDisplayMode'>>
+  ): void => {
+    updateLive({ ...settings, ...patch }).catch((error: unknown) =>
+      onMessage('error', String(error))
+    )
   }
 
   const updateChantVideoSlot = (patch: Partial<DisplayVideoSlotLayout>): void => {
@@ -4580,7 +4818,7 @@ function DisplaySettingsPanel({
             ))}
           </div>
 
-          <button type="button" className="secondary" onClick={openPreviewWindow}>
+          <button type="button" className="secondary" onClick={() => void openPreviewWindow()}>
             打开预览页面
           </button>
           <button type="button" className="primary" onClick={saveSettings}>
@@ -4775,8 +5013,8 @@ function DisplaySettingsPanel({
             onClearAudio={clearSlotEffectAudio}
             onEffectChange={updateSlotEffect}
             onLayoutChange={updateSlotEffectLayout}
-            onPreview={() => {
-              openPreviewWindow().catch((error: unknown) =>
+            onPreview={(key, videoMode) => {
+              openPreviewWindow({ key, videoMode }).catch((error: unknown) =>
                 onMessage('error', error instanceof Error ? error.message : String(error))
               )
             }}
@@ -4792,6 +5030,7 @@ function DisplaySettingsPanel({
                 className="settings-display-stage"
                 showCenterStage={false}
                 showChantVideoSlotGuide
+                showProtectRentFrameGuides
               />
             </div>
           </div>
@@ -4810,7 +5049,7 @@ function DisplaySettingsPanel({
               {slotGroupSections.map((item) => {
                 const sideClass = item.key.startsWith('star') ? 'is-star' : 'is-rail'
                 const actionClass = item.key.endsWith('Pick') ? 'is-pick' : 'is-ban'
-                const sideLabel = item.key.startsWith('star') ? '左侧队伍' : '右侧队伍'
+                const sideLabel = item.key.startsWith('star') ? '先手' : '后手'
                 const actionLabel = item.key.endsWith('Pick') ? 'PICK' : 'BAN'
 
                 return (
@@ -4823,7 +5062,6 @@ function DisplaySettingsPanel({
                         <span>{actionLabel}</span>
                         <div>
                           <strong>{sideLabel}</strong>
-                          <small>{item.label} 槽位布局</small>
                         </div>
                       </div>
                       <label className="slot-group-count-control">
@@ -4863,12 +5101,157 @@ function DisplaySettingsPanel({
                             updateSlotGroupLayout(item.key, groupIndex, { direction })
                           }
                           onChooseFrame={() => chooseSlotAsset(item.key, groupIndex, 'frameImage')}
+                          onClearFrame={() =>
+                            updateSlotGroupLayout(item.key, groupIndex, {
+                              frameImage: '',
+                              frameImageUrl: null
+                            })
+                          }
                         />
                       ))}
                     </div>
                   </section>
                 )
               })}
+              <section className="slot-group-section is-protect-rent">
+                <header className="slot-group-section-header protect-rent-frame-header">
+                  <div className="slot-group-section-title">
+                    <span>PROTECT / BORROW</span>
+                    <div>
+                      <strong>保护/租借框设置</strong>
+                    </div>
+                  </div>
+                  <div className="protect-rent-frame-controls">
+                    <label className="inline-check protect-rent-visible-control">
+                      <input
+                        type="checkbox"
+                        checked={settings.showProtectRentFrame === true}
+                        onChange={(event) =>
+                          updateProtectRentFrameOptions({
+                            showProtectRentFrame: event.target.checked
+                          })
+                        }
+                      />
+                      显示保护/租借框
+                    </label>
+                    <fieldset className="protect-rent-display-mode">
+                      <legend>显示方式</legend>
+                      <label>
+                        <input
+                          type="radio"
+                          name="protect-rent-frame-display-mode"
+                          value="avatar"
+                          checked={settings.protectRentFrameDisplayMode === 'avatar'}
+                          onChange={() =>
+                            updateProtectRentFrameOptions({
+                              protectRentFrameDisplayMode: 'avatar'
+                            })
+                          }
+                        />
+                        小头像
+                      </label>
+                      <label>
+                        <input
+                          type="radio"
+                          name="protect-rent-frame-display-mode"
+                          value="sideHeads"
+                          checked={settings.protectRentFrameDisplayMode === 'sideHeads'}
+                          onChange={() =>
+                            updateProtectRentFrameOptions({
+                              protectRentFrameDisplayMode: 'sideHeads'
+                            })
+                          }
+                        />
+                        左右头图
+                      </label>
+                    </fieldset>
+                  </div>
+                </header>
+                <div className="protect-rent-layout-sections">
+                  <section className="protect-rent-layout-section is-protect">
+                    <header>
+                      <span>PROTECT</span>
+                      <strong>保护框</strong>
+                    </header>
+                    <div className="slot-layout-grid">
+                      {(
+                        [
+                          ['starProtect', '先手保护框'],
+                          ['railProtect', '后手保护框']
+                        ] as const
+                      ).map(([key, label], index) => (
+                        <SlotLayoutEditor
+                          key={key}
+                          label={label}
+                          groupNumber={index + 1}
+                          layout={protectRentFrameLayouts[key]}
+                          onNumberChange={(numberKey, value) =>
+                            updateProtectRentFrameLayout(key, { [numberKey]: value })
+                          }
+                          onDirectionChange={(direction) =>
+                            updateProtectRentFrameLayout(key, { direction })
+                          }
+                          onChooseFrame={() =>
+                            void chooseProtectRentFrameImage(key).catch((error: unknown) =>
+                              onMessage(
+                                'error',
+                                error instanceof Error ? error.message : String(error)
+                              )
+                            )
+                          }
+                          onClearFrame={() =>
+                            updateProtectRentFrameLayout(key, {
+                              frameImage: '',
+                              frameImageUrl: null
+                            })
+                          }
+                        />
+                      ))}
+                    </div>
+                  </section>
+                  <section className="protect-rent-layout-section is-borrow">
+                    <header>
+                      <span>BORROW</span>
+                      <strong>租借框</strong>
+                    </header>
+                    <div className="slot-layout-grid">
+                      {(
+                        [
+                          ['starBorrow', '先手租借框'],
+                          ['railBorrow', '后手租借框']
+                        ] as const
+                      ).map(([key, label], index) => (
+                        <SlotLayoutEditor
+                          key={key}
+                          label={label}
+                          groupNumber={index + 1}
+                          layout={protectRentFrameLayouts[key]}
+                          onNumberChange={(numberKey, value) =>
+                            updateProtectRentFrameLayout(key, { [numberKey]: value })
+                          }
+                          onDirectionChange={(direction) =>
+                            updateProtectRentFrameLayout(key, { direction })
+                          }
+                          onChooseFrame={() =>
+                            void chooseProtectRentFrameImage(key).catch((error: unknown) =>
+                              onMessage(
+                                'error',
+                                error instanceof Error ? error.message : String(error)
+                              )
+                            )
+                          }
+                          onClearFrame={() =>
+                            updateProtectRentFrameLayout(key, {
+                              frameImage: '',
+                              frameImageUrl: null
+                            })
+                          }
+                        />
+                      ))}
+                    </div>
+                  </section>
+                </div>
+              </section>
             </div>
           </section>
         ) : null}
@@ -4925,6 +5308,11 @@ function DisplaySettingsPanel({
               onVisibleChange={(visible) => updateChantVideoSlot({ visible })}
               onAddChange={addChantVideoChange}
               onChangeChange={updateChantVideoChange}
+              onPreviewChange={(change) => {
+                previewChantVideoChange(change).catch((error: unknown) =>
+                  onMessage('error', error instanceof Error ? error.message : String(error))
+                )
+              }}
               onRemoveChange={removeChantVideoChange}
             />
           </section>
@@ -5698,12 +6086,12 @@ function StartBpPanel({
 
     if (step.action === 'borrow') {
       if (protectedCharacterIds.rail.has(selection.star.id)) {
-        onMessage('error', '左侧队不能租借右侧队已保护角色')
+        onMessage('error', '先手不能租借后手已保护角色')
         return false
       }
 
       if (protectedCharacterIds.star.has(selection.rail.id)) {
-        onMessage('error', '右侧队不能租借左侧队已保护角色')
+        onMessage('error', '后手不能租借先手已保护角色')
         return false
       }
     }
@@ -5717,7 +6105,7 @@ function StartBpPanel({
       targetName:
         step.action === 'protect'
           ? `保护：${selection.star.chinese_name} / ${selection.rail.chinese_name}`
-          : `租借：左侧队租借 ${selection.star.chinese_name} / 右侧队租借 ${selection.rail.chinese_name}`,
+          : `租借：先手租借 ${selection.star.chinese_name} / 后手租借 ${selection.rail.chinese_name}`,
       targetImage: null,
       target: null,
       starTargetId: selection.star.id,
@@ -6212,11 +6600,11 @@ function StartBpPanel({
   const leftTeamName =
     (remoteRoomState.mapping.first === 'star'
       ? remoteRoomState.firstPlayer.displayName
-      : remoteRoomState.secondPlayer.displayName) || '左侧队'
+      : remoteRoomState.secondPlayer.displayName) || '先手'
   const rightTeamName =
     (remoteRoomState.mapping.first === 'rail'
       ? remoteRoomState.firstPlayer.displayName
-      : remoteRoomState.secondPlayer.displayName) || '右侧队'
+      : remoteRoomState.secondPlayer.displayName) || '后手'
 
   return (
     <section className="bp-workbench">
@@ -6259,40 +6647,28 @@ function StartBpPanel({
 
       <main className="bp-center">
         <div className="bp-step-bar">
-          <strong>{stepLabel(runtime.currentStep)}</strong>
-          <span>
-            {runtime.status === 'complete'
-              ? '完成'
-              : `进度 ${runtime.stepCursor}/${normalizeFlowConfig(bpFlow).steps.length}`}
-          </span>
+          <div className="bp-step-copy">
+            <span>当前 BP 阶段</span>
+            <strong>{stepLabel(runtime.currentStep)}</strong>
+          </div>
+          <div className="bp-step-progress">
+            <span>进度</span>
+            <strong>{`${runtime.stepCursor} / ${normalizeFlowConfig(bpFlow).steps.length}`}</strong>
+          </div>
         </div>
 
         <div className="bp-session-panel">
-          <section className="bp-session-card">
-            <header>
-              <span>本局记录</span>
-              <strong>{resultName.trim() || '未命名 BP'}</strong>
-              <small>{runtime.actions.length} 条操作</small>
+          <section className="bp-session-card bp-flow-card">
+            <header className="bp-card-header">
+              <h2>BP 流程</h2>
             </header>
-            <label className="bp-card-field">
-              结果名称
-              <input value={resultName} onChange={(event) => setResultName(event.target.value)} />
-            </label>
-            <div className="bp-card-actions">
-              <button type="button" disabled={!selectedResultFile} onClick={loadSelectedResult}>
-                读取选中结果
-              </button>
-            </div>
-          </section>
-
-          <section className="bp-session-card">
-            <header>
-              <span>流程</span>
+            <div className="bp-card-summary">
+              <span>当前流程</span>
               <strong>{bpFlow.name}</strong>
-              <small>{bpFlow.steps.length} 个步骤</small>
-            </header>
+              <small>共 {bpFlow.steps.length} 个步骤</small>
+            </div>
             <label className="bp-card-field">
-              切换 BP 流程
+              <span>选择流程</span>
               <select
                 value={selectedFlowFile}
                 onChange={(event) => setSelectedFlowFile(event.target.value)}
@@ -6314,21 +6690,46 @@ function StartBpPanel({
               >
                 应用所选流程
               </button>
-              <button type="button" onClick={useCurrentFlow}>
+              <button type="button" className="secondary" onClick={useCurrentFlow}>
                 同步编辑中的流程
               </button>
             </div>
           </section>
 
-          <section className="bp-session-card bp-pv-card">
-            <header className="bp-up-pv-status" title={runtime.upCharacterPvPath ?? ''}>
-              <span>底片视频</span>
-              <strong>{fileName(runtime.upCharacterPvPath)}</strong>
+          <RemoteBpPanel host={remoteHost} />
+
+          <section className="bp-session-card bp-result-card">
+            <header className="bp-card-header">
+              <h2>本局记录</h2>
             </header>
+            <div className="bp-card-summary">
+              <span>当前流程</span>
+              <strong>{bpFlow.name}</strong>
+              <small>{runtime.actions.length} 条操作</small>
+            </div>
+            <label className="bp-card-field">
+              <span>结果名称</span>
+              <input value={resultName} onChange={(event) => setResultName(event.target.value)} />
+            </label>
             <div className="bp-card-actions">
-              <button type="button" onClick={importUpCharacterPv}>
-                选择底片视频
+              <button
+                type="button"
+                className="secondary"
+                disabled={!selectedResultFile}
+                onClick={loadSelectedResult}
+              >
+                读取选中结果
               </button>
+            </div>
+          </section>
+
+          <section className="bp-session-card bp-pv-card">
+            <header className="bp-card-header">
+              <h2>底片视频</h2>
+            </header>
+            <div className="bp-card-summary" title={runtime.upCharacterPvPath ?? ''}>
+              <span>当前</span>
+              <strong>{fileName(runtime.upCharacterPvPath)}</strong>
             </div>
             <div className="bp-pv-time-grid">
               <label className="bp-up-pv-time-field">
@@ -6356,9 +6757,12 @@ function StartBpPanel({
                 />
               </label>
             </div>
+            <div className="bp-card-actions">
+              <button type="button" className="secondary" onClick={importUpCharacterPv}>
+                选择底片视频
+              </button>
+            </div>
           </section>
-
-          <RemoteBpPanel host={remoteHost} />
         </div>
 
         <div className="bp-controls">

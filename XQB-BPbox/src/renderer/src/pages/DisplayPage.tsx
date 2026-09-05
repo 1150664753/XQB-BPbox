@@ -46,6 +46,66 @@ const emptyDisplaySettings: DisplaySettings = {
   characterEffectVolume: 100,
   backgroundLayers: [],
   pageChanges: [],
+  showProtectRentFrame: false,
+  protectRentFrameDisplayMode: 'avatar',
+  protectRentFrameLayouts: {
+    starProtect: {
+      x: 345,
+      y: 700,
+      width: 270,
+      height: 110,
+      gap: 15,
+      gaps: [],
+      layer: 12,
+      direction: 'horizontal',
+      frameImage: '',
+      frameImageUrl: null,
+      effectVideo: '',
+      effectVideoUrl: null
+    },
+    railProtect: {
+      x: 1035,
+      y: 700,
+      width: 270,
+      height: 110,
+      gap: 15,
+      gaps: [],
+      layer: 12,
+      direction: 'horizontal',
+      frameImage: '',
+      frameImageUrl: null,
+      effectVideo: '',
+      effectVideoUrl: null
+    },
+    starBorrow: {
+      x: 345,
+      y: 850,
+      width: 270,
+      height: 110,
+      gap: 15,
+      gaps: [],
+      layer: 12,
+      direction: 'horizontal',
+      frameImage: '',
+      frameImageUrl: null,
+      effectVideo: '',
+      effectVideoUrl: null
+    },
+    railBorrow: {
+      x: 1035,
+      y: 850,
+      width: 270,
+      height: 110,
+      gap: 15,
+      gaps: [],
+      layer: 12,
+      direction: 'horizontal',
+      frameImage: '',
+      frameImageUrl: null,
+      effectVideo: '',
+      effectVideoUrl: null
+    }
+  },
   slotLayouts: {
     starPick: {
       x: 60,
@@ -250,12 +310,12 @@ const emptyState: BpRuntimeState = {
     }
   },
   starTeam: {
-    name: '左侧队',
+    name: '先手',
     picks: [],
     bans: []
   },
   railTeam: {
-    name: '右侧队',
+    name: '后手',
     picks: [],
     bans: []
   },

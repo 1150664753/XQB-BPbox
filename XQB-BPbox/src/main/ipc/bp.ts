@@ -76,12 +76,12 @@ function normalizeResult(result: Partial<BpResult>, fallbackName: string): BpRes
     upCharacterPvStartTime: normalizePvStartTime(result.upCharacterPvStartTime),
     upCharacterPvEndTime: normalizePvEndTime(result.upCharacterPvEndTime),
     starTeam: result.starTeam ?? {
-      name: '左侧队',
+      name: '先手',
       picks: [],
       bans: []
     },
     railTeam: result.railTeam ?? {
-      name: '右侧队',
+      name: '后手',
       picks: [],
       bans: []
     },

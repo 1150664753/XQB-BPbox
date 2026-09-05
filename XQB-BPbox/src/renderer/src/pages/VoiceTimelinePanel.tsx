@@ -104,8 +104,8 @@ const emptyState: BpRuntimeState = {
     star: { picks: 0, bans: 0 },
     rail: { picks: 0, bans: 0 }
   },
-  starTeam: { name: '左侧队', picks: [], bans: [] },
-  railTeam: { name: '右侧队', picks: [], bans: [] },
+  starTeam: { name: '先手', picks: [], bans: [] },
+  railTeam: { name: '后手', picks: [], bans: [] },
   actions: [],
   eventHistory: [],
   currentEvents: [],
@@ -1722,7 +1722,7 @@ function VoiceTimelinePanel({
               const tooltip = [
                 `步骤：${label}`,
                 `时间：${formatTimeLabel(point.time)}`,
-                `阵营：${point.side === 'star' ? '先手/左侧队' : point.side === 'rail' ? '后手/右侧队' : '无'}`,
+                `阵营：${point.side === 'star' ? '先手' : point.side === 'rail' ? '后手' : '无'}`,
                 `行为：${point.type === 'delay_extra_click' ? '额外点击' : actionLabel(point.action || 'pick')}`,
                 `目标：${point.targetName || '-'}`
               ].join('\n')

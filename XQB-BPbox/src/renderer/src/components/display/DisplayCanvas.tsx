@@ -3,6 +3,7 @@ import type { CSSProperties, SyntheticEvent } from 'react'
 
 import DisplayBackground from './DisplayBackground'
 import DisplayCenterStage from './DisplayCenterStage'
+import DisplayProtectRentFrame from './DisplayProtectRentFrame'
 import DisplayTeamPanel from './DisplayTeamPanel'
 import { configuredSlotGroups, resolveSlotGroup } from './slotGroups'
 import {
@@ -17,6 +18,7 @@ import type {
   BpActionRecord,
   BpSide,
   BpRuntimeState,
+  BpSlotEffectPreview,
   DisplayPageChange,
   DisplaySettings,
   DisplaySlotEffectConfig,
@@ -1090,11 +1092,12 @@ interface DisplayCanvasProps {
   onChantVideoError?: (video: DisplayChantVideo, currentTime: number, duration: number) => void
   muteChantVideo?: boolean
   showChantVideoSlotGuide?: boolean
+  showProtectRentFrameGuides?: boolean
   nextAction?: BpActionRecord | null
   followingAction?: BpActionRecord | null
   futureActions?: BpActionRecord[]
   selectedAction?: BpActionRecord | null
-  previewSlotEffect?: { action: SlotEffectKind; nonce: number } | null
+  previewSlotEffect?: Pick<BpSlotEffectPreview, 'action' | 'videoMode' | 'nonce'> | null
   dismissedEffectKeys?: string[]
   completedPageChangeIds?: string[]
 }
@@ -1648,6 +1651,7 @@ function DisplayCanvas({
   onChantVideoError,
   muteChantVideo = true,
   showChantVideoSlotGuide = false,
+  showProtectRentFrameGuides = false,
   nextAction = null,
   followingAction = null,
   futureActions,
@@ -1902,7 +1906,7 @@ function DisplayCanvas({
           previewSlotKey,
           previewSlotEffect?.action ?? 'pick',
           slotEffects[previewSlotEffect?.action ?? 'pick'],
-          'preview',
+          previewSlotEffect?.videoMode ?? 'pending',
           previewSlotEffect?.nonce ?? 0,
           false
         )
@@ -2031,6 +2035,12 @@ function DisplayCanvas({
             tentativeAction={tentativeSelection?.side === 'star' ? tentativeSelection.action : null}
             renderSlotEffects={false}
             renderScale={coordinateScaleX}
+          />
+          <DisplayProtectRentFrame
+            settings={settings}
+            state={state}
+            renderScale={coordinateScaleX}
+            forceGuides={showProtectRentFrameGuides}
           />
           {showCenterStage ? <DisplayCenterStage state={state} /> : null}
           <DisplayTeamPanel

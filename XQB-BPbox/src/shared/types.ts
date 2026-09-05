@@ -240,6 +240,9 @@ export interface DisplaySettings {
   secondaryBanCounts: DisplaySecondaryBanCounts
   chantVideoSlot: DisplayVideoSlotLayout
   slotEffects: DisplaySlotEffects
+  showProtectRentFrame: boolean
+  protectRentFrameDisplayMode: DisplayProtectRentFrameDisplayMode
+  protectRentFrameLayouts: DisplayProtectRentFrameLayouts
 }
 
 export interface DisplayBackgroundLayer {
@@ -290,6 +293,12 @@ export interface DisplayPageChange {
 }
 
 export type DisplaySlotDirection = 'vertical' | 'horizontal'
+export type DisplayProtectRentFrameDisplayMode = 'avatar' | 'sideHeads'
+export type DisplayProtectRentFrameLayoutKey =
+  | 'starProtect'
+  | 'railProtect'
+  | 'starBorrow'
+  | 'railBorrow'
 
 export interface DisplaySlotLayout {
   x: number
@@ -305,6 +314,11 @@ export interface DisplaySlotLayout {
   effectVideo: string
   effectVideoUrl?: string | null
 }
+
+export type DisplayProtectRentFrameLayouts = Record<
+  DisplayProtectRentFrameLayoutKey,
+  DisplaySlotLayout
+>
 
 export interface DisplaySlotLayouts {
   starPick: DisplaySlotLayout
@@ -378,6 +392,16 @@ export interface DisplaySlotEffects {
   borrow: DisplaySlotEffectConfig
 }
 
+export type DisplaySlotEffectKey = keyof DisplaySlotEffects
+export type DisplaySlotEffectVideoMode = 'pending' | 'selected'
+
+export interface BpSlotEffectPreview {
+  action: DisplaySlotEffectKey
+  videoMode: DisplaySlotEffectVideoMode
+  config: DisplaySlotEffectConfig
+  nonce: number
+}
+
 export type BpTeamTarget = Character | LightCone
 
 export interface BpPreviewSelection {
@@ -441,6 +465,7 @@ export interface BpRuntimeState {
   status: 'idle' | 'running' | 'complete'
   currentStep: FlowStep | null
   previewSelection?: BpPreviewSelection | null
+  slotEffectPreview?: BpSlotEffectPreview | null
   followingStep?: FlowStep | null
   slotCounts: BpSlotCounts
   starTeam: TeamBpState
