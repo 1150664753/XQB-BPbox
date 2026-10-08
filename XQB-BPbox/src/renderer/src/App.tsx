@@ -1,6 +1,7 @@
 import ConsolePage from './pages/ConsolePage'
 import DisplayPage from './pages/DisplayPage'
 import PreviewPage from './pages/PreviewPage'
+import TurnAuthorizationDialog from './components/remoteBp/TurnAuthorizationDialog'
 
 function App(): React.JSX.Element {
   const route = window.location.hash.replace(/^#/, '')
@@ -13,7 +14,7 @@ function App(): React.JSX.Element {
     return <PreviewPage />
   }
 
-  return <ConsolePage />
+  return <><ConsolePage /><TurnAuthorizationDialog /></>
 }
 
 export default App

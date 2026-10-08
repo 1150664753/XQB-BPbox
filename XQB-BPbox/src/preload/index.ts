@@ -4,6 +4,22 @@ import type { BpAPI } from './types'
 import type { ProjectFileChangeEvent } from '../shared/types'
 
 const bpAPI: BpAPI = {
+  turnAuth: {
+    status: () => ipcRenderer.invoke('turn-auth:status'),
+    authorize: (password) => ipcRenderer.invoke('turn-auth:authorize', password),
+    revoke: () => ipcRenderer.invoke('turn-auth:revoke'),
+    binding: (url) => ipcRenderer.invoke('turn-auth:binding', url),
+    onChanged: (callback) => {
+      const listener = (): void => callback()
+      ipcRenderer.on('turn-auth:changed', listener)
+      return () => ipcRenderer.removeListener('turn-auth:changed', listener)
+    },
+    onOpen: (callback) => {
+      const listener = (): void => callback()
+      ipcRenderer.on('turn-auth:open', listener)
+      return () => ipcRenderer.removeListener('turn-auth:open', listener)
+    }
+  },
   updater: {
     getState: () => ipcRenderer.invoke('updater:get-state'),
     checkForUpdates: () => ipcRenderer.invoke('updater:check'),

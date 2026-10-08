@@ -22,7 +22,8 @@
     "release:win": "npm run build && electron-builder --win --publish always",
     "build:mac": "electron-vite build && electron-builder --mac",
     "build:linux": "electron-vite build && electron-builder --linux",
-    "test:webrtc": "node scripts/webrtc-self-check.cjs"
+    "test:webrtc": "node scripts/webrtc-self-check.cjs",
+    "test:turn-desktop": "node scripts/turn-desktop-self-check.cjs"
   },
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.2",

@@ -81,11 +81,13 @@ export interface RemoteHostTransportStartResult {
   createdAt?: string
   expiresAt?: string
   connectionState?: RemoteBpRoomState['connectionState']
+  turnAuthorizedUntil?: number | null
 }
 
 export interface RemoteHostTransportStatus {
   connectionState: RemoteBpRoomState['connectionState']
   error?: string | null
+  turnAuthorizedUntil?: number | null
 }
 
 export interface RemoteHostTransport {

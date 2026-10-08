@@ -3,6 +3,12 @@ import { join } from 'node:path'
 import icon from '../../assets/icons/icon.png?asset'
 
 let mainWindow: BrowserWindow | null = null
+export function isMainWebContents(contents: Electron.WebContents): boolean {
+  if (mainWindow?.webContents !== contents) return false
+  const url = contents.getURL()
+  const devUrl = process.env.ELECTRON_RENDERER_URL
+  return !app.isPackaged && devUrl ? new URL(url).origin === new URL(devUrl).origin : url.startsWith('file:') && url.includes('/renderer/index.html')
+}
 let displayWindow: BrowserWindow | null = null
 let previewWindow: BrowserWindow | null = null
 

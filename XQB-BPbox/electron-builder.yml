@@ -12,6 +12,8 @@ files:
   - '!config/**'
   - '!assets/**'
   - '!assets.zip'
+  - '!.tmp/**'
+  - '!scripts/**'
 asarUnpack:
   - resources/**
 win:

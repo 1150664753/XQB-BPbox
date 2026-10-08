@@ -21,7 +21,7 @@ function parseIceServers(raw: string | undefined): RTCIceServer[] {
         urlList.length > 0 &&
         urlList.length <= 8 &&
         urlList.every(
-          (url) => typeof url === "string" && /^stuns?:|^turns?:/.test(url),
+          (url) => typeof url === "string" && /^stuns?:/.test(url),
         )
       );
     });

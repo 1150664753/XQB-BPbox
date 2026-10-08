@@ -1,4 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
+import { issueTurnCredentials, turnPermission, verifyToken, turnErrors, type TurnEnvironment, type TurnGrant } from "./turn.mjs";
+import { handleTurnHttp } from "./turnAuth";
+export { TurnAuthority } from "./turnAuth";
+
+type WorkerEnvironment = Env & TurnEnvironment;
 
 const MAX_SIGNALING_MESSAGE_BYTES = 64 * 1024;
 
@@ -20,6 +25,8 @@ const CLIENT_MESSAGE_TYPES = new Set([
   "ICE_CANDIDATE",
   "PEER_READY",
   "ICE_RESTART_REQUEST",
+  "TURN_REQUEST",
+  "TURN_AUTHORIZE",
 ]);
 const PLAYER_ROLES = new Set(["FIRST", "SECOND"]);
 const ALL_ROLES = new Set(["HOST", "FIRST", "SECOND"]);
@@ -28,6 +35,7 @@ type SignalingRole = "HOST" | "FIRST" | "SECOND";
 type ConnectionMode = "CREATE" | "JOIN" | "RESUME";
 
 interface RoomMetadata {
+  turn?: TurnGrant | null;
   roomCode: string;
   sessionId: string;
   resumeToken: string;
@@ -48,6 +56,7 @@ interface IceCandidate {
 }
 
 interface ConnectionAttachment {
+  connectionId?: string;
   roomCode: string;
   mode: ConnectionMode;
   role: SignalingRole | null;
@@ -250,6 +259,16 @@ function parseClientMessage(raw: string): SignalingMessage {
           sentAt: isString(payload.sentAt, 10, 64) ? payload.sentAt : "",
         },
       };
+    case "TURN_AUTHORIZE":
+      if (!isString(payload.token, 1, 2048)) throw new Error("TURN_TOKEN_INVALID");
+      return { type: value.type, requestId: value.requestId, payload: { token: payload.token } };
+    case "TURN_REQUEST":
+      if (!ALL_ROLES.has(String(payload.targetRole)) ||
+        !isString(payload.targetSessionId, 1, 128) || !isString(payload.connectionId, 1, 128))
+        throw new Error("INVALID_RELAY_METADATA");
+      return { type: value.type, requestId: value.requestId, payload: {
+        targetRole: payload.targetRole, targetSessionId: payload.targetSessionId, connectionId: payload.connectionId,
+      }};
     case "PEER_READY":
     case "ICE_RESTART_REQUEST": {
       if (
@@ -313,8 +332,9 @@ function jsonResponse(body: Record<string, unknown>, status: number): Response {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: WorkerEnvironment): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname.startsWith("/turn/")) return handleTurnHttp(request, env);
     if (url.pathname === "/health") {
       if (request.method !== "GET") {
         return jsonResponse({ ok: false, error: "METHOD_NOT_ALLOWED" }, 405);
@@ -370,10 +390,11 @@ export default {
     headers.set("X-XQB-Connection-Mode", mode);
     return room.fetch(new Request(request, { headers }));
   },
-} satisfies ExportedHandler<Env>;
+} satisfies ExportedHandler<WorkerEnvironment>;
 
-export class BpRoom extends DurableObject<Env> {
+export class BpRoom extends DurableObject<WorkerEnvironment> {
   private readonly messageChains = new WeakMap<WebSocket, Promise<void>>();
+  private turnChain: Promise<void> = Promise.resolve();
   async fetch(request: Request): Promise<Response> {
     if (
       request.method !== "GET" ||
@@ -491,6 +512,14 @@ export class BpRoom extends DurableObject<Env> {
             sentAt: message.payload.sentAt,
           });
           return;
+        case "TURN_REQUEST":
+          this.turnChain = this.turnChain.catch(() => undefined).then(() => this.requestTurn(socket, message));
+          await this.turnChain;
+          return;
+        case "TURN_AUTHORIZE":
+          this.turnChain = this.turnChain.catch(() => undefined).then(() => this.authorizeRoom(socket, message));
+          await this.turnChain;
+          return;
         case "OFFER":
         case "ANSWER":
         case "ICE_CANDIDATE":
@@ -548,6 +577,7 @@ export class BpRoom extends DurableObject<Env> {
     const existing =
       await this.ctx.storage.get<RoomMetadata>(ROOM_METADATA_KEY);
     if (existing) throw new Error("HOST_OCCUPIED");
+    const turn = null;
     // A room explicitly closed by an older deployment may still have a legacy
     // TTL alarm. New rooms are host-controlled and must not inherit that alarm.
     await this.ctx.storage.deleteAlarm();
@@ -568,6 +598,7 @@ export class BpRoom extends DurableObject<Env> {
       expiresAt: null,
     });
     await this.ctx.storage.put<RoomMetadata>(ROOM_METADATA_KEY, {
+      turn,
       roomCode: attachment.roomCode,
       sessionId,
       resumeToken,
@@ -584,6 +615,7 @@ export class BpRoom extends DurableObject<Env> {
         createdAt: new Date(now).toISOString(),
         expiresAt: PERSISTENT_ROOM_EXPIRES_AT,
         resumeToken,
+        turnAuthorizedUntil: null,
       },
       message.requestId,
     );
@@ -630,6 +662,7 @@ export class BpRoom extends DurableObject<Env> {
       socket,
       "ROOM_RESUMED",
       {
+        turnAuthorizedUntil: await turnPermission(this.env, metadata.turn) ? metadata.turn!.expiresAt : null,
         roomCode: metadata.roomCode,
         sessionId: metadata.sessionId,
         role: "HOST",
@@ -701,6 +734,7 @@ export class BpRoom extends DurableObject<Env> {
         sessionId,
         role,
         expiresAt: PERSISTENT_ROOM_EXPIRES_AT,
+        turnAuthorizedUntil: await turnPermission(this.env, metadata.turn) ? metadata.turn!.expiresAt : null,
       },
       message.requestId,
     );
@@ -736,6 +770,78 @@ export class BpRoom extends DurableObject<Env> {
     }
   }
 
+  private async requestTurn(socket: WebSocket, message: SignalingMessage): Promise<void> {
+    const sender = this.requireAttachment(socket);
+    if (!sender.role || this.findByRole(sender.role) !== socket) throw new Error("NOT_IN_ROOM");
+    await this.limitTurn();
+    const hostSocket = this.findByRole("HOST");
+    if (!hostSocket) throw new Error("HOST_UNAVAILABLE");
+    const host = this.requireAttachment(hostSocket);
+    const metadata = await this.ctx.storage.get<RoomMetadata>(ROOM_METADATA_KEY);
+    if (!metadata) throw new Error("ROOM_NOT_FOUND");
+    const target = sender.role === "HOST" ? this.findByRole(message.payload.targetRole as SignalingRole) : socket;
+    const player = target ? this.requireAttachment(target) : null;
+    if (!target || !player || !PLAYER_ROLES.has(player.role!)) throw new Error("PEER_NOT_CONNECTED");
+    if (sender.role !== "HOST" && message.payload.targetRole !== "HOST") throw new Error("INVALID_RELAY_TARGET");
+    if (player.sessionId !== message.payload.targetSessionId || player.connectionId !== message.payload.connectionId)
+      throw new Error("STALE_SIGNAL");
+    // Persist the provider rate limit even on errors. Never send credentials to replaced sessions.
+    try {
+      const credentials = await issueTurnCredentials(this.env, metadata.turn,
+        `${host.roomCode}:${player.sessionId}:${player.connectionId}`);
+      if (!await turnPermission(this.env, metadata.turn)) throw new Error("TURN_NOT_AUTHORIZED");
+      // Read room state AFTER the authority RPC. A concurrent revoke notification
+      // may have cleared the grant while that RPC was in flight.
+      const current = await this.ctx.storage.get<RoomMetadata>(ROOM_METADATA_KEY);
+      if (current?.sessionId !== metadata.sessionId || current.turn?.jti !== metadata.turn?.jti ||
+        this.findByRole("HOST") !== hostSocket ||
+        this.findByRole(player.role!) !== target || this.requireAttachment(target).connectionId !== player.connectionId)
+        throw new Error("STALE_SIGNAL");
+      const payload = { ...credentials, roomId: host.roomCode, peerId: player.sessionId,
+        connectionId: player.connectionId };
+      // The answerer installs the configuration before any restarted offer can be forwarded.
+      this.send(target, "TURN_CREDENTIALS", payload, sender.role === "HOST" ? undefined : message.requestId);
+      this.send(hostSocket, "TURN_CREDENTIALS", payload, sender.role === "HOST" ? message.requestId : undefined);
+    } finally {
+      const current = await this.ctx.storage.get<RoomMetadata>(ROOM_METADATA_KEY);
+      if (current?.sessionId === metadata.sessionId && current?.turn?.jti === metadata.turn?.jti)
+        await this.ctx.storage.put(ROOM_METADATA_KEY, { ...current, turn: metadata.turn });
+    }
+  }
+
+  private async limitTurn(): Promise<void> {
+    await this.ctx.storage.transaction(async storage => {
+      const now = Date.now();
+      const requests = (await storage.get<number[]>("turn-requests") ?? []).filter(t => now - t < 60_000);
+      if (requests.length >= 20) throw new Error("TURN_RATE_LIMITED");
+      requests.push(now);
+      await storage.put("turn-requests", requests);
+    });
+  }
+
+  private async authorizeRoom(socket: WebSocket, message: SignalingMessage): Promise<void> {
+    const host = this.requireAttachment(socket);
+    if (host.role !== "HOST" || this.findByRole("HOST") !== socket) throw new Error("HOST_ONLY");
+    await this.limitTurn();
+    const claims = await verifyToken(this.env, message.payload.token);
+    const authority = this.env.TURN_AUTH.get(this.env.TURN_AUTH.idFromName(claims.sub));
+    if (!await authority.bind(claims, host.roomCode)) throw new Error("TURN_TOKEN_INVALID");
+    const metadata = await this.ctx.storage.get<RoomMetadata>(ROOM_METADATA_KEY);
+    if (!metadata || metadata.sessionId !== host.sessionId || this.findByRole("HOST") !== socket) throw new Error("STALE_SIGNAL");
+    const turn: TurnGrant = { ...claims, expiresAt: claims.exp * 1000, requestTimes: [], cache: {} };
+    if (!await turnPermission(this.env, turn)) throw new Error("TURN_TOKEN_INVALID");
+    // Binding requires the real host socket, never a role supplied in a message.
+    await this.ctx.storage.put(ROOM_METADATA_KEY, { ...metadata, turn });
+    this.broadcast("TURN_STATUS", { turnAuthorizedUntil: turn.expiresAt });
+  }
+
+  async revokeTurn(jti: string): Promise<void> {
+    const metadata = await this.ctx.storage.get<RoomMetadata>(ROOM_METADATA_KEY);
+    if (metadata?.turn?.jti !== jti) return;
+    await this.ctx.storage.put(ROOM_METADATA_KEY, { ...metadata, turn: null });
+    this.broadcast("TURN_STATUS", { turnAuthorizedUntil: null });
+  }
+
   private relay(socket: WebSocket, message: SignalingMessage): void {
     const sender = this.requireAttachment(socket);
     if (!sender.role) throw new Error("NOT_IN_ROOM");
@@ -761,6 +867,9 @@ export class BpRoom extends DurableObject<Env> {
       message.payload.targetSessionId !== targetIdentity.sessionId
     )
       throw new Error("STALE_SIGNAL");
+    if (message.type === "PEER_READY") {
+      this.setAttachment(socket, { ...sender, connectionId: message.payload.connectionId as string });
+    }
     const metadata = {
       ...relayMetadata(message.payload),
       fromRole: sender.role,
@@ -841,6 +950,12 @@ export class BpRoom extends DurableObject<Env> {
       }
     }
     await this.ctx.storage.deleteAlarm();
+    const metadata = await this.ctx.storage.get<RoomMetadata>(ROOM_METADATA_KEY);
+    if (metadata?.turn?.sub) {
+      try {
+        await this.env.TURN_AUTH.get(this.env.TURN_AUTH.idFromName(metadata.turn.sub)).unbind(metadata.turn.jti, metadata.roomCode);
+      } catch { /* TURN bookkeeping must never prevent ordinary room closure. */ }
+    }
     await this.ctx.storage.delete(ROOM_METADATA_KEY);
   }
 
@@ -966,6 +1081,6 @@ export class BpRoom extends DurableObject<Env> {
       INVALID_RELAY_TARGET: "不允许向该角色转发信令",
       INVALID_RELAY_DIRECTION: "不允许以该身份发送此类 WebRTC 信令",
     };
-    return messages[code] ?? "信令服务处理失败";
+    return turnErrors[code] ?? messages[code] ?? "信令服务处理失败";
   }
 }

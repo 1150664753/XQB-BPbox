@@ -14,6 +14,7 @@
     "typecheck": "npm run typegen && tsc --noEmit",
     "test": "node test/signaling-worker-self-check.mjs",
     "test:local": "node test/signaling-self-check.mjs",
+    "test:turn": "node test/turn-self-check.mjs",
     "deploy": "wrangler deploy"
   },
   "dependencies": {

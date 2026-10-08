@@ -16,7 +16,7 @@ function parseIceServers(raw: string | undefined): RTCIceServer[] {
         Array.isArray(urlList) &&
         urlList.length > 0 &&
         urlList.length <= 8 &&
-        urlList.every((url) => typeof url === 'string' && /^stuns?:|^turns?:/.test(url))
+        urlList.every((url) => typeof url === 'string' && /^stuns?:/.test(url))
       )
     })
     return parsed.length > 0 ? parsed : DEFAULT_ICE_SERVERS

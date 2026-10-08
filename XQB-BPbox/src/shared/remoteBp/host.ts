@@ -123,6 +123,7 @@ export class RemoteBpHost {
       dependencies.transport.onStatusChange((status) => {
         this.patch({
           connectionState: status.connectionState,
+          ...(status.turnAuthorizedUntil !== undefined ? { turnAuthorizedUntil: status.turnAuthorizedUntil } : {}),
           ...(status.error !== undefined ? { error: status.error } : {})
         })
       }),
@@ -179,6 +180,7 @@ export class RemoteBpHost {
       if (!roomId) throw new Error('Transport 未返回房间码')
       this.patch({
         lifecycle: 'active',
+        turnAuthorizedUntil: started?.turnAuthorizedUntil ?? null,
         roomId,
         createdAt: started?.createdAt ?? createdAt,
         expiresAt: started?.expiresAt ?? null,

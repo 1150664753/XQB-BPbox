@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { pathToFileURL } from "node:url";
 
 import { WebSocket, WebSocketServer } from "ws";
+import { authorizeTurn, issueTurnCredentials, turnPermission, turnErrors } from "./turn.mjs";
 
 export const MAX_SIGNALING_MESSAGE_BYTES = 64 * 1024;
 const PERSISTENT_ROOM_EXPIRES_AT = "9999-12-31T23:59:59.999Z";
@@ -19,6 +20,7 @@ const CLIENT_MESSAGE_TYPES = new Set([
   "ICE_CANDIDATE",
   "PEER_READY",
   "ICE_RESTART_REQUEST",
+  "TURN_REQUEST",
 ]);
 const PLAYER_ROLES = new Set(["FIRST", "SECOND"]);
 const ALL_ROLES = new Set(["HOST", "FIRST", "SECOND"]);
@@ -130,6 +132,8 @@ export function parseClientMessage(raw) {
 
   switch (value.type) {
     case "CREATE_ROOM": {
+      if (payload.turnAccessCode !== undefined && !isString(payload.turnAccessCode, 1, 256))
+        throw new Error("INVALID_TURN_CODE");
       if (
         payload.displayName !== undefined &&
         !isString(payload.displayName, 1, 64)
@@ -139,7 +143,7 @@ export function parseClientMessage(raw) {
       return {
         type: value.type,
         requestId: value.requestId,
-        payload: { displayName: payload.displayName },
+        payload: { displayName: payload.displayName, turnAccessCode: payload.turnAccessCode },
       };
     }
     case "RESUME_ROOM": {
@@ -188,6 +192,12 @@ export function parseClientMessage(raw) {
           sentAt: isString(payload.sentAt, 10, 64) ? payload.sentAt : "",
         },
       };
+    case "TURN_REQUEST":
+      if (!PLAYER_ROLES.has(payload.targetRole) || !isString(payload.targetSessionId, 1, 128) ||
+        !isString(payload.connectionId, 1, 128)) throw new Error("INVALID_RELAY_METADATA");
+      return { type: value.type, requestId: value.requestId, payload: {
+        targetRole: payload.targetRole, targetSessionId: payload.targetSessionId, connectionId: payload.connectionId,
+      }};
     case "PEER_READY":
     case "ICE_RESTART_REQUEST": {
       if (
@@ -272,6 +282,7 @@ function slotForRole(room, role) {
 }
 
 export function createSignalingServer(options = {}) {
+  const turnEnvironment = options.turnEnvironment ?? process.env;
   const host = options.host ?? process.env.SIGNALING_HOST ?? "0.0.0.0";
   const configuredPort =
     options.port ?? Number(process.env.SIGNALING_PORT ?? 8787);
@@ -362,7 +373,9 @@ export function createSignalingServer(options = {}) {
   webSocketServer.on("connection", (socket) => {
     socket.on("error", () => undefined);
     socket.on("close", () => leave(socket, "disconnected"));
-    socket.on("message", (data, isBinary) => {
+    let messageChain = Promise.resolve();
+    const handleMessage = async (data, isBinary) => {
+      if (socket.readyState !== WebSocket.OPEN) return;
       if (isBinary) {
         sendError(socket, "BINARY_NOT_ALLOWED", "信令服务只接受 JSON 文本消息");
         return;
@@ -387,6 +400,8 @@ export function createSignalingServer(options = {}) {
         switch (message.type) {
           case "CREATE_ROOM": {
             if (clients.has(socket)) throw new Error("ALREADY_IN_ROOM");
+            const turn = await authorizeTurn(turnEnvironment, message.payload.turnAccessCode);
+            if (socket.readyState !== WebSocket.OPEN) return;
             const now = Date.now();
             const roomCode = createRoomCode(rooms);
             const participant = {
@@ -397,6 +412,7 @@ export function createSignalingServer(options = {}) {
               joinedAt: now,
             };
             const room = {
+              turn,
               roomCode,
               host: participant,
               hostSessionId: participant.sessionId,
@@ -421,6 +437,7 @@ export function createSignalingServer(options = {}) {
                 createdAt: new Date(room.createdAt).toISOString(),
                 expiresAt: PERSISTENT_ROOM_EXPIRES_AT,
                 resumeToken: room.resumeToken,
+                turnAuthorizedUntil: turn?.expiresAt ?? null,
               },
               message.requestId,
             );
@@ -454,6 +471,7 @@ export function createSignalingServer(options = {}) {
               socket,
               "ROOM_RESUMED",
               {
+                turnAuthorizedUntil: await turnPermission(turnEnvironment, room.turn) ? room.turn.expiresAt : null,
                 roomCode: room.roomCode,
                 sessionId: participant.sessionId,
                 role: "HOST",
@@ -552,6 +570,26 @@ export function createSignalingServer(options = {}) {
             if (!clients.has(socket)) throw new Error("NOT_IN_ROOM");
             send(socket, "HEARTBEAT_ACK", { sentAt: message.payload.sentAt });
             return;
+          case "TURN_REQUEST": {
+            const identity = clients.get(socket);
+            if (identity?.role !== "HOST") throw new Error("HOST_ONLY");
+            const room = rooms.get(identity.roomCode);
+            if (!room || room.host?.socket !== socket) throw new Error("NOT_IN_ROOM");
+            const player = slotForRole(room, message.payload.targetRole);
+            if (!player) throw new Error("PEER_NOT_CONNECTED");
+            if (player.sessionId !== message.payload.targetSessionId || player.connectionId !== message.payload.connectionId)
+              throw new Error("STALE_SIGNAL");
+            const connectionId = player.connectionId;
+            const credentials = await issueTurnCredentials(turnEnvironment, room.turn,
+              `${room.roomCode}:${player.sessionId}:${connectionId}`, options.turnFetch);
+            if (rooms.get(room.roomCode) !== room || room.host?.socket !== socket ||
+              slotForRole(room, player.role) !== player || player.connectionId !== connectionId)
+              throw new Error("STALE_SIGNAL");
+            const payload = { ...credentials, roomId: room.roomCode, peerId: player.sessionId, connectionId };
+            send(player.socket, "TURN_CREDENTIALS", payload);
+            send(socket, "TURN_CREDENTIALS", payload, message.requestId);
+            return;
+          }
           case "OFFER":
           case "ANSWER":
           case "ICE_CANDIDATE":
@@ -577,6 +615,10 @@ export function createSignalingServer(options = {}) {
               message.payload.targetSessionId !== target.sessionId
             )
               throw new Error("STALE_SIGNAL");
+            if (message.type === "PEER_READY") {
+              const room = rooms.get(identity.roomCode);
+              slotForRole(room, identity.role).connectionId = message.payload.connectionId;
+            }
             const relayPayload = {
               ...relayMetadata(message.payload),
               fromRole: identity.role,
@@ -612,10 +654,14 @@ export function createSignalingServer(options = {}) {
         sendError(
           socket,
           code,
-          messages[code] ?? "信令服务处理失败",
+          turnErrors[code] ?? messages[code] ?? "信令服务处理失败",
           message.requestId,
         );
       }
+    };
+    socket.on("message", (data, isBinary) => {
+      messageChain = messageChain.then(() => handleMessage(data, isBinary))
+        .catch(() => sendError(socket, "SIGNALING_ERROR", "信令服务处理失败"));
     });
   });
 

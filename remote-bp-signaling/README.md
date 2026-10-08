@@ -1,5 +1,7 @@
 # Cloudflare 公网信令服务
 
+WTN TURN、隐藏房主授权、Secrets 配置与验证步骤见 [TURN_SETUP.md](../docs/TURN_SETUP.md)。
+
 该目录把现有 Remote BP 信令协议部署为 Cloudflare Worker。每个六位 `roomId` 对应一个 SQLite-backed `BpRoom` Durable Object；连接通过 WebSocket Hibernation API 保持，空闲时不需要让对象常驻内存。
 
 要求 Node.js 22 或更高版本（当前 Wrangler 4 的运行要求）。

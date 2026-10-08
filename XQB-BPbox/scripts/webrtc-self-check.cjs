@@ -21,6 +21,7 @@ const {
   WebRtcRemoteHostTransport,
   WebRtcRemoteBpConnection,
   bufferRtcSignal,
+  getRtcDiagnostics,
   RTC_TIMING
 } = require(output)
 
@@ -128,6 +129,7 @@ class Peer extends EventTarget {
     this.config = config
     Peer.all.push(this)
   }
+  setConfiguration(config) { this.config = config }
   createDataChannel() {
     this.channel = new Channel()
     return this.channel
@@ -202,8 +204,8 @@ class Socket extends EventTarget {
     assert.equal(this.readyState, 1)
     this.sent.push(JSON.parse(raw))
   }
-  message(type, payload) {
-    emit(this, 'message', { data: JSON.stringify({ type, payload }) })
+  message(type, payload, requestId) {
+    emit(this, 'message', { data: JSON.stringify({ type, payload, requestId }) })
   }
   close(code = 1000, reason = '') {
     if (this.readyState === 3) return
@@ -216,7 +218,7 @@ const logs = []
 const realInfo = console.info
 console.info = (...args) => logs.push(args)
 const sessions = []
-function session(offerer = false, id = 'connection-1') {
+function session(offerer = false, id = 'connection-1', options = {}) {
   const sent = [],
     states = [],
     messages = []
@@ -234,7 +236,8 @@ function session(offerer = false, id = 'connection-1') {
       return true
     },
     onState: (state) => states.push(state),
-    onMessage: (data) => messages.push(data)
+    onMessage: (data) => messages.push(data),
+    ...options
   })
   sessions.push(rtc)
   return { rtc, pc: rtc.pc, sent, states, messages }
@@ -251,6 +254,50 @@ async function run(name, test) {
 }
 
 async function main() {
+  await run('TURN refresh keeps DataChannel, removes expired/revoked relays, and redacts diagnostics', async () => {
+    let refreshed = 0, authorized = true
+    const credentials = { iceServers: [{ urls: ['turn:relay.example.test:3478'], username: 'SECRET_TURN_USER', credential: 'SECRET_TURN_CREDENTIAL' }], expiresAt: 100_000 }
+    const { rtc, pc } = session(true, 'turn-refresh', { prepareRestart: async () => { if (!authorized) return; refreshed++; rtc.applyTurn({ ...credentials, expiresAt: now + 3_600_000 }) } })
+    assert.equal(pc.config.iceTransportPolicy, 'all')
+    assert.equal(pc.config.iceServers.some(s => String(s.urls).includes('turn:')), false)
+    rtc.turnRequested(); rtc.applyTurn(credentials)
+    assert.equal(pc.config.iceServers.length, 2)
+    assert.equal(pc.config.iceTransportPolicy, 'all')
+    const channel = rtc.channel
+    await rtc.start()
+    await rtc.receive('ANSWER', signal(rtc.connectionId, 1, {description: description('answer','remote-1')}))
+    pc.network('connected'); pc.channel.open(); await flush()
+    pc.getStats = async () => new Map([
+      ['transport',{type:'transport',selectedCandidatePairId:'pair'}],
+      ['pair',{type:'candidate-pair',localCandidateId:'local',remoteCandidateId:'remote'}],
+      ['local',{type:'local-candidate',candidateType:'relay',username:credentials.iceServers[0].username}],
+      ['remote',{type:'remote-candidate',candidateType:'host'}],
+    ])
+    await tick(31_000)
+    assert.equal(refreshed, 1)
+    assert.equal(rtc.channel, channel)
+    assert.equal(pc.offers[1].iceRestart, true)
+    assert.equal(getRtcDiagnostics().find(d=>d.connectionId==='turn-refresh').relay, true)
+    await rtc.receive('ANSWER',signal(rtc.connectionId, 2, {description:description('answer','remote-2')}))
+    await flush()
+    authorized = false
+    rtc.clearTurn('撤销测试'); await flush()
+    assert.equal(pc.config.iceTransportPolicy, 'all')
+    assert.equal(pc.config.iceServers.length, 1)
+    assert.equal(JSON.stringify(getRtcDiagnostics()).includes('SECRET_TURN'), false)
+    assert.equal(JSON.stringify(logs).includes('SECRET_TURN'), false)
+  })
+  await run('relay policy is opt-in and requires temporary credentials', async () => {
+    const { rtc, pc } = session(false, 'test-relay', { testOnlyForceRelay: true })
+    assert.equal(pc.config.iceTransportPolicy, 'all')
+    rtc.applyTurn({ iceServers:[{urls:['turn:relay.example.test'],username:'mock-user',credential:'mock-credential'}], expiresAt: 2_000 })
+    assert.equal(pc.config.iceTransportPolicy, 'relay')
+    await tick(2_000)
+    assert.equal(pc.config.iceTransportPolicy, 'all')
+    assert.equal(rtc.relayExpiresAt, null)
+    assert.equal(getRtcDiagnostics().find(d=>d.connectionId==='test-relay').turn, 'expired')
+    assert.throws(()=>rtc.applyTurn({ iceServers:[], expiresAt:0 }), /无效|过期/)
+  })
   await run(
     'signaling outage can skip an offer generation and late socket errors still reconnect',
     async () => {
@@ -363,11 +410,8 @@ async function main() {
         signal(rtc.connectionId, 2, { description: description('answer', 'remote-2') })
       )
       assert.equal(pc.additions.length, 1)
-      assert.deepEqual(pc.config.iceServers[1], {
-        urls: 'turn:example.test',
-        username: 'u',
-        credential: 'c'
-      })
+      assert.deepEqual(pc.config.iceServers, [{ urls: ['stun:example.test'] }],
+        'public/static TURN configuration must never grant paid access')
     }
   )
   await run(

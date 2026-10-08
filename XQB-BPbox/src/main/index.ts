@@ -8,11 +8,12 @@ import { registerDisplaySettingsIpc } from './ipc/displaySettings'
 import { registerFlowIpc } from './ipc/flows'
 import { registerLightConeIpc } from './ipc/lightCones'
 import { registerRemoteBpIpc } from './ipc/remoteBp'
+import { registerTurnAuthIpc } from './ipc/turnAuth'
 import { registerVoiceTimelineIpc } from './ipc/voiceTimelines'
 import { startProjectFileWatchers } from './projectFileWatchers'
 import { registerAssetProtocol, registerAssetProtocolScheme } from './protocols'
 import { initializeUpdater, registerUpdaterIpc } from './updater'
-import { createDisplayWindow, createMainWindow } from './windows'
+import { createDisplayWindow, createMainWindow, isMainWebContents } from './windows'
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
 app.setName('XQB-BPBox')
@@ -27,6 +28,7 @@ function registerIpcHandlers(): void {
   registerVoiceTimelineIpc()
   registerBpIpc()
   registerRemoteBpIpc()
+  registerTurnAuthIpc()
   registerUpdaterIpc()
 }
 
@@ -42,6 +44,10 @@ app.whenReady().then(() => {
   // see https://github.com/alex8088/electron-toolkit/tree/master/packages/utils
   app.on('browser-window-created', (_, window) => {
     window.webContents.on('before-input-event', (event, input) => {
+      if (input.type === 'keyDown' && input.control && input.shift && input.key.toLowerCase() === 't' && isMainWebContents(window.webContents)) {
+        event.preventDefault()
+        window.webContents.send('turn-auth:open')
+      }
       if (!app.isPackaged && input.type === 'keyDown' && input.key === 'F12') {
         if (window.webContents.isDevToolsOpened()) {
           window.webContents.closeDevTools()

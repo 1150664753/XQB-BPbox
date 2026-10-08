@@ -101,6 +101,47 @@ interface RtcSessionOptions {
   send: (type: RtcSignalType, payload: Record<string, unknown>) => boolean
   onState: (state: RtcPhase, reason: string | null) => void
   onMessage: (data: unknown) => void
+  prepareRestart?: () => Promise<void>
+  testOnlyForceRelay?: boolean
+}
+
+export interface RtcDiagnostics {
+  connectionId: string
+  iceState: string
+  pair: string | null
+  relay: boolean
+  turn: 'not-requested' | 'requesting' | 'ready' | 'failed' | 'expired' | 'disabled'
+  expiresAt: number | null
+  reason: string | null
+}
+const diagnostics = new Map<string, RtcDiagnostics>()
+export const getRtcDiagnostics = (): RtcDiagnostics[] => [...diagnostics.values()].map(value => ({ ...value }))
+
+/** Public build-time configuration may only contain discovery servers. Paid relays are room-scoped. */
+export function directIceServers(servers: RTCIceServer[]): RTCIceServer[] {
+  return servers.flatMap((server) => {
+    const urls = (Array.isArray(server.urls) ? server.urls : [server.urls])
+      .filter((url) => /^stuns?:/i.test(url))
+    return urls.length ? [{ urls }] : []
+  })
+}
+
+export function readTurnCredentials(payload: Record<string, unknown>): {
+  iceServers: RTCIceServer[]; expiresAt: number
+} {
+  if (!Number.isFinite(payload.expiresAt) || Number(payload.expiresAt) <= Date.now() ||
+    !Array.isArray(payload.iceServers) || !payload.iceServers.length || payload.iceServers.length > 8)
+    throw new Error('中继凭证无效或已过期')
+  const iceServers: RTCIceServer[] = payload.iceServers.map((entry: unknown) => {
+    if (!entry || typeof entry !== 'object') throw new Error('中继配置无效')
+    const value = entry as Record<string, unknown>
+    const urls = Array.isArray(value.urls) ? value.urls : [value.urls]
+    if (!urls.length || urls.length > 8 || urls.some((url) => typeof url !== 'string' || !/^turns?:[^\s]+$/i.test(url)) ||
+      typeof value.username !== 'string' || !value.username || value.username.length > 2048 ||
+      typeof value.credential !== 'string' || !value.credential || value.credential.length > 2048) throw new Error('中继配置无效')
+    return { urls: urls as string[], username: value.username, credential: value.credential }
+  })
+  return { iceServers, expiresAt: Number(payload.expiresAt) }
 }
 
 interface CandidateEntry {
@@ -135,9 +176,17 @@ export class RemoteBpRtcSession {
   private iceConnectedAt: number | null = null
   private disconnectedAt: number | null = null
   private readonly timer: number
+  relayExpiresAt: number | null = null
+  private lastRelayRefreshAt = 0
+  private lastStatsAt = -5_000
+  private statsPending = false
+  private diagnostic: RtcDiagnostics
 
   constructor(private readonly options: RtcSessionOptions) {
-    this.pc = new RTCPeerConnection({ iceServers: options.iceServers })
+    this.diagnostic = { connectionId: options.connectionId, iceState: 'new', pair: null, relay: false, turn: 'not-requested', expiresAt: null, reason: null }
+    diagnostics.set(options.connectionId, this.diagnostic)
+    while (diagnostics.size > 8) diagnostics.delete(diagnostics.keys().next().value!)
+    this.pc = new RTCPeerConnection({ iceServers: directIceServers(options.iceServers), iceTransportPolicy: 'all' })
     this.log('PeerConnection created')
     for (const event of [
       'signalingstatechange',
@@ -170,7 +219,7 @@ export class RemoteBpRtcSession {
       if (this.active)
         this.log('candidate gathering error', {
           errorCode: event.errorCode,
-          errorText: event.errorText
+          reason: 'ICE server candidate gathering failed'
         })
     })
     this.pc.addEventListener('datachannel', (event) => {
@@ -188,6 +237,57 @@ export class RemoteBpRtcSession {
 
   get connectionId(): string {
     return this.options.connectionId
+  }
+
+  applyTurn(payload: Record<string, unknown>): void {
+    if (!this.active) return
+    const credentials = readTurnCredentials(payload)
+    this.pc.setConfiguration({ iceServers: [...directIceServers(this.options.iceServers), ...credentials.iceServers], iceTransportPolicy: this.options.testOnlyForceRelay ? 'relay' : 'all' })
+    this.relayExpiresAt = credentials.expiresAt
+    this.diagnostic.turn = 'ready'
+    this.diagnostic.expiresAt = credentials.expiresAt
+    this.diagnostic.reason = null
+    this.log('room TURN credentials installed', { expiresAt: credentials.expiresAt })
+  }
+
+  turnRequested(): void { this.diagnostic.turn = 'requesting'; this.log('TURN credentials requested') }
+  turnFailed(code: string): void {
+    this.diagnostic.turn = 'failed'
+    this.diagnostic.reason = /^TURN_[A-Z_]+$/.test(code) ? code : 'TURN_UNAVAILABLE'
+    this.log('TURN credentials unavailable; P2P retained', { reason: this.diagnostic.reason })
+  }
+  clearTurn(reason: string, expired = false): void {
+    if (!this.active) return
+    const installed = this.relayExpiresAt !== null
+    this.relayExpiresAt = null
+    this.diagnostic.turn = expired ? 'expired' : 'disabled'
+    this.diagnostic.expiresAt = null
+    this.diagnostic.reason = reason
+    this.pc.setConfiguration({ iceServers: directIceServers(this.options.iceServers), iceTransportPolicy: 'all' })
+    if (installed) this.requestRestart(reason)
+  }
+
+  private async inspectSelectedPair(): Promise<void> {
+    if (this.statsPending || typeof this.pc.getStats !== 'function') return
+    this.statsPending = true
+    try {
+      const stats = await this.pc.getStats()
+      if (!this.active) return
+      let pair: RTCStats | undefined
+      stats.forEach(report => { if (report.type === 'transport' && report.selectedCandidatePairId) pair = stats.get(report.selectedCandidatePairId) })
+      if (!pair) stats.forEach(report => { if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.nominated) pair = report })
+      const selected = pair as (RTCStats & { localCandidateId: string; remoteCandidateId: string }) | undefined
+      const local = selected ? stats.get(selected.localCandidateId)?.candidateType : null
+      const remote = selected ? stats.get(selected.remoteCandidateId)?.candidateType : null
+      const allowed = ['host', 'srflx', 'prflx', 'relay']
+      const pairType = local && remote ? `${allowed.includes(local) ? local : 'unknown'} / ${allowed.includes(remote) ? remote : 'unknown'}` : null
+      this.diagnostic.relay = local === 'relay' || remote === 'relay'
+      if (this.diagnostic.pair !== pairType) {
+        this.diagnostic.pair = pairType
+        this.log('selected candidate pair', { pair: pairType, relay: this.diagnostic.relay })
+      }
+    } catch { /* Stats are diagnostic only; never disrupt a BP connection. */ }
+    finally { this.statsPending = false }
   }
 
   private log(event: string, details: Record<string, unknown> = {}): void {
@@ -214,7 +314,7 @@ export class RemoteBpRtcSession {
       })
       .catch((error) => {
         if (!this.active) return
-        this.log('negotiation error', { error: String(error) })
+        this.log('negotiation error', { reason: error instanceof DOMException ? error.name : 'RTC_OPERATION_FAILED' })
         this.restartQueued = false
         this.restartInFlight = false
         this.requestRestart('SDP 协商失败')
@@ -238,7 +338,7 @@ export class RemoteBpRtcSession {
     }
     const generation = Number(payload.negotiationId)
     // Signaling can be offline for a whole round. The next offer may skip a generation.
-    if (generation < 0 || generation > RTC_TIMING.maxRestarts + 1) {
+    if (generation < 0 || generation > this.generation + RTC_TIMING.maxRestarts + 1) {
       this.log('out-of-window signal ignored', { type, receivedGeneration: generation })
       return Promise.resolve()
     }
@@ -414,7 +514,7 @@ export class RemoteBpRtcSession {
     try {
       sent = this.options.send(signal.type, signal.payload)
     } catch (error) {
-      this.log('signal send deferred', { error: String(error) })
+      this.log('signal send deferred', { reason: error instanceof DOMException ? error.name : 'SIGNAL_SEND_FAILED' })
     }
     this.log(
       `${signal.type === 'ICE_CANDIDATE' ? 'candidate' : signal.type} ${sent ? 'sent' : 'cached for signaling recovery'}`,
@@ -467,7 +567,7 @@ export class RemoteBpRtcSession {
         if (this.active)
           this.log('addIceCandidate failure', {
             ...candidateDetails(entry.candidate),
-            error: String(error)
+            reason: error instanceof DOMException ? error.name : 'ADD_CANDIDATE_FAILED'
           })
       }
     }
@@ -487,7 +587,12 @@ export class RemoteBpRtcSession {
     this.transition('reconnecting', reason)
     this.log('ICE Restart started', { attempt: this.restartCount, reason })
     void this.enqueue(async () => {
-      if (this.options.offerer) await this.makeOffer(true)
+      if (this.options.offerer) {
+        // Initial negotiation stays STUN-only. Obtain relay credentials only at recovery time.
+        if (this.options.prepareRestart) await this.options.prepareRestart()
+        if (!this.active) return
+        await this.makeOffer(true)
+      }
       else {
         // HOST remains the sole offerer; this avoids glare between recovery events on both peers.
         const payload = { connectionId: this.connectionId, negotiationId: this.generation }
@@ -502,10 +607,10 @@ export class RemoteBpRtcSession {
     channel.bufferedAmountLowThreshold = 256 * 1024
     this.log(`DataChannel ${channel.readyState}`)
     for (const event of ['open', 'closing', 'close', 'error']) {
-      channel.addEventListener(event, (detail) => {
+      channel.addEventListener(event, () => {
         if (!this.active || this.channel !== channel) return
         this.log(`DataChannel ${event === 'close' ? 'closed' : event}`, {
-          ...(event === 'error' ? { error: (detail as RTCErrorEvent).error?.message } : {})
+          ...(event === 'error' ? { reason: 'DATA_CHANNEL_ERROR' } : {})
         })
         this.reconcile()
       })
@@ -519,6 +624,8 @@ export class RemoteBpRtcSession {
   private reconcile(): void {
     if (!this.active) return
     const now = Date.now()
+    this.diagnostic.iceState = this.pc.iceConnectionState
+    if (now - this.lastStatsAt >= 5_000) { this.lastStatsAt = now; void this.inspectSelectedPair() }
     this.localSignals = this.localSignals.filter(
       (signal) => now - signal.createdAt <= RTC_TIMING.signalTtlMs
     )
@@ -531,6 +638,11 @@ export class RemoteBpRtcSession {
     if (connection === 'closed' || ice === 'closed' || this.channel?.readyState === 'closed') {
       this.fail('点对点连接或 DataChannel 已关闭')
       return
+    }
+    if (this.relayExpiresAt !== null && now >= this.relayExpiresAt) {
+      this.clearTurn('中继凭证已到期，正在尝试恢复直连', true)
+      this.log('TURN credentials expired; returning to direct connectivity')
+      this.requestRestart('中继凭证已到期，正在尝试恢复直连')
     }
     if (this.episodeStartedAt !== null && now - this.episodeStartedAt >= RTC_TIMING.totalMs) {
       this.fail('点对点连接超过 120 秒总恢复时限')
@@ -546,10 +658,16 @@ export class RemoteBpRtcSession {
     ) {
       if (this.restartInFlight) this.log('ICE Restart success')
       this.restartInFlight = false
+      this.restartCount = 0
       this.episodeStartedAt = null
       this.disconnectedAt = null
       this.iceConnectedAt = null
       this.transition('connected', null)
+      if (this.options.offerer && this.relayExpiresAt !== null &&
+        this.relayExpiresAt - now <= 90_000 && now - this.lastRelayRefreshAt >= 30_000) {
+        this.lastRelayRefreshAt = now
+        this.requestRestart('中继凭证即将到期，正在更新')
+      }
       return
     }
     if (this.episodeStartedAt === null) {
@@ -591,6 +709,7 @@ export class RemoteBpRtcSession {
   private transition(phase: RtcPhase, reason: string | null): void {
     if (this.phase === phase) return
     this.phase = phase
+    if (reason) this.diagnostic.reason = reason
     this.log('state transition', { reason })
     this.options.onState(phase, reason)
   }
@@ -600,6 +719,7 @@ export class RemoteBpRtcSession {
     if (this.restartInFlight) this.log('ICE Restart failure', { reason })
     this.dispose()
     this.transition('failed', reason)
+    diagnostics.set(this.connectionId, this.diagnostic)
   }
 
   close(): void {
@@ -610,6 +730,7 @@ export class RemoteBpRtcSession {
 
   private dispose(): void {
     this.active = false
+    diagnostics.delete(this.connectionId)
     window.clearInterval(this.timer)
     this.candidates = []
     this.seenCandidates.clear()

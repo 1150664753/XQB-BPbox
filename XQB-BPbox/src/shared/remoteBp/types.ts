@@ -217,6 +217,7 @@ export interface RemoteRoomPlayerState {
 }
 
 export interface RemoteBpRoomState {
+  turnAuthorizedUntil?: number | null
   lifecycle: RemoteRoomLifecycleState
   roomId: string | null
   createdAt: string | null

@@ -39,6 +39,7 @@ export interface WebRtcRemoteBpConnectionOptions {
   signalingUrl: string;
   iceServers: RTCIceServer[];
   connectTimeoutMs?: number;
+  testOnlyForceRelay?: boolean;
 }
 
 const MAX_SIGNALING_MESSAGE_BYTES = 64 * 1024;
@@ -278,6 +279,16 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
         }
         return;
       }
+      case "TURN_STATUS": {
+        if (!message.payload.turnAuthorizedUntil) this.rtc?.clearTurn("房主 TURN 授权已撤销或到期");
+        return;
+      }
+      case "TURN_CREDENTIALS": {
+        if (this.confirmed && this.rtc && message.payload.roomId === this.confirmed.roomId &&
+          message.payload.peerId === this.confirmed.sessionId && message.payload.connectionId === this.rtc.connectionId)
+          this.rtc.applyTurn(message.payload);
+        return;
+      }
       case "OFFER":
       case "ICE_CANDIDATE": {
         if (message.payload.fromRole !== "HOST") return;
@@ -303,6 +314,11 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
           ? message.payload.message
           : "信令服务错误";
         const error = new Error(text);
+        if (code.startsWith("TURN_")) {
+          this.rtc?.turnFailed(code);
+          this.events.emit("error", { code, message: text, recoverable: true });
+          return;
+        }
         this.events.emit("error", {
           code,
           message: text,
@@ -381,6 +397,7 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
       peerId: this.confirmed.sessionId,
       roomId: this.confirmed.roomId,
       offerer: false,
+      testOnlyForceRelay: this.options.testOnlyForceRelay,
       iceServers: this.options.iceServers,
       send: (type, payload) => {
         if (

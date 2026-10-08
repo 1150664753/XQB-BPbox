@@ -3,6 +3,11 @@
   "name": "xqb-bp-signaling",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-02",
+  "vars": {
+    "WTN_APP_ID": "6ac735fb7305ab038c2e3546",
+    "WTN_API_DOMAIN": "wtn.volcvideo.com",
+    "WTN_TURN_TTL_SECONDS": "3600"
+  },
   "routes": [
     {
       "pattern": "signal.xqbbp.dpdns.org",
@@ -14,6 +19,10 @@
       {
         "name": "BP_ROOMS",
         "class_name": "BpRoom"
+      },
+      {
+        "name": "TURN_AUTH",
+        "class_name": "TurnAuthority"
       }
     ]
   },
@@ -21,6 +30,10 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["BpRoom"]
+    },
+    {
+      "tag": "v2-turn-auth",
+      "new_sqlite_classes": ["TurnAuthority"]
     }
   ]
 }

@@ -38,6 +38,9 @@
 *.pfx
 *.p12
 *.keystore
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
 
 # Logs, caches, and temporary files
 /XQB-BPbox/.eslintcache
