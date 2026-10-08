@@ -161,7 +161,6 @@ export default function RemoteBpPanel({ host }: { host: RemoteBpHost }): React.J
       </div>
 
       {room.error ? <small className="remote-bp-error">{room.error}</small> : null}
-      <small className="remote-bp-lifetime">房间寿命：由房主控制</small>
       <div className="bp-card-actions">
         <button
           type="button"

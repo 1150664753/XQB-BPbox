@@ -97,7 +97,6 @@ export default function TurnAuthorizationDialog(): React.JSX.Element | null {
           placeholder="输入房主 TURN 授权密码"
         />
         <p className="turn-auth-hint">
-          授权有效期 7 天，房间选手无需密码。未授权仍可使用 P2P 和普通 BP。
         </p>
         {status.message && (
           <p role="status" className="turn-auth-message">
@@ -121,7 +120,6 @@ export default function TurnAuthorizationDialog(): React.JSX.Element | null {
             关闭
           </button>
         </footer>
-        <small>退出后停止领取新凭证；火山引擎已签发的 TURN 凭证按原 TTL 到期。</small>
         {connections.length > 0 && (
           <details>
             <summary>连接诊断</summary>
