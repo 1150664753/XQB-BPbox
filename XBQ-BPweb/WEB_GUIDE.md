@@ -2,7 +2,7 @@
 
 ## 1. 项目用途
 
-`XBQ-BPweb` 是远程 BP 的选手端网页基础框架：
+`XBQ-BPweb` 是远程 BP 的选手端网页。选手入口为 [https://bp.xqbbp.dpdns.org/room](https://bp.xqbbp.dpdns.org/room)：
 
 - 房主运行现有的 Electron 软件 `XQB-BPbox`。
 - 先手和后手选手分别在浏览器打开部署后的网页。
@@ -19,7 +19,7 @@
 
 - React 19 + TypeScript + Vite 独立网页项目。
 - 加入房间页和 BP 选手操作页。
-- `/room/ABCDEFG` 房间路径解析和预填。
+- `/room/ABCDEF` 房间路径解析和预填。
 - `RemoteBpConnection` 通信抽象。
 - `MockRemoteBpConnection`、模拟延迟、对手自动操作及 revision 递增。
 - 集中的客户端/房主消息协议和统一 envelope。
@@ -27,7 +27,7 @@
 - `AssetManifest`、`AssetCache`、`MemoryAssetCache`、`RemoteAssetManager`。
 - Mock Manifest 与通过连接层返回的 Mock Blob 资源。
 - 外部可观察 Session Store；React 组件不解析协议，也不修改正式 BP State。
-- `idle / connecting / connected / reconnecting / disconnected / failed` 连接状态模型。
+- 上层 `idle / connecting / connected / reconnecting / disconnected / failed / kicked / room-closed` 状态；底层由共用 WebRTC 生命周期统一判断五项连接状态。
 - XQB-BPbox `BpActionDispatcher`，本地 BAN / PICK / PROTECT / BORROW 已复用统一入口。
 - XQB-BPbox 纯 `RemoteBpState` Serializer 与集中式 star/rail ↔ first/second 映射。
 - XQB-BPbox `RemoteAssetProvider`，使用无路径 Manifest、图片白名单与 SHA-256。
@@ -36,13 +36,13 @@
 - WebSocket Signaling Server、HOST/FIRST/SECOND 槽位和房间生命周期。
 - BPbox / Web Signaling Client、`RTCPeerConnection` 与 WebRTC DataChannel。
 - 网络消息 runtime validation、64 KiB 信令上限和 512 KiB BP 消息上限。
-- 可配置 STUN/TURN `iceServers` 与基础 ICE Restart。
-- 真实角色头像小图/全身立绘传输、128 KiB 分片、发送背压与接收端 size/hash/MIME 校验。
+- 可配置 STUN/TURN `iceServers`，按连接和轮次缓存 Candidate，支持就绪握手、有限 ICE Restart、分阶段超时与诊断日志。
+- 真实角色头像、全身立绘和光锥小图传输，128 KiB 分片、发送背压与接收端 size/hash/MIME 校验。
 
 ### 尚未实现
 
-- 生产 TURN 服务与公网 WSS 部署。
-- 跨信令断线的稳定 session 身份恢复。
+- 生产 TURN 中继服务；公网 WSS 的配置与部署说明已在[信令 README](../remote-bp-signaling/README.md)中提供。
+- 选手跨 WebSocket 重连保持同一 sessionId；当前选手重新 JOIN 会取得新会话，房主则已支持用 resumeToken 恢复房间。
 - IndexedDB 持久缓存。
 - 独立二进制资源通道与传输取消；当前资源使用有大小上限的 Base64 JSON 分片。
 
@@ -88,7 +88,8 @@ XBQ-BPweb/
 
 加入页提供：
 
-- 4–12 位房间号输入。
+- 真实房间使用信令服务生成的 6 位房间号；页面输入框目前允许 4–12 位字母或数字，服务端会继续校验真实房间格式。
+- 队伍或选手名称输入。
 - 先手 / 后手身份选择。
 - 加入房间按钮。
 - 统一连接状态与错误提示。
@@ -100,7 +101,7 @@ XBQ-BPweb/
 
 BP 页展示：
 
-- 身份、房间号、连接状态、Mock/P2P 传输标识和延迟预留。
+- 身份、房间号、连接状态、Mock/P2P 传输标识和 Ping/Pong 延迟。
 - BP 阶段、当前操作者、当前操作、步骤和 revision。
 - 先手/后手已 BAN 与已 PICK 角色。
 - 可操作角色和不可操作角色。
@@ -116,9 +117,9 @@ BP 页展示：
 ```mermaid
 flowchart LR
   First[先手网页] -->|ACTION_REQUEST| Host[XQB-BPbox\n权威节点]
-  Host -->|STATE_UPDATE| Blue
+  Host -->|STATE_UPDATE| First
   Second[后手网页] -->|ACTION_REQUEST| Host
-  Host -->|STATE_UPDATE| Red
+  Host -->|STATE_UPDATE| Second
 ```
 
 WebRTC 建连时需要信令服务交换 offer、answer 和 ICE candidate；建连后，正常 BP 数据不应绕行信令服务器：
@@ -142,7 +143,7 @@ sequenceDiagram
 
 ```ts
 interface RemoteBpConnection {
-  connect(options: RemoteBpConnectOptions): Promise<void>;
+  connect(options: RemoteBpConnectOptions): Promise<RemoteBpConnectResult>;
   disconnect(): Promise<void>;
   sendAction(action: BpAction): Promise<void>;
   requestState(lastKnownRevision?: number): Promise<void>;
@@ -162,17 +163,11 @@ interface RemoteBpConnection {
 - `assetReceived`
 - `error`
 
-未来新增 `WebRtcRemoteBpConnection` 时，它应实现同一接口，并负责：
+现有 `WebRtcRemoteBpConnection` 已实现该接口，负责房间信令和 BP 消息收发。根目录 `shared/remoteBpRtc.ts` 统一处理 PeerConnection 生命周期、串行 SDP 协商、Candidate 缓存、ICE Restart 和超时；桌面端的传输适配器复用同一实现。
 
-1. 通过独立的 Signaling Client 完成 SDP/ICE 交换。
-2. 创建和维护 `RTCPeerConnection`。
-3. 打开 `bp-control` 与 `bp-assets` DataChannel。
-4. 将接口方法序列化为 `ClientMessage`。
-5. 将房主消息解析、校验后转成接口事件。
-6. 维护 `connecting / connected / reconnecting / failed` 状态。
-7. 处理 Ping、ICE Restart、自动重连和最后已知 revision。
+当前使用一个名为 `xqb-remote-bp` 的有序 DataChannel，控制与图片分片共用通道。`connect()` 返回信令服务器确认的 `roomId`、`sessionId` 和 `assignedSide`，不是仅返回空值。
 
-`src/services/createRemoteBpConnection.ts` 是唯一运行模式选择点。未来只需让 `webrtc` 分支返回真实实现；React 页面无需变化。
+`src/services/createRemoteBpConnection.ts` 根据配置选择 `mock` 或 `webrtc` 实现，React 页面通过同一接口使用连接。
 
 ## 7. 网络协议
 
@@ -181,7 +176,7 @@ interface RemoteBpConnection {
 ```ts
 interface ProtocolEnvelope<TType, TPayload> {
   type: TType;
-  protocolVersion: "1.1.1";
+  protocolVersion: "1.2.1";
   messageId: string;
   requestId?: string;
   sentAt: string;
@@ -193,8 +188,6 @@ interface ProtocolEnvelope<TType, TPayload> {
 
 | Type             | 用途                                  |
 | ---------------- | ------------------------------------- |
-| `HELLO`          | 声明客户端版本和能力                  |
-| `JOIN`           | 请求以先手/后手身份和展示名称加入房间 |
 | `ACTION_REQUEST` | 提交一个 `BpAction`                   |
 | `STATE_REQUEST`  | 请求完整状态或重连恢复                |
 | `ASSET_REQUEST`  | 请求缓存中缺失的 assetId              |
@@ -204,22 +197,25 @@ interface ProtocolEnvelope<TType, TPayload> {
 
 | Type             | 用途                    |
 | ---------------- | ----------------------- |
-| `WELCOME`        | 确认会话、房间与身份    |
 | `INITIAL_STATE`  | 下发完整初始状态        |
 | `STATE_UPDATE`   | 下发新的权威状态        |
 | `ACTION_RESULT`  | 明确接受或拒绝请求      |
 | `ASSET_MANIFEST` | 下发资源清单            |
-| `ASSET_START`    | 声明二进制传输开始      |
+| `ASSET_START`    | 声明图片分片传输开始    |
 | `ASSET_CHUNK`    | 传输资源分片            |
 | `ASSET_COMPLETE` | 声明资源传输完成和 hash |
 | `PONG`           | 回应 Ping               |
+| `KICKED`         | 房主踢出选手            |
+| `ROOM_CLOSED`    | 房主关闭房间            |
 | `ERROR`          | 协议、会话或传输错误    |
+
+协议常量中仍保留 `HELLO`、`JOIN`、`WELCOME`，但当前真实 DataChannel 链路不交换这三类消息。加入和身份确认走 WebSocket 的 `JOIN_ROOM` / `ROOM_JOINED`，随后通过 `PEER_READY` 开始 SDP 协商。信令服务器也会发送踢出、关闭房间等终止通知。
 
 关键字段：
 
 - `protocolVersion`：在双方不兼容时尽早拒绝，避免错误解释消息。
 - `messageId`：每条消息的唯一标识，用于追踪和排错。
-- `requestId`：将响应关联到请求；房主可用于幂等和重复请求检测。
+- `requestId`：可选的请求关联字段；当前 BP 动作的幂等和结果匹配使用 payload 内的 `actionId`。
 - `revision`：权威状态的单调递增版本，防止旧包覆盖新状态，并支持乱序处理、状态恢复和重连。
 
 当前控制与图片分片共用 ordered DataChannel。`ASSET_CHUNK.data` 是单个原始 128 KiB 分片的 Base64，单消息仍受 512 KiB 上限约束；发送队列通过 `bufferedAmount` 实施背压。后续如果加入视频等大资源，应改用独立二进制通道。
@@ -269,10 +265,10 @@ Mock 也遵循该边界。Store 不会在发送请求后把角色直接写进 ba
 状态同步规则：
 
 1. 首次连接接收 `INITIAL_STATE`。
-2. 每个合法操作后房主生成新 revision，并广播 `STATE_UPDATE`。
+2. 每次实际改变状态的合法操作推进 revision，并广播 `STATE_UPDATE`。
 3. Store 忽略 revision 小于当前 revision 的旧状态。
-4. revision 不匹配的动作由房主返回 `STALE_REVISION`，网页请求完整状态后再操作。
-5. 重连时网页携带最后 revision；房主可以下发增量或直接下发最新完整状态。
+4. revision 不匹配的动作由房主返回 `REVISION_CONFLICT`，并向该选手补发最新完整状态。
+5. 重连成功后网页请求完整状态；`STATE_REQUEST` 支持可选的 `lastKnownRevision`，当前房主始终返回最新完整状态，没有增量 patch 实现。
 
 当前项目采用“完整小 DTO + revision”的简单方案。状态体量足够小时，比过早实现复杂 patch 协议更安全。
 
@@ -317,14 +313,14 @@ sequenceDiagram
 桌面端已经增加独立 Host 层，且没有把 WebRTC 逻辑放进 `ConsolePage.tsx`。`RemoteBpHost` 当前负责：
 
 - 创建和关闭房间。
-- 保存 Blue Peer 与 Red Peer 的身份和连接状态占位。
+- 保存先手、后手选手的身份和实际连接状态。
 - 接收、去重和追踪 `ACTION_REQUEST`。
 - 调用 BP Action Adapter。
 - 在状态变化后广播 `STATE_UPDATE`。
 - 提供 AssetManifest 和资源数据。
-- 维护 Mock 生命周期和必要的房主 UI 状态。
+- 通过 Mock 或真实 WebRTC Transport 维护房间生命周期与房主 UI 状态。
 
-身份抢占、HELLO/JOIN、protocolVersion、STATE_REQUEST、Ping、重连与 ICE 状态仍待真实传输阶段实现。
+身份占用由信令服务器校验；真实传输已实现业务协议版本校验、STATE_REQUEST、Ping、信令恢复与 ICE 状态处理。选手被踢出或房间关闭后停止自动重连。
 
 房主必须检查：
 
@@ -333,7 +329,7 @@ sequenceDiagram
 - 目标类型和角色是否可选。
 - 角色是否已被 Pick、Ban、保护或占用。
 - `expectedRevision` 是否等于当前 revision。
-- `actionId` / `requestId` 是否重复。
+- `actionId` 是否重复。
 - PROTECT / BORROW 等双目标规则是否满足。
 
 ### BP Action Adapter
@@ -366,14 +362,15 @@ flowchart TD
   Serialize --> Broadcast[广播 STATE_UPDATE]
 ```
 
-本地 BAN、PICK、PROTECT、BORROW 已通过该入口再调用原有 BP Runtime 更新逻辑；SELECT、DESELECT、CONFIRM 已由 Dispatcher 支持，供远程流程使用。撤回、清空、流程切换、读取结果仍保留房主管理兼容链，并在 Mock 房间开启时显式推进权威 revision。
+本地 BAN、PICK、PROTECT、BORROW 已通过该入口再调用原有 BP Runtime 更新逻辑；SELECT、DESELECT、CONFIRM 已由 Dispatcher 支持，供远程流程使用。撤回、清空、流程切换、读取结果仍保留房主管理兼容链，并在远程房间开启时推进权威 revision、同步网页。
 
 ### Asset Provider
 
 桌面端已经提供：
 
 ```ts
-getAssetManifest(): Promise<AssetManifest>
+getManifest(): Promise<AssetManifest>
+getAssetManifest(assetId: string): Promise<AssetManifestEntry>
 getAsset(assetId: string): Promise<{ descriptor: AssetManifestEntry; data: Uint8Array }>
 ```
 
@@ -393,31 +390,20 @@ Provider 维护受控的 assetId → 本地资源映射，只允许角色的 `av
 
 ## 12. WebRTC 接入状态与后续优化
 
-当前 1–7 与基础版 9 已完成；后续主要是生产网络和恢复能力：
+WebSocket 房间系统、真实 DataChannel、权威 BP 状态与资源传输已实现。当前源码还包含 Candidate 缓存、就绪握手、协商轮次隔离、有限 ICE Restart 和信令恢复，需要 BPbox、网页与信令服务配套更新。
 
-1. 实现最小信令服务：房间、身份占用、offer/answer/ICE 转发和超时。
-2. 在 XQB-BPbox 新增 `RemoteBpHost`，不接业务，先建立 PeerConnection。
-3. 在网页新增 `WebRtcRemoteBpConnection` 和 Signaling Client。
-4. 建立 DataChannel，并完成 HELLO / WELCOME / JOIN。
-5. 实现 `bp-control`，跑通 INITIAL_STATE、ACTION_REQUEST、ACTION_RESULT、STATE_UPDATE。
-6. 实现资源传输，跑通 Manifest、缺失请求、Base64 分片、hash 校验和背压。
-7. 配置和测试 STUN。
-8. 配置 TURN；验证严格 NAT、校园网、公司网与移动热点。
-9. 加入断线检测、ICE Restart、自动重连和 revision 恢复。
-10. 进行双玩家、丢包、乱序、延迟、重复请求、大资源和房主退出测试。
-
-控制链路稳定之前，不建议先做大文件或视频传输。
+后续重点是部署生产 TURN、开展真实跨设备多网络测试，以及按需增加选手会话恢复、持久资源缓存或独立资源通道。具体超时、重试次数和诊断字段见[连接层说明](../docs/REMOTE_BP_CONNECTION_RELIABILITY.md)。
 
 ## 13. DataChannel 规划
 
 当前版本使用一个 ordered DataChannel，状态与资源消息共享同一发送队列：
 
-### `bp-control`
+### `xqb-remote-bp`
 
 - JSON 小消息。
 - `ordered: true`。
 - BP 状态、操作、错误、Ping 和 Manifest。
-- 应设置单条消息大小上限和 JSON 深度/字段校验。
+- 已设置 512 KiB 单条消息上限，并校验 envelope、消息类型、payload 和业务字段。
 
 ### 资源消息
 
@@ -466,7 +452,7 @@ VITE_REMOTE_BP_SIGNALING_URL=ws://localhost:8787
 VITE_REMOTE_BP_ICE_SERVERS=[{"urls":["stun:stun.l.google.com:19302"]}]
 ```
 
-如需只体验本地 Mock，可把 Transport 改为 `mock`。当前没有自动公网部署脚本。
+以上是本地联调配置，应放在 `.env.local` 中并重启开发服务；仓库 `.env.example` 显式配置的是公网 WSS。生产构建和 Cloudflare Static Assets 发布流程见[网页 README](./README.md)。如需只体验本地 Mock，可把 Transport 改为 `mock`。
 
 ## 15. 下一阶段 TODO
 
@@ -477,16 +463,18 @@ VITE_REMOTE_BP_ICE_SERVERS=[{"urls":["stun:stun.l.google.com:19302"]}]
 - [x] 确定信令服务房间码生命周期和身份抢占策略。
 - [x] 实现网页 Signaling Client。
 - [x] 实现 `WebRtcRemoteBpConnection`。
-- [x] 完成 `bp-control` 的 runtime schema 校验和消息大小限制。
+- [x] 完成 `xqb-remote-bp` 的 runtime schema 校验和消息大小限制。
 - [x] 完成 Action 幂等表和 revision 冲突处理。
-- [ ] 增加更完整的审计日志。
+- [x] 增加带房间、连接和协商轮次标识的 WebRTC 诊断日志。
 - [x] 实现图片资源分片、背压、size/hash/MIME 校验。
 - [ ] 新增 `IndexedDbAssetCache`。
 - [x] 集中配置 STUN / TURN。
 - [ ] 部署 TURN 并进行多网络环境测试。
-- [x] 实现基础 ICE Restart、房主离线提示和状态恢复请求。
-- [ ] 实现跨信令断线的 session 身份恢复。
-- [ ] 增加协议兼容性、乱序、重复、恶意输入和双玩家端到端测试。
+- [x] 实现 Candidate 缓存、有限 ICE Restart、房主离线提示和状态恢复请求。
+- [x] 实现房主 resumeToken 恢复房间和选手重新加入。
+- [ ] 实现选手跨 WebSocket 重连保持原 sessionId。
+- [x] 增加 Candidate 时序、重复协商、旧连接隔离、信令恢复和超时的模拟回归测试，以及两套真实 WebSocket 信令测试。
+- [ ] 完成真实双玩家跨设备、严格 NAT、校园网和热点联调。
 
 ## 安全边界速查
 

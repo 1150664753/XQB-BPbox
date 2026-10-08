@@ -15,7 +15,7 @@ npm run typecheck
 npm test
 ```
 
-`npm test` 会启动本地 Wrangler runtime，验证创建房间、先后手加入、重复身份拒绝、OFFER/ANSWER/ICE 转发、心跳、房主信令恢复、踢出与补位，以及房主显式关闭房间。
+`npm test` 会启动本地 Wrangler runtime，验证创建房间、先后手加入、重复身份拒绝、OFFER/ANSWER/ICE 转发、就绪握手、Restart 请求、协商标识和旧会话拦截、心跳、房主信令恢复、踢出与补位，以及房主显式关闭房间。
 
 ## 部署
 
@@ -50,10 +50,12 @@ wss://signal.xqbbp.dpdns.org
 https://signal.xqbbp.dpdns.org/health
 ```
 
-房主连接基础地址，由 Worker 生成房间码；选手连接时使用 `?roomId=ABCDEFG` 定位相同 Durable Object。房间没有固定空闲 TTL，房主与选手每 20 秒发送轻量信令心跳。房主信令 WebSocket 异常断开时房间与选手槽位保留，可使用仅房主持有的 `resumeToken` 恢复；只有房主发送 `LEAVE_ROOM` 才会广播 `ROOM_CLOSED` 并释放房间。
+房主连接基础地址，由 Worker 生成房间码；选手连接时使用 `?roomId=ABCDEF` 定位相同 Durable Object。房间没有固定空闲 TTL，房主与选手每 20 秒发送轻量信令心跳。房主信令 WebSocket 异常断开时房间与选手槽位保留，可使用仅房主持有的 `resumeToken` 恢复；只有房主发送 `LEAVE_ROOM` 才会广播 `ROOM_CLOSED` 并释放房间。
 
-新增的信令消息包括 `RESUME_ROOM`、`KICK_PEER`、`HEARTBEAT`、`ROOM_RESUMED`、`HOST_DISCONNECTED` 和 `HOST_RECONNECTED`。踢出只释放指定的 `FIRST` 或 `SECOND` 槽位，不影响另一名选手。
+房间信令包括 `RESUME_ROOM`、`KICK_PEER`、`HEARTBEAT`、`ROOM_RESUMED`、`HOST_DISCONNECTED` 和 `HOST_RECONNECTED`。当前源码另外支持 `PEER_READY`、`ICE_RESTART_REQUEST`，并转发 `connectionId` / `negotiationId`，根据已验证身份填写来源与目标会话标识。踢出只释放指定的 `FIRST` 或 `SECOND` 槽位，不影响另一名选手。
 
-网页发布地址为 `https://xqbbp.dpdns.org`。生产构建默认使用公网 WSS；本地开发默认使用 `ws://localhost:8787`，也可以在 `.env.local` 中通过 `VITE_REMOTE_BP_SIGNALING_URL` 显式覆盖。
+选手网页入口为 [https://bp.xqbbp.dpdns.org/room](https://bp.xqbbp.dpdns.org/room)。网页在没有环境变量覆盖时，生产构建使用公网 WSS，开发模式使用 `ws://localhost:8787`。网页 `.env.example` 显式配置公网地址，复制后如需本地联调，应同步修改 `VITE_REMOTE_BP_SIGNALING_URL`。
+
+当前源码的就绪握手和 ICE Restart 扩展需要信令服务、BPbox 与网页配套更新，详见[连接层说明](../docs/REMOTE_BP_CONNECTION_RELIABILITY.md)。
 
 原 Node.js 本地信令服务仍可通过 `npm start` 启动，并使用 `npm run test:local` 自检。

@@ -11,8 +11,9 @@ XQB-BPBox 是一款为《星穹杯》开发，面向《崩坏：星穹铁道》�
 - 配置展示页背景、槽位布局、页面变化、唱名视频和 Pick/Ban 等特效。
 - 使用独立预览窗口检查展示效果，并在 BP 操作时同步独立展示窗口。
 - 执行并记录 BP 流程，将结果保存到本地，供后续读取与复盘。
+- 创建远程 BP 房间，让先手和后手选手通过网页预选、取消预选并确认操作。
 - 使用配音轴将音频、BP 流程和已保存结果对齐，按时间点驱动展示页推进。
-- 通过 `XQB-BPbox/assets/`、`XQB-BPbox/config/` 和 `XQB-BPbox/results/` 目录管理素材、配置和结果。
+- 通过数据目录下的 `assets/`、`config/` 和 `results/` 管理素材、配置和结果。开发模式通常位于 `XQB-BPbox/`，安装版位于 Electron 的用户数据目录；可通过界面中的“目录”按钮定位。
 
 ## 下载与安装
 
@@ -31,6 +32,14 @@ XQB-BPBox 是一款为《星穹杯》开发，面向《崩坏：星穹铁道》�
 
 详细字段、素材命名和常见问题以现有[操作指南](./操作指南.md)为准，README 不重复展开完整教程。
 
+## 远程 BP 选手入口
+
+选手访问：[https://bp.xqbbp.dpdns.org/room](https://bp.xqbbp.dpdns.org/room)。
+
+房主先在 BPbox 的“开始BP”→“远程 BP”中创建房间，将 6 位房间号发给选手。选手在网页中填写房间号和队伍或选手名称，选择先手／后手后加入。也可以分享预填房间号的链接，例如 [ABCDEF 房间入口](https://bp.xqbbp.dpdns.org/room/ABCDEF)（示例房间号，需替换为实际房间号）。
+
+完整步骤见[操作指南的远程 BP 章节](./操作指南.md#22-远程-bp)。网页地址用于选手操作，`wss://signal.xqbbp.dpdns.org` 用于程序信令通信，两者用途不同。
+
 ## 源码使用
 
 本项目采用源码公开（Source Available）的发布方式。你可以在遵守 [LICENSE](./LICENSE) 的前提下，为个人学习、研究和非商业用途查看、运行和修改源代码；这不表示项目采用 OSI 认可的开源许可证。
@@ -42,9 +51,14 @@ XQB-BPbox/src/main/          Electron 主进程
 XQB-BPbox/src/preload/       预加载脚本与渲染进程桥接
 XQB-BPbox/src/renderer/src/  React 界面、展示页与预览页
 XQB-BPbox/src/shared/        主进程与渲染进程共用类型和逻辑
+XBQ-BPweb/                  远程 BP 选手网页
+remote-bp-signaling/         Node.js / Cloudflare WebSocket 信令
+shared/                     桌面端和网页共用的 WebRTC 连接生命周期
 ```
 
-安装依赖并启动开发环境：
+完整联调使用 Node.js 22.12 或更高版本。请保留完整仓库目录，桌面端和网页均依赖仓库根目录的 `shared/`；三个工程分别安装依赖。
+
+安装桌面端依赖并启动开发环境：
 
 ```bash
 cd XQB-BPbox
@@ -57,6 +71,8 @@ npm run dev
 ```bash
 npm run typecheck
 npm run lint
+npm run test:remote-bp
+npm run test:webrtc
 npm run build:win
 ```
 
@@ -99,3 +115,7 @@ macOS 和 Linux 构建脚本也已在 `XQB-BPbox/package.json` 中提供。自�
 - [商业授权说明](./COMMERCIAL_LICENSE.md)
 - [版本变更记录](./CHANGELOG.md)
 - [项目结构指南](./PROJECT_GUIDE.md)
+- [操作指南](./操作指南.md)
+- [选手网页运行与部署](./XBQ-BPweb/README.md)
+- [信令服务运行与部署](./remote-bp-signaling/README.md)
+- [WebRTC 连接、超时和配套更新说明](./docs/REMOTE_BP_CONNECTION_RELIABILITY.md)

@@ -1,7 +1,7 @@
 {
   "name": "xqb-bpbox",
   "productName": "XQB-BPBox",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "An Electron application with React and TypeScript",
   "main": "./out/main/index.js",
   "author": "example.com",
@@ -21,7 +21,8 @@
     "build:win": "npm run build && electron-builder --win",
     "release:win": "npm run build && electron-builder --win --publish always",
     "build:mac": "electron-vite build && electron-builder --mac",
-    "build:linux": "electron-vite build && electron-builder --linux"
+    "build:linux": "electron-vite build && electron-builder --linux",
+    "test:webrtc": "node scripts/webrtc-self-check.cjs"
   },
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.2",

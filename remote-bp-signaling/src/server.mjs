@@ -17,6 +17,8 @@ const CLIENT_MESSAGE_TYPES = new Set([
   "OFFER",
   "ANSWER",
   "ICE_CANDIDATE",
+  "PEER_READY",
+  "ICE_RESTART_REQUEST",
 ]);
 const PLAYER_ROLES = new Set(["FIRST", "SECOND"]);
 const ALL_ROLES = new Set(["HOST", "FIRST", "SECOND"]);
@@ -77,6 +79,27 @@ function parseCandidate(value) {
     sdpMLineIndex: value.sdpMLineIndex ?? null,
     usernameFragment: value.usernameFragment ?? null,
   };
+}
+
+function relayMetadata(payload) {
+  // Metadata is optional only for legacy clients. New peers require it and ignore legacy SDP.
+  const metadata = {};
+  for (const key of ["connectionId", "targetSessionId"]) {
+    if (payload[key] !== undefined) {
+      if (!isString(payload[key], 1, 128))
+        throw new Error("INVALID_RELAY_METADATA");
+      metadata[key] = payload[key];
+    }
+  }
+  if (payload.negotiationId !== undefined) {
+    if (
+      !Number.isSafeInteger(payload.negotiationId) ||
+      Number(payload.negotiationId) < 0
+    )
+      throw new Error("INVALID_RELAY_METADATA");
+    metadata.negotiationId = payload.negotiationId;
+  }
+  return metadata;
 }
 
 export function parseClientMessage(raw) {
@@ -165,6 +188,20 @@ export function parseClientMessage(raw) {
           sentAt: isString(payload.sentAt, 10, 64) ? payload.sentAt : "",
         },
       };
+    case "PEER_READY":
+    case "ICE_RESTART_REQUEST": {
+      if (
+        payload.targetRole !== "HOST" ||
+        !isString(payload.connectionId, 1, 128) ||
+        !Number.isSafeInteger(payload.negotiationId)
+      )
+        throw new Error("INVALID_RELAY_METADATA");
+      return {
+        type: value.type,
+        requestId: value.requestId,
+        payload: { targetRole: "HOST", ...relayMetadata(payload) },
+      };
+    }
     case "OFFER":
     case "ANSWER": {
       if (!ALL_ROLES.has(payload.targetRole))
@@ -177,7 +214,11 @@ export function parseClientMessage(raw) {
       return {
         type: value.type,
         requestId: value.requestId,
-        payload: { targetRole: payload.targetRole, description },
+        payload: {
+          targetRole: payload.targetRole,
+          description,
+          ...relayMetadata(payload),
+        },
       };
     }
     case "ICE_CANDIDATE": {
@@ -188,7 +229,11 @@ export function parseClientMessage(raw) {
       return {
         type: value.type,
         requestId: value.requestId,
-        payload: { targetRole: payload.targetRole, candidate },
+        payload: {
+          targetRole: payload.targetRole,
+          candidate,
+          ...relayMetadata(payload),
+        },
       };
     }
   }
@@ -509,7 +554,9 @@ export function createSignalingServer(options = {}) {
             return;
           case "OFFER":
           case "ANSWER":
-          case "ICE_CANDIDATE": {
+          case "ICE_CANDIDATE":
+          case "PEER_READY":
+          case "ICE_RESTART_REQUEST": {
             const { identity, target } = resolveRelayTarget(
               socket,
               message.payload.targetRole,
@@ -517,19 +564,31 @@ export function createSignalingServer(options = {}) {
             if (message.type === "OFFER" && identity.role !== "HOST") {
               throw new Error("INVALID_RELAY_DIRECTION");
             }
-            if (message.type === "ANSWER" && identity.role === "HOST") {
+            if (
+              ["ANSWER", "PEER_READY", "ICE_RESTART_REQUEST"].includes(
+                message.type,
+              ) &&
+              identity.role === "HOST"
+            ) {
               throw new Error("INVALID_RELAY_DIRECTION");
             }
-            const relayPayload =
-              message.type === "ICE_CANDIDATE"
-                ? {
-                    fromRole: identity.role,
-                    candidate: message.payload.candidate,
-                  }
-                : {
-                    fromRole: identity.role,
-                    description: message.payload.description,
-                  };
+            if (
+              message.payload.targetSessionId !== undefined &&
+              message.payload.targetSessionId !== target.sessionId
+            )
+              throw new Error("STALE_SIGNAL");
+            const relayPayload = {
+              ...relayMetadata(message.payload),
+              fromRole: identity.role,
+              fromSessionId: identity.sessionId,
+              targetSessionId: target.sessionId,
+              roomId: identity.roomCode,
+              ...(message.type === "ICE_CANDIDATE"
+                ? { candidate: message.payload.candidate }
+                : message.type === "OFFER" || message.type === "ANSWER"
+                  ? { description: message.payload.description }
+                  : {}),
+            };
             send(target.socket, message.type, relayPayload, message.requestId);
             return;
           }

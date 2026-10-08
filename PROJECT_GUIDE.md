@@ -1,6 +1,6 @@
 # XQB-BPbox 项目指南
 
-> 当前软件版本：`1.2.2`
+> 当前软件版本：`1.2.3`
 >
 > 本文同时面向第一次使用 XQB-BPbox 的用户和参与维护的开发者。更细的素材字段与界面截图见[《操作指南》](./操作指南.md)。
 
@@ -142,7 +142,7 @@ BPbox 向双方网页和展示窗口同步最终 BP 状态
 
 ### 源码开发启动
 
-完整项目包含三个可独立安装依赖的 Node.js 工程。若需要同时开发信令服务，使用 Node.js 22 或更高版本。
+完整项目包含三个分别安装依赖的 Node.js 工程。完整联调使用 Node.js 22.12 或更高版本，同时保留仓库根目录的 `shared/`，供桌面端和网页构建使用。
 
 启动 BPbox：
 
@@ -170,13 +170,15 @@ npm start
 
 ### 远程 BP 本地联调
 
-网页开发模式默认连接 `ws://localhost:8787`，BPbox 默认连接公网信令地址。使用本地信令服务联调时，在 `XQB-BPbox/.env.local` 中配置：
+未配置环境变量时，网页开发模式默认连接 `ws://localhost:8787`，BPbox 默认连接公网信令地址。两端的 `.env.example` 都显式填写了公网信令地址，直接复制后会覆盖网页的本地默认值。使用本地信令服务联调时，在 `XQB-BPbox/.env.local` 中配置：
 
 ```text
 VITE_REMOTE_BP_HOST_TRANSPORT=webrtc
 VITE_REMOTE_BP_SIGNALING_URL=ws://localhost:8787
 VITE_REMOTE_BP_ICE_SERVERS=[{"urls":["stun:stun.l.google.com:19302"]}]
 ```
+
+网页端若复制过 `.env.example`，也需在 `XBQ-BPweb/.env.local` 中把 `VITE_REMOTE_BP_SIGNALING_URL` 改为 `ws://localhost:8787`。修改环境变量后重启开发服务。
 
 跨设备局域网联调时，还要把网页端和 BPbox 的信令地址都改为选手设备能够访问的局域网地址，并允许防火墙访问对应端口。若只需离线演示网页或自检传输层，可把相应 Transport 配置为 `mock`。
 
@@ -268,7 +270,7 @@ PICK/BAN 特效设置：
 3. 点击“直播 BP”，确认独立展示窗口已经打开且当前阶段正确。
 4. 在“远程 BP”卡片中点击“创建远程 BP”。
 5. 等待信令状态显示为“已连接”，复制服务器生成的 6 位房间号。
-6. 把[远程 BP 网站](https://xqbbp.dpdns.org)和房间号发送给选手。
+6. 把[远程 BP 网站](https://bp.xqbbp.dpdns.org/room)和房间号发送给选手。
 7. 等待选手加入，确认先手与后手均显示“已连接”。
 8. 开始 BP。网页预选会同步到 BPbox，网页确认后由 BPbox 校验并写入正式结果。
 9. 如需更换某名选手，使用其状态行中的踢出按钮释放对应槽位。
@@ -309,9 +311,9 @@ PICK/BAN 特效设置：
 
 ### 访问地址
 
-当前公开网站地址：[https://xqbbp.dpdns.org](https://xqbbp.dpdns.org)
+当前公开网站地址：[https://bp.xqbbp.dpdns.org/room](https://bp.xqbbp.dpdns.org/room)
 
-也可以使用 `https://xqbbp.dpdns.org/room/<房间号>` 预填房间号。该地址来自仓库中的 `remote-bp-signaling/README.md` 和 `docs/REMOTE_BP_WEBRTC_STAGE.md`；网页生产配置连接的公网信令地址为 `wss://signal.xqbbp.dpdns.org`。
+也可以使用 `https://bp.xqbbp.dpdns.org/room/<房间号>` 预填房间号。网页生产配置连接的公网信令地址为 `wss://signal.xqbbp.dpdns.org`。
 
 ### 1. 获取房间信息
 
@@ -389,6 +391,7 @@ XQB-BP/
 │  └─ results/               运行时生成的结果目录
 ├─ XBQ-BPweb/                远程 BP 选手网页项目
 ├─ remote-bp-signaling/      本地与 Cloudflare Worker 信令服务
+├─ shared/                   桌面端与网页共用的 WebRTC 连接生命周期
 ├─ docs/                     开发记录和文档图片
 ├─ 操作指南.md               带截图的详细用户教程
 ├─ README.md                 项目入口、授权和快速启动
@@ -501,7 +504,7 @@ VITE_REMOTE_BP_ICE_SERVERS=[{"urls":["stun:stun.l.google.com:19302"]}]
 
 - WebSocket：`wss://signal.xqbbp.dpdns.org`
 - 健康检查：`https://signal.xqbbp.dpdns.org/health`
-- 选手网站：`https://xqbbp.dpdns.org`
+- 选手网站：`https://bp.xqbbp.dpdns.org/room`
 
 ### 常见开发任务定位
 
@@ -511,7 +514,8 @@ VITE_REMOTE_BP_ICE_SERVERS=[{"urls":["stun:stun.l.google.com:19302"]}]
 - 修改预览：`PreviewPage.tsx`、`DisplayCanvas.tsx`、`src/main/ipc/bp.ts`。
 - 修改远程房间卡片：`components/remoteBp/RemoteBpPanel.tsx`、`styles/remote-bp.css`。
 - 修改远程状态或 Action：`src/shared/remoteBp/types.ts`、`dispatcher.ts`、`serializer.ts`、`validation.ts`。
-- 修改 BPbox WebRTC：`services/remoteBp/WebRtcRemoteHostTransport.ts`。
+- 修改两端共用的 ICE 缓存、协商顺序、Restart 和超时：根目录 `shared/remoteBpRtc.ts`。
+- 修改 BPbox 信令与传输适配：`services/remoteBp/WebRtcRemoteHostTransport.ts`。
 - 修改网页连接与重连：`XBQ-BPweb/src/services/WebRtcRemoteBpConnection.ts`。
 - 修改网页操作状态：`XBQ-BPweb/src/stores/RemoteBpSessionStore.ts` 和 `src/pages/`。
 - 修改资源允许范围：`src/main/remoteBp/projectRemoteAssetProvider.ts`、`RemoteAssetProvider.ts`。
@@ -528,6 +532,7 @@ cd XQB-BPbox
 npm run typecheck
 npm run lint
 npm run test:remote-bp
+npm run test:webrtc
 npm run build:win
 ```
 
@@ -551,7 +556,7 @@ npm test
 
 ### 当前实现边界
 
-- 远程协议版本为 `1.2.1`，BPbox 与网页端需要使用兼容版本。
+- BP 业务协议版本为 `1.2.1`。当前源码的信令层新增 `PEER_READY`、`ICE_RESTART_REQUEST` 和协商标识，BPbox、网页与信令服务需要配套更新，不能仅凭业务协议版本相同判断连接层兼容性。
 - 公网信令和网页地址已经配置，项目目前没有生产 TURN 服务。
 - 网页当前通过 `SELECT`、`DESELECT` 和 `CONFIRM` 完成交互；PICK/BAN 是权威流程阶段和最终状态，不是网页直接写入。
 - 图片资源使用同一有序 DataChannel 的 Base64 JSON 分片，尚未拆分独立二进制资源通道。
@@ -580,6 +585,13 @@ npm test
 
 ## 版本记录
 
+### 1.2.3
+
+- 修复远程 BP 建连时序：增加双方就绪握手、串行信令处理、Candidate 缓存及新旧连接隔离。
+- 统一连接状态和分阶段超时，完善有次数上限的 ICE Restart、信令恢复与诊断日志。
+- 补充连接层自检和信令回归测试，更新选手网站地址及远程 BP 文档。
+- BP 业务协议继续沿用 `1.2.1`；本次连接层更新需要 BPbox、选手网页和信令服务配套部署。
+
 ### 1.2.2
 
 - 完善远程 BP 文档。
@@ -587,7 +599,7 @@ npm test
 - 优化操作手册结构。
 - 增加 Markdown 目录。
 
-本次应用版本升级不改变远程 BP 协议版本；协议仍为 `1.2.1`。先手/后手连接状态、分侧踢出、权威 `WAIT`、信令与 DataChannel 心跳、房主房间恢复和网页重连等能力继续保持兼容。完整历史见 [CHANGELOG.md](./CHANGELOG.md)。
+1.2.2 发布时沿用 `1.2.1` BP 业务协议，并保留先手/后手连接状态、分侧踢出、权威 `WAIT`、心跳和房间恢复能力。当前源码后续的连接层更新需要三端配套发布，详见前述“当前实现边界”。完整历史见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ## 相关文档
 
@@ -597,5 +609,5 @@ npm test
 - [XBQ-BPweb/README.md](./XBQ-BPweb/README.md)：网页端运行与部署。
 - [XBQ-BPweb/WEB_GUIDE.md](./XBQ-BPweb/WEB_GUIDE.md)：网页端协议和代码分层说明。
 - [remote-bp-signaling/README.md](./remote-bp-signaling/README.md)：信令服务、部署地址和房间生命周期。
-- [docs/REMOTE_BP_WEBRTC_STAGE.md](./docs/REMOTE_BP_WEBRTC_STAGE.md)：远程 BP 1.2.1 实现记录和联调步骤。
+- [docs/REMOTE_BP_CONNECTION_RELIABILITY.md](./docs/REMOTE_BP_CONNECTION_RELIABILITY.md)：当前源码的连接生命周期、Candidate 缓存、Restart、超时和配套更新说明。
 - [CHANGELOG.md](./CHANGELOG.md)：版本变更记录。

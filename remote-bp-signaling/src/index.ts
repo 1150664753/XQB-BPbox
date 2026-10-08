@@ -18,6 +18,8 @@ const CLIENT_MESSAGE_TYPES = new Set([
   "OFFER",
   "ANSWER",
   "ICE_CANDIDATE",
+  "PEER_READY",
+  "ICE_RESTART_REQUEST",
 ]);
 const PLAYER_ROLES = new Set(["FIRST", "SECOND"]);
 const ALL_ROLES = new Set(["HOST", "FIRST", "SECOND"]);
@@ -131,6 +133,29 @@ function parseCandidate(value: unknown): IceCandidate | null {
   };
 }
 
+function relayMetadata(
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  // Metadata is optional only for legacy clients. New peers require it and ignore legacy SDP.
+  const metadata: Record<string, unknown> = {};
+  for (const key of ["connectionId", "targetSessionId"]) {
+    if (payload[key] !== undefined) {
+      if (!isString(payload[key], 1, 128))
+        throw new Error("INVALID_RELAY_METADATA");
+      metadata[key] = payload[key];
+    }
+  }
+  if (payload.negotiationId !== undefined) {
+    if (
+      !Number.isSafeInteger(payload.negotiationId) ||
+      Number(payload.negotiationId) < 0
+    )
+      throw new Error("INVALID_RELAY_METADATA");
+    metadata.negotiationId = payload.negotiationId;
+  }
+  return metadata;
+}
+
 function parseClientMessage(raw: string): SignalingMessage {
   if (new TextEncoder().encode(raw).byteLength > MAX_SIGNALING_MESSAGE_BYTES) {
     throw new Error("MESSAGE_TOO_LARGE");
@@ -225,6 +250,20 @@ function parseClientMessage(raw: string): SignalingMessage {
           sentAt: isString(payload.sentAt, 10, 64) ? payload.sentAt : "",
         },
       };
+    case "PEER_READY":
+    case "ICE_RESTART_REQUEST": {
+      if (
+        payload.targetRole !== "HOST" ||
+        !isString(payload.connectionId, 1, 128) ||
+        !Number.isSafeInteger(payload.negotiationId)
+      )
+        throw new Error("INVALID_RELAY_METADATA");
+      return {
+        type: value.type,
+        ...(value.requestId ? { requestId: value.requestId } : {}),
+        payload: { targetRole: "HOST", ...relayMetadata(payload) },
+      };
+    }
     case "OFFER":
     case "ANSWER": {
       if (!ALL_ROLES.has(String(payload.targetRole))) {
@@ -238,7 +277,11 @@ function parseClientMessage(raw: string): SignalingMessage {
       return {
         type: value.type,
         ...(value.requestId ? { requestId: value.requestId } : {}),
-        payload: { targetRole: payload.targetRole, description },
+        payload: {
+          targetRole: payload.targetRole,
+          description,
+          ...relayMetadata(payload),
+        },
       };
     }
     case "ICE_CANDIDATE": {
@@ -250,7 +293,11 @@ function parseClientMessage(raw: string): SignalingMessage {
       return {
         type: value.type,
         ...(value.requestId ? { requestId: value.requestId } : {}),
-        payload: { targetRole: payload.targetRole, candidate },
+        payload: {
+          targetRole: payload.targetRole,
+          candidate,
+          ...relayMetadata(payload),
+        },
       };
     }
     default:
@@ -326,6 +373,7 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 export class BpRoom extends DurableObject<Env> {
+  private readonly messageChains = new WeakMap<WebSocket, Promise<void>>();
   async fetch(request: Request): Promise<Response> {
     if (
       request.method !== "GET" ||
@@ -387,6 +435,18 @@ export class BpRoom extends DurableObject<Env> {
     socket: WebSocket,
     data: string | ArrayBuffer,
   ): Promise<void> {
+    const previous = this.messageChains.get(socket) ?? Promise.resolve();
+    const next = previous
+      .catch(() => undefined)
+      .then(() => this.handleSocketMessage(socket, data));
+    this.messageChains.set(socket, next);
+    await next;
+  }
+
+  private async handleSocketMessage(
+    socket: WebSocket,
+    data: string | ArrayBuffer,
+  ): Promise<void> {
     if (typeof data !== "string") {
       this.sendError(
         socket,
@@ -434,6 +494,8 @@ export class BpRoom extends DurableObject<Env> {
         case "OFFER":
         case "ANSWER":
         case "ICE_CANDIDATE":
+        case "PEER_READY":
+        case "ICE_RESTART_REQUEST":
           this.relay(socket, message);
           return;
       }
@@ -455,10 +517,12 @@ export class BpRoom extends DurableObject<Env> {
     _reason: string,
     _wasClean: boolean,
   ): Promise<void> {
+    await this.messageChains.get(socket)?.catch(() => undefined);
     await this.leave(socket, "disconnected");
   }
 
   async webSocketError(socket: WebSocket, _error: unknown): Promise<void> {
+    await this.messageChains.get(socket)?.catch(() => undefined);
     await this.leave(socket, "connection-error");
     try {
       socket.close(1011, "signaling connection error");
@@ -683,17 +747,38 @@ export class BpRoom extends DurableObject<Env> {
     if (message.type === "OFFER" && sender.role !== "HOST") {
       throw new Error("INVALID_RELAY_DIRECTION");
     }
-    if (message.type === "ANSWER" && sender.role === "HOST") {
+    if (
+      ["ANSWER", "PEER_READY", "ICE_RESTART_REQUEST"].includes(message.type) &&
+      sender.role === "HOST"
+    ) {
       throw new Error("INVALID_RELAY_DIRECTION");
     }
     const target = this.findByRole(targetRole);
     if (!target) throw new Error("PEER_NOT_CONNECTED");
+    const targetIdentity = this.requireAttachment(target);
+    if (
+      message.payload.targetSessionId !== undefined &&
+      message.payload.targetSessionId !== targetIdentity.sessionId
+    )
+      throw new Error("STALE_SIGNAL");
+    const metadata = {
+      ...relayMetadata(message.payload),
+      fromRole: sender.role,
+      fromSessionId: sender.sessionId,
+      targetSessionId: targetIdentity.sessionId,
+      roomId: sender.roomCode,
+    };
     this.send(
       target,
       message.type,
-      message.type === "ICE_CANDIDATE"
-        ? { fromRole: sender.role, candidate: message.payload.candidate }
-        : { fromRole: sender.role, description: message.payload.description },
+      {
+        ...metadata,
+        ...(message.type === "ICE_CANDIDATE"
+          ? { candidate: message.payload.candidate }
+          : message.type === "OFFER" || message.type === "ANSWER"
+            ? { description: message.payload.description }
+            : {}),
+      },
       message.requestId,
     );
   }

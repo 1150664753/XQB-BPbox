@@ -28,7 +28,7 @@ XQB-BPbox 的远程 BP 已接入真实信令与 WebRTC DataChannel，同时保�
 
 远程房间不再因空闲 TTL 销毁。DataChannel 与信令 WebSocket 分别使用独立轻量心跳，心跳不经过 Dispatcher，不改变 revision。信令短断时 Host 使用房间恢复凭证指数退避重连；如果原 DataChannel 仍健康则直接复用。房主可分别踢出先手/后手；踢出和房间关闭都会发布明确终止原因，Web 不会自动重连。直播延迟正在等待 BPbox 额外点击时，权威状态显式发布 `WAIT`。
 
-信令服务器和网页端说明见 [本阶段开发记录](../docs/REMOTE_BP_WEBRTC_STAGE.md)。
+选手访问 [https://bp.xqbbp.dpdns.org/room](https://bp.xqbbp.dpdns.org/room)。信令服务配置见[信令 README](../remote-bp-signaling/README.md)，网页运行与部署见[网页 README](../XBQ-BPweb/README.md)。
 
 ## 配置
 
@@ -47,6 +47,9 @@ BPbox 的开发与生产构建默认都连接公网 WSS，避免本地房间码�
 ```bash
 npm run typecheck
 npm run test:remote-bp
+npm run test:webrtc
 ```
 
 自检覆盖 Dispatcher、Serializer、网络消息运行时校验、Asset Provider 与 Mock Host 端到端链路。
+
+连接生命周期、Candidate 缓存、ICE Restart、超时和配套发布要求见 [连接层修复说明](../docs/REMOTE_BP_CONNECTION_RELIABILITY.md)。

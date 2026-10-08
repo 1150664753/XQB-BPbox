@@ -176,6 +176,94 @@ async function main() {
     assert.equal(joined.payload.role, "FIRST");
     assert.equal(peerJoined.payload.role, "FIRST");
 
+    // Readiness and recovery stay in signaling; BP operation messages are untouched.
+    for (const type of ["PEER_READY", "ICE_RESTART_REQUEST"]) {
+      const readyMessage = nextMessage(host);
+      first.send(
+        JSON.stringify({
+          type,
+          payload: {
+            targetRole: "HOST",
+            connectionId: "connection-test",
+            negotiationId: type === "PEER_READY" ? 0 : 1,
+            fromSessionId: "forged",
+          },
+        }),
+      );
+      const ready = await readyMessage;
+      assert.equal(ready.type, type);
+      assert.equal(ready.payload.connectionId, "connection-test");
+      assert.equal(ready.payload.fromSessionId, joined.payload.sessionId);
+      assert.equal(ready.payload.roomId, created.payload.roomCode);
+    }
+    const staleMessage = nextMessage(host);
+    host.send(
+      JSON.stringify({
+        type: "OFFER",
+        payload: {
+          targetRole: "FIRST",
+          targetSessionId: "previous-seat-session",
+          connectionId: "old-connection",
+          negotiationId: 1,
+          description: { type: "offer", sdp: "stale-sdp" },
+        },
+      }),
+    );
+    assert.equal((await staleMessage).payload.code, "STALE_SIGNAL");
+    const offerAndCandidate = nextMessages(first, 2);
+    host.send(
+      JSON.stringify({
+        type: "OFFER",
+        payload: {
+          targetRole: "FIRST",
+          targetSessionId: joined.payload.sessionId,
+          connectionId: "connection-test",
+          negotiationId: 2,
+          description: { type: "offer", sdp: "restart-sdp" },
+        },
+      }),
+    );
+    host.send(
+      JSON.stringify({
+        type: "ICE_CANDIDATE",
+        payload: {
+          targetRole: "FIRST",
+          targetSessionId: joined.payload.sessionId,
+          connectionId: "connection-test",
+          negotiationId: 2,
+          candidate: { candidate: "restart-candidate", sdpMid: "0" },
+        },
+      }),
+    );
+    const relayed = await offerAndCandidate;
+    assert.deepEqual(
+      relayed.map((message) => message.type),
+      ["OFFER", "ICE_CANDIDATE"],
+    );
+    for (const message of relayed) {
+      assert.equal(message.payload.connectionId, "connection-test");
+      assert.equal(message.payload.negotiationId, 2);
+      assert.equal(message.payload.targetSessionId, joined.payload.sessionId);
+    }
+    const restartAnswer = nextMessage(host);
+    first.send(
+      JSON.stringify({
+        type: "ANSWER",
+        payload: {
+          targetRole: "HOST",
+          connectionId: "connection-test",
+          negotiationId: 2,
+          description: { type: "answer", sdp: "restart-answer" },
+        },
+      }),
+    );
+    const answerWithIdentity = await restartAnswer;
+    assert.equal(answerWithIdentity.payload.negotiationId, 2);
+    assert.equal(
+      answerWithIdentity.payload.fromSessionId,
+      joined.payload.sessionId,
+    );
+
     const duplicate = await connect(roomUrl);
     sockets.push(duplicate);
     const occupiedMessage = nextMessage(duplicate);
