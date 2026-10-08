@@ -80,7 +80,10 @@ export function BpPage({
     state.currentStep?.targetType === "LIGHT_CONE"
       ? ("LIGHT_CONE" as const)
       : ("CHARACTER" as const);
-  const selectedTarget = state.selectionTargets[room.side];
+  const selectedTarget =
+    session.selectionPreview !== undefined
+      ? session.selectionPreview
+      : state.selectionTargets[room.side];
   const selectedId = selectedTarget?.id ?? null;
   const selectedItem =
     selectedTarget?.kind === "LIGHT_CONE"
@@ -136,7 +139,11 @@ export function BpPage({
     showingLightCones ? state.lightConePicks : state.picks
   ).filter((entry) => entry.side === "second");
   const pending = Boolean(session.pendingActionId);
-  const selectionLocked = pending || state.confirmedSides[room.side];
+  const selectionLocked =
+    session.pendingActionKind === "CONFIRM" ||
+    state.confirmedSides[room.side] ||
+    state.waitingForHost ||
+    session.connection.state !== "connected";
   const progressText = state.currentStep
     ? `${state.currentStep.index} / ${state.currentStep.total}`
     : "已完成";
@@ -385,6 +392,9 @@ export function BpPage({
               session.connection.state === "connected"
             }
             pending={pending}
+            syncingSelection={
+              pending && session.pendingActionKind !== "CONFIRM"
+            }
             onConfirm={() => void onConfirm()}
           />
         </section>

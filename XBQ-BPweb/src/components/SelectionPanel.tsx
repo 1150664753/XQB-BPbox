@@ -10,6 +10,7 @@ interface SelectionPanelProps {
   canConfirm: boolean;
   confirmed: boolean;
   pending: boolean;
+  syncingSelection: boolean;
   onConfirm: () => void;
 }
 
@@ -21,6 +22,7 @@ export function SelectionPanel({
   canConfirm,
   confirmed,
   pending,
+  syncingSelection,
   onConfirm,
 }: SelectionPanelProps) {
   const assetId =
@@ -76,7 +78,9 @@ export function SelectionPanel({
       >
         <span>
           {pending
-            ? "等待房主确认…"
+            ? syncingSelection
+              ? "同步选择中…"
+              : "等待房主确认…"
             : confirmed
               ? "已确认，等待另一方"
               : `确认 ${actionLabel}`}

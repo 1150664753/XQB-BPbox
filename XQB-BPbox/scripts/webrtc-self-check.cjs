@@ -582,7 +582,28 @@ async function main() {
       assert.equal(Peer.all.length, peerCount + 1)
       assert.equal(pc.remoteCalls, 1)
       assert.equal(pc.additions.length, 1)
+      pc.channel.open()
+      assert.equal(pc.channel.bufferedAmountLowThreshold, 16 * 1024)
+      pc.channel.bufferedAmount = 48 * 1024
+      const image = host.send('player-1', { type: 'ASSET_CHUNK', payload: { index: 0, data: 'YWJj' } })
+      const nextImage = host.send('player-1', { type: 'ASSET_COMPLETE', payload: {} })
+      await flush()
+      assert.equal(pc.channel.sent.length, 0, 'bulk transfer must pause on a congested relay')
+      await host.send('player-1', { type: 'ACTION_RESULT', payload: { actionId: 'select-1' } })
+      await host.send('player-1', { type: 'STATE_UPDATE', payload: { state: { revision: 2 } } })
+      await host.send('player-1', { type: 'PONG', payload: {} })
+      assert.deepEqual(pc.channel.sent.map(m => m.type), ['ACTION_RESULT', 'STATE_UPDATE', 'PONG'],
+        'controls must pass waiting images, preserving acknowledgement/state order')
+      pc.channel.bufferedAmount = 0
+      emit(pc.channel, 'bufferedamountlow')
+      await Promise.all([image, nextImage])
+      assert.deepEqual(pc.channel.sent.slice(-2).map(m => m.type), ['ASSET_CHUNK', 'ASSET_COMPLETE'])
+      pc.channel.bufferedAmount = 48 * 1024
+      const interruptedImage = host.send('player-1', { type: 'ASSET_CHUNK', payload: {} })
+      const interruptedResult = interruptedImage.catch(error => error)
+      await flush()
       await host.stop()
+      assert.match((await interruptedResult).message, /已关闭/)
     }
   )
   await run(

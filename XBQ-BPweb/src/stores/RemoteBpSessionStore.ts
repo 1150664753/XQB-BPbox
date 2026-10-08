@@ -1,6 +1,7 @@
 import type {
   BpAction,
   BpActionResult,
+  BpActionTarget,
   PlayerSide,
   RemoteBpState,
 } from "../types/bp";
@@ -34,6 +35,9 @@ export interface RemoteBpSessionSnapshot {
   feedback: SessionFeedback | null;
   error: RemoteConnectionError | null;
   pendingActionId: string | null;
+  pendingActionKind: BpAction["kind"] | null;
+  /** Local selection intent only; the host still owns bpState and final results. */
+  selectionPreview: BpActionTarget | null | undefined;
 }
 
 type StoreListener = () => void;
@@ -50,6 +54,9 @@ export class RemoteBpSessionStore {
   private readonly listeners = new Set<StoreListener>();
   private readonly unsubscribers: Array<() => void>;
   private snapshot: RemoteBpSessionSnapshot;
+  private inFlight: { action: BpAction; result: BpActionResult | null } | null =
+    null;
+  private actionTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private readonly connection: RemoteBpConnection) {
     this.snapshot = {
@@ -59,9 +66,12 @@ export class RemoteBpSessionStore {
       feedback: null,
       error: null,
       pendingActionId: null,
+      pendingActionKind: null,
+      selectionPreview: undefined,
     };
     this.unsubscribers = [
       connection.on("connectionStateChanged", (next) => {
+        if (next.state !== "connected") this.clearPending();
         const terminalMessage =
           next.state === "kicked"
             ? "已被房主踢出"
@@ -83,13 +93,16 @@ export class RemoteBpSessionStore {
       connection.on("actionResult", (result) =>
         this.acceptActionResult(result),
       ),
-      connection.on("error", (error) =>
+      connection.on("error", (error) => {
+        // An image failure must not unlock a CONFIRM or discard a selection request.
+        if (error.assetId) return;
+        this.clearPending();
         this.patch({
           error,
           feedback: { tone: "error", message: error.message },
           pendingActionId: null,
-        }),
-      ),
+        });
+      }),
     ];
   }
 
@@ -103,6 +116,7 @@ export class RemoteBpSessionStore {
   }
 
   async join(room: JoinedRoomContext): Promise<void> {
+    this.clearPending();
     const normalizedRoom: JoinedRoomContext = {
       roomId: room.roomId.trim().toUpperCase(),
       side: room.side,
@@ -147,6 +161,7 @@ export class RemoteBpSessionStore {
   }
 
   async leave(): Promise<void> {
+    this.clearPending();
     await this.connection.disconnect();
     this.patch({
       room: null,
@@ -162,17 +177,36 @@ export class RemoteBpSessionStore {
     targetId: string,
   ): Promise<void> {
     const { bpState, room } = this.snapshot;
-    if (!bpState || !room) return;
-    const selected = bpState.selectionTargets[room.side];
+    if (
+      !bpState ||
+      !room ||
+      !this.canSelect() ||
+      this.snapshot.pendingActionKind === "CONFIRM" ||
+      !bpState.availableTargetIdsBySide[room.side].includes(targetId)
+    )
+      return;
+    const selected =
+      this.snapshot.selectionPreview !== undefined
+        ? this.snapshot.selectionPreview
+        : bpState.selectionTargets[room.side];
     const isSelected = selected?.kind === kind && selected.id === targetId;
-    const action: BpAction = isSelected
-      ? this.createBaseAction("DESELECT", [])
-      : this.createBaseAction("SELECT", [{ kind, id: targetId }]);
-    await this.submitAction(action);
+    this.patch({
+      selectionPreview: isSelected ? null : { kind, id: targetId },
+    });
+    await this.flushSelection();
   }
 
   async confirm(): Promise<void> {
-    if (!this.snapshot.bpState || !this.snapshot.room) return;
+    const { bpState, room } = this.snapshot;
+    if (
+      !bpState ||
+      !room ||
+      this.inFlight ||
+      this.snapshot.selectionPreview !== undefined ||
+      !this.canSelect() ||
+      !bpState.canConfirmBySide[room.side]
+    )
+      return;
     await this.submitAction(this.createBaseAction("CONFIRM", []));
   }
 
@@ -185,6 +219,7 @@ export class RemoteBpSessionStore {
   }
 
   destroy(): void {
+    this.clearPending();
     this.unsubscribers.forEach((unsubscribe) => unsubscribe());
     this.listeners.clear();
   }
@@ -215,17 +250,36 @@ export class RemoteBpSessionStore {
   }
 
   private async submitAction(action: BpAction): Promise<void> {
+    if (this.inFlight) return;
+    this.inFlight = { action, result: null };
+    this.actionTimer = setTimeout(() => {
+      if (this.inFlight?.action.actionId !== action.actionId) return;
+      this.clearPending();
+      this.patch({
+        feedback: {
+          tone: "error",
+          message: "房主响应超时，正在重新同步状态，请稍后重试",
+        },
+      });
+      void this.refreshState().catch(() => undefined);
+    }, 15_000);
     this.patch({
       pendingActionId: action.actionId,
+      pendingActionKind: action.kind,
       feedback: {
         tone: "info",
-        message: "操作请求已发送，等待房主确认…",
+        message:
+          action.kind === "CONFIRM"
+            ? "操作请求已发送，等待房主确认…"
+            : "正在同步选择，可继续切换…",
         actionId: action.actionId,
       },
     });
     try {
       await this.connection.sendAction(action);
     } catch (error) {
+      if (this.inFlight?.action.actionId !== action.actionId) return;
+      this.clearPending();
       this.patch({
         pendingActionId: null,
         feedback: {
@@ -244,20 +298,114 @@ export class RemoteBpSessionStore {
     ) {
       return;
     }
-    this.patch({ bpState: state });
+    const previous = this.snapshot.bpState;
+    const contextChanged =
+      previous &&
+      (previous.sessionId !== state.sessionId ||
+        previous.currentStep?.id !== state.currentStep?.id ||
+        previous.currentStep?.index !== state.currentStep?.index ||
+        previous.currentActor !== state.currentActor ||
+        previous.currentOperation !== state.currentOperation ||
+        previous.status !== state.status);
+    this.patch({
+      bpState: state,
+      ...(contextChanged ? { selectionPreview: undefined } : {}),
+    });
+    if (!this.canSelect()) this.patch({ selectionPreview: undefined });
+    this.finishAcknowledgedAction();
   }
 
   private acceptActionResult(result: BpActionResult): void {
+    if (this.inFlight?.action.actionId !== result.actionId) return;
+    this.inFlight.result = result;
+    if (!result.accepted) {
+      this.clearPending();
+      this.patch({
+        feedback: {
+          tone: "error",
+          message: result.message,
+          actionId: result.actionId,
+        },
+      });
+      if (
+        result.code === "REVISION_CONFLICT" ||
+        result.code === "STALE_REVISION"
+      )
+        void this.refreshState().catch(() => undefined);
+      return;
+    }
+    this.finishAcknowledgedAction();
+  }
+
+  private finishAcknowledgedAction(): void {
+    const result = this.inFlight?.result;
+    // The host sends ACTION_RESULT before STATE_UPDATE. Do not submit the next
+    // intent (or enable CONFIRM) with the preceding revision in that interval.
+    if (
+      !result ||
+      (this.snapshot.bpState?.revision ?? -1) < result.resultingRevision
+    )
+      return;
+    this.clearPending(false);
     this.patch({
-      pendingActionId:
-        this.snapshot.pendingActionId === result.actionId
-          ? null
-          : this.snapshot.pendingActionId,
       feedback: {
-        tone: result.accepted ? "success" : "error",
+        tone: "success",
         message: result.message,
         actionId: result.actionId,
       },
+    });
+    void this.flushSelection();
+  }
+
+  private canSelect(): boolean {
+    const { bpState: state, room, connection } = this.snapshot;
+    return Boolean(
+      state &&
+      room &&
+      connection.state === "connected" &&
+      state.status === "running" &&
+      !state.waitingForHost &&
+      !state.confirmedSides[room.side] &&
+      (state.currentActor === room.side ||
+        ["PROTECT", "BORROW"].includes(state.currentOperation)),
+    );
+  }
+
+  private async flushSelection(): Promise<void> {
+    if (this.inFlight || this.snapshot.selectionPreview === undefined) return;
+    const { bpState, room, selectionPreview: target } = this.snapshot;
+    if (
+      !bpState ||
+      !room ||
+      !this.canSelect() ||
+      (target &&
+        !bpState.availableTargetIdsBySide[room.side].includes(target.id))
+    ) {
+      this.patch({ selectionPreview: undefined });
+      return;
+    }
+    const selected = bpState.selectionTargets[room.side];
+    if (target?.kind === selected?.kind && target?.id === selected?.id) {
+      this.patch({ selectionPreview: undefined });
+      return;
+    }
+    await this.submitAction(
+      target
+        ? this.createBaseAction("SELECT", [
+            { kind: target.kind, id: target.id },
+          ])
+        : this.createBaseAction("DESELECT", []),
+    );
+  }
+
+  private clearPending(clearPreview = true): void {
+    if (this.actionTimer !== null) clearTimeout(this.actionTimer);
+    this.actionTimer = null;
+    this.inFlight = null;
+    this.patch({
+      pendingActionId: null,
+      pendingActionKind: null,
+      ...(clearPreview ? { selectionPreview: undefined } : {}),
     });
   }
 

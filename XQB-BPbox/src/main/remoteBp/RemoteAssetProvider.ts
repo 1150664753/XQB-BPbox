@@ -16,6 +16,14 @@ export interface RemoteAssetProviderDependencies {
   listLightCones: () => readonly LightCone[]
   resolveStoredPath: (storedPath: string | null | undefined) => string | null
   now?: () => Date
+  prepareImage?: (
+    data: Uint8Array,
+    type: RemoteAssetType,
+    mimeType: string
+  ) => {
+    data: Uint8Array
+    mimeType: string
+  }
 }
 
 interface AllowedAsset {
@@ -23,6 +31,7 @@ interface AllowedAsset {
   filePath: string
   sourceSize: number
   sourceMtimeMs: number
+  preparedData?: Uint8Array
 }
 
 interface Candidate {
@@ -130,7 +139,7 @@ export class RemoteAssetProvider {
       if (!allowed) throw new Error('远程资源在读取前已失效')
     }
 
-    const data = await readFile(allowed.filePath)
+    const data = allowed.preparedData ?? (await readFile(allowed.filePath))
     const actualHash = createHash('sha256').update(data).digest('hex')
     if (actualHash !== allowed.descriptor.hash || data.byteLength !== allowed.descriptor.size) {
       this.allowedAssets.delete(requestedAssetId)
@@ -209,12 +218,19 @@ export class RemoteAssetProvider {
         continue
       }
 
+      const preview = this.dependencies.prepareImage
+        ? this.dependencies.prepareImage(await readFile(filePath), candidate.type, mimeType)
+        : null
+      // Cache only smaller previews, never retain every full-resolution source in memory.
+      const prepared = preview && preview.data.byteLength < fileStat.size ? preview : null
       const descriptor: AssetManifestEntry = {
         assetId: candidate.assetId,
         type: candidate.type,
-        hash: await sha256File(filePath),
-        size: fileStat.size,
-        mimeType,
+        hash: prepared
+          ? createHash('sha256').update(prepared.data).digest('hex')
+          : await sha256File(filePath),
+        size: prepared?.data.byteLength ?? fileStat.size,
+        mimeType: prepared?.mimeType ?? mimeType,
         ...(candidate.characterId ? { characterId: candidate.characterId } : {}),
         ...(candidate.lightConeId ? { lightConeId: candidate.lightConeId } : {}),
         ownerId: candidate.ownerId
@@ -223,7 +239,8 @@ export class RemoteAssetProvider {
         descriptor,
         filePath,
         sourceSize: fileStat.size,
-        sourceMtimeMs: fileStat.mtimeMs
+        sourceMtimeMs: fileStat.mtimeMs,
+        ...(prepared ? { preparedData: prepared.data } : {})
       })
     }
 

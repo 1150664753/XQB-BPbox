@@ -34,7 +34,8 @@ export interface StartRemoteRoomOptions {
 
 type RoomListener = (state: RemoteBpRoomState) => void
 
-const ASSET_CHUNK_SIZE = 128 * 1024
+// Keep each base64 JSON message below 16 KiB so a slow relay can interleave controls.
+const ASSET_CHUNK_SIZE = 12 * 1024 - 768
 const BASE64_BLOCK_SIZE = 32 * 1024
 
 function bytesToBase64(bytes: Uint8Array): string {

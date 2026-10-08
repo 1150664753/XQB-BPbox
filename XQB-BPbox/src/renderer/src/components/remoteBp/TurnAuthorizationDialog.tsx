@@ -68,7 +68,7 @@ export default function TurnAuthorizationDialog(): React.JSX.Element | null {
         }}
       >
         <header>
-          <h2 id="turn-auth-title">TURN 房主授权</h2>
+          <h2 id="turn-auth-title">TURN 授权</h2>
           <button type="button" aria-label="关闭" disabled={busy} onClick={close}>
             ×
           </button>
@@ -94,7 +94,7 @@ export default function TurnAuthorizationDialog(): React.JSX.Element | null {
           value={password}
           disabled={busy}
           onChange={(event) => setPassword(event.target.value)}
-          placeholder="输入房主 TURN 授权密码"
+          placeholder="输入 TURN 授权密码"
         />
         <p className="turn-auth-hint">
         </p>

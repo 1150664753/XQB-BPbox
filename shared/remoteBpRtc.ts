@@ -604,7 +604,7 @@ export class RemoteBpRtcSession {
 
   private installChannel(channel: RTCDataChannel): void {
     this.channel = channel
-    channel.bufferedAmountLowThreshold = 256 * 1024
+    channel.bufferedAmountLowThreshold = 16 * 1024
     this.log(`DataChannel ${channel.readyState}`)
     for (const event of ['open', 'closing', 'close', 'error']) {
       channel.addEventListener(event, () => {

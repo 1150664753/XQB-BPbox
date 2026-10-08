@@ -1,7 +1,7 @@
 {
   "name": "xqb-bpbox",
   "productName": "XQB-BPBox",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "An Electron application with React and TypeScript",
   "main": "./out/main/index.js",
   "author": "example.com",
@@ -12,7 +12,7 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
-    "test:remote-bp": "tsc -p tsconfig.remote-bp-test.json && node .tmp/remote-bp-test/scripts/remote-bp-self-check.js",
+    "test:remote-bp": "tsc -p tsconfig.remote-bp-test.json && node .tmp/remote-bp-test/scripts/remote-bp-self-check.js && node scripts/remote-bp-interaction-self-check.cjs",
     "start": "electron-vite preview",
     "dev": "electron-vite dev",
     "build": "npm run typecheck && electron-vite build",
@@ -23,6 +23,7 @@
     "build:mac": "electron-vite build && electron-builder --mac",
     "build:linux": "electron-vite build && electron-builder --linux",
     "test:webrtc": "node scripts/webrtc-self-check.cjs",
+    "test:remote-images": "node scripts/remote-image-self-check.cjs",
     "test:turn-desktop": "node scripts/turn-desktop-self-check.cjs"
   },
   "dependencies": {

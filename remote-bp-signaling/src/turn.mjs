@@ -2,7 +2,7 @@
 const encoder = new TextEncoder();
 export const AUTH_SECONDS = 7 * 24 * 60 * 60;
 export const turnErrors = {
-  TURN_AUTH_NOT_CONFIGURED: "房主授权未配置：请配置 TURN_ACCESS_PASSWORD 和 TURN_AUTH_SIGNING_KEY",
+  TURN_AUTH_NOT_CONFIGURED: "TURN未授权；若无法连接请联系QQ 2727755165",
   TURN_PASSWORD_INVALID: "授权密码错误",
   TURN_TOKEN_INVALID: "房主授权令牌无效或已撤销，请重新授权",
   TURN_AUTH_EXPIRED: "房主授权已过期，请重新输入密码",

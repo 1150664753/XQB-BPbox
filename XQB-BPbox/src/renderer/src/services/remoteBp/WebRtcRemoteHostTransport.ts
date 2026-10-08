@@ -42,7 +42,7 @@ export interface WebRtcRemoteHostTransportOptions {
 }
 
 const MAX_SIGNALING_MESSAGE_BYTES = 64 * 1024
-const DATA_CHANNEL_HIGH_WATER_MARK = 1024 * 1024
+const DATA_CHANNEL_HIGH_WATER_MARK = 32 * 1024
 const DATA_CHANNEL_DRAIN_TIMEOUT_MS = 15_000
 const SIGNALING_HEARTBEAT_INTERVAL_MS = 20_000
 const MAX_RECONNECT_DELAY_MS = 15_000
@@ -241,10 +241,20 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
   }
 
   async send(peerId: string, message: RemoteHostOutgoingMessage): Promise<void> {
+    const peer = [...this.peers.values()].find((item) => item.peerId === peerId)
+    const channel = peer?.rtc.channel
+    if (!peer || !channel || channel.readyState !== 'open') return
+    const raw = encodeHostMessage(message)
+    // Only bulk data waits for drain. Controls retain their own call order and can
+    // pass a paused image transfer; already-buffered image data is kept small.
+    if (!['ASSET_START', 'ASSET_CHUNK', 'ASSET_COMPLETE'].includes(message.type)) {
+      channel.send(raw)
+      return
+    }
     const previous = this.sendQueues.get(peerId) ?? Promise.resolve()
     const queued = previous
       .catch(() => undefined)
-      .then(() => this.sendNow(peerId, encodeHostMessage(message)))
+      .then(() => this.sendNow(peer, channel, raw))
     this.sendQueues.set(peerId, queued)
     try {
       await queued
@@ -710,33 +720,32 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
     this.disconnectedListeners.forEach((listener) => listener(peer))
   }
 
-  private async sendNow(peerId: string, raw: string): Promise<void> {
-    const peer = [...this.peers.values()].find((item) => item.peerId === peerId)
-    const channel = peer?.rtc.channel
-    if (!peer || !channel || channel.readyState !== 'open') return
+  private async sendNow(peer: HostPeerSession, channel: RTCDataChannel, raw: string): Promise<void> {
+    if (this.peers.get(peer.side) !== peer || channel.readyState !== 'open') return
     await this.waitForWritable(channel)
     if (this.peers.get(peer.side) === peer && channel.readyState === 'open') channel.send(raw)
   }
 
   private async waitForWritable(channel: RTCDataChannel): Promise<void> {
-    if (channel.bufferedAmount <= DATA_CHANNEL_HIGH_WATER_MARK) return
-    await new Promise<void>((resolve, reject) => {
-      const finish = (error?: Error): void => {
-        window.clearTimeout(timer)
-        channel.removeEventListener('bufferedamountlow', onDrained)
-        channel.removeEventListener('close', onClosed)
-        if (error) reject(error)
-        else resolve()
-      }
-      const onDrained = (): void => finish()
-      const onClosed = (): void => finish(new Error('资源传输期间 DataChannel 已关闭'))
-      const timer = window.setTimeout(
-        () => finish(new Error('等待 DataChannel 发送缓冲区超时')),
-        DATA_CHANNEL_DRAIN_TIMEOUT_MS
-      )
-      channel.addEventListener('bufferedamountlow', onDrained)
-      channel.addEventListener('close', onClosed)
-    })
+    while (channel.bufferedAmount > DATA_CHANNEL_HIGH_WATER_MARK) {
+      await new Promise<void>((resolve, reject) => {
+        const finish = (error?: Error): void => {
+          window.clearTimeout(timer)
+          channel.removeEventListener('bufferedamountlow', onDrained)
+          channel.removeEventListener('close', onClosed)
+          if (error) reject(error)
+          else resolve()
+        }
+        const onDrained = (): void => finish()
+        const onClosed = (): void => finish(new Error('资源传输期间 DataChannel 已关闭'))
+        const timer = window.setTimeout(
+          () => finish(new Error('等待 DataChannel 发送缓冲区超时')),
+          DATA_CHANNEL_DRAIN_TIMEOUT_MS
+        )
+        channel.addEventListener('bufferedamountlow', onDrained)
+        channel.addEventListener('close', onClosed)
+      })
+    }
   }
 
   private sendSignal(type: string, payload: Record<string, unknown>, requestId?: string): void {

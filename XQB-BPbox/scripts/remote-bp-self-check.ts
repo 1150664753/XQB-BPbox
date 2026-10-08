@@ -376,6 +376,33 @@ async function checkAssetProvider(): Promise<void> {
       createHash('sha256').update(Buffer.from('avatar-updated')).digest('hex')
     )
     await assert.rejects(() => provider.getAsset('../../not-allowed'))
+
+    let preparations = 0
+    const previewProvider = new RemoteAssetProvider({
+      listCharacters: () => [fixtureCharacter],
+      listLightCones: () => [],
+      resolveStoredPath: (storedPath) => (storedPath ? (paths[storedPath] ?? null) : null),
+      prepareImage: (data) => {
+        preparations += 1
+        return { data: data.subarray(0, 4), mimeType: 'image/jpeg' }
+      }
+    })
+    const previewManifest = await previewProvider.getManifest()
+    const preview = await previewProvider.getAsset('character:1:avatar')
+    assert.equal(preview.descriptor.mimeType, 'image/jpeg')
+    assert.equal(preview.descriptor.size, 4)
+    assert.equal(preview.descriptor.hash, createHash('sha256').update(preview.data).digest('hex'))
+    assert.deepEqual(
+      preview.descriptor,
+      previewManifest.assets.find((asset) => asset.assetId === preview.descriptor.assetId)
+    )
+    await previewProvider.getManifest()
+    await previewProvider.getAsset('character:1:avatar')
+    assert.equal(preparations, 2, 'unchanged previews are prepared only once')
+    writeFileSync(avatarPath, Buffer.from('new-avatar-source'))
+    const changedPreview = await previewProvider.getAsset('character:1:avatar')
+    assert.notEqual(changedPreview.descriptor.hash, preview.descriptor.hash)
+    assert.equal(preparations, 3, 'source changes invalidate the prepared preview')
   } finally {
     rmSync(fixtureRoot, { recursive: true, force: true })
   }
@@ -390,7 +417,7 @@ async function checkRemoteHost(): Promise<void> {
   const roster = [character(1), character(2)]
   const dispatcher = new BpActionDispatcher(1)
   const transport = new MockRemoteHostTransport()
-  const transferData = new TextEncoder().encode('remote-character-image')
+  const transferData = new TextEncoder().encode('remote-character-image'.repeat(2000))
   const transferDescriptor: AssetManifestEntry = {
     assetId: 'character:1:avatar',
     type: 'avatar',
@@ -505,7 +532,11 @@ async function checkRemoteHost(): Promise<void> {
   const chunks = transport.sent.filter((entry) => entry.message.type === 'ASSET_CHUNK')
   const completes = transport.sent.filter((entry) => entry.message.type === 'ASSET_COMPLETE')
   assert.equal(starts.length, 1)
-  assert.equal(chunks.length, 1)
+  assert.ok(chunks.length > 1)
+  assert.ok(
+    chunks.every((entry) => Buffer.byteLength(JSON.stringify(entry.message)) < 16 * 1024),
+    'image messages must stay small enough for interactive relay traffic'
+  )
   assert.equal(completes.length, 1)
   const reconstructed = Buffer.concat(
     chunks.map((entry) => {
