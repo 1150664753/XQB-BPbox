@@ -69,6 +69,21 @@ export async function turnPermission(env, grant) {
   } catch { return false; } // Fail closed for TURN while allowing ordinary JOIN/RESUME.
 }
 export async function issueTurnCredentials(env, grant, peerKey, fetcher = (url, init) => fetch(url, init)) {
+  const started = Date.now();
+  const cached = grant?.cache?.[peerKey];
+  try {
+    const result = await fetchTurnCredentials(env, grant, peerKey, fetcher);
+    console.info('[WTN TURN]', { result: 'ok', source: result === cached ? 'cache' : 'provider',
+      elapsedMs: Date.now() - started, expiresAt: result.expiresAt,
+      protocols: [...new Set(result.iceServers.flatMap(server => server.urls.map(url => /^turns:/i.test(url) ? 'tls' : /transport=tcp/i.test(url) ? 'tcp' : 'udp')))] });
+    return result;
+  } catch (error) {
+    const code = Object.hasOwn(turnErrors, error?.message) ? error.message : 'TURN_UNAVAILABLE';
+    console.warn('[WTN TURN]', { result: 'error', code, elapsedMs: Date.now() - started });
+    throw error;
+  }
+}
+async function fetchTurnCredentials(env, grant, peerKey, fetcher) {
   if (!await turnPermission(env, grant)) throw new Error("TURN_NOT_AUTHORIZED");
   if (!env.WTN_APP_KEY || !env.WTN_APP_ID) throw new Error("TURN_NOT_CONFIGURED");
   const now = Date.now();
@@ -93,14 +108,20 @@ export async function issueTurnCredentials(env, grant, peerKey, fetcher = (url, 
     // Workers supports manual/follow; manual ensures a redirect never leaks Authorization.
     response = await fetcher(url, { method: "GET", headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(6_000), redirect: "manual" });
   } catch { throw new Error("TURN_UNAVAILABLE"); }
-  if (!response.ok) throw new Error([401, 403, 404].includes(response.status) ? "TURN_PROVIDER_DENIED" : "TURN_PROVIDER_HTTP");
+  if (!response.ok) {
+    console.warn('[WTN TURN]', { result: 'http-error', status: response.status });
+    throw new Error([401, 403, 404].includes(response.status) ? "TURN_PROVIDER_DENIED" : "TURN_PROVIDER_HTTP");
+  }
   let data;
   try {
     const text = await response.text();
     if (text.length > 64 * 1024) throw new Error();
     data = JSON.parse(text);
   } catch { throw new Error("TURN_PROVIDER_INVALID"); }
-  if (data?.code !== 200) throw new Error("TURN_PROVIDER_CODE");
+  if (data?.code !== 200) {
+    console.warn('[WTN TURN]', { result: 'provider-error', code: Number.isSafeInteger(data?.code) ? data.code : null });
+    throw new Error("TURN_PROVIDER_CODE");
+  }
   if (!Number.isInteger(data.ttl) || data.ttl < 60 || data.ttl > ttl || !Array.isArray(data.ice_servers) || data.ice_servers.length > 8)
     throw new Error("TURN_PROVIDER_INVALID");
   const iceServers = [];

@@ -121,6 +121,8 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
     return this.rtc?.channel ?? null;
   }
   private confirmed: RemoteBpConnectResult | null = null;
+  private assetEpoch = 0;
+  private assetStreamTransfers = new Map<string, string>();
   private requested: RemoteBpConnectOptions | null = null;
   private connectResolve: ((result: RemoteBpConnectResult) => void) | null =
     null;
@@ -238,7 +240,7 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
         if (this.socket !== socket || this.intentionalClose) return;
         console.warn("[Remote BP signaling] message failure", {
           roomId: this.requested?.roomId,
-          error: String(error),
+          error: "SIGNALING_MESSAGE_FAILED",
         });
         if (!this.confirmed)
           this.fail(error instanceof Error ? error : new Error(String(error)));
@@ -280,13 +282,24 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
         return;
       }
       case "TURN_STATUS": {
-        if (!message.payload.turnAuthorizedUntil) this.rtc?.clearTurn("房主 TURN 授权已撤销或到期");
+        if (!message.payload.turnAuthorizedUntil)
+          this.rtc?.clearTurn("房主 TURN 授权已撤销或到期");
         return;
       }
       case "TURN_CREDENTIALS": {
-        if (this.confirmed && this.rtc && message.payload.roomId === this.confirmed.roomId &&
-          message.payload.peerId === this.confirmed.sessionId && message.payload.connectionId === this.rtc.connectionId)
-          this.rtc.applyTurn(message.payload);
+        if (
+          this.confirmed &&
+          this.rtc &&
+          message.payload.roomId === this.confirmed.roomId &&
+          message.payload.peerId === this.confirmed.sessionId &&
+          message.payload.connectionId === this.rtc.connectionId
+        ) {
+          try {
+            this.rtc.applyTurn(message.payload);
+          } catch {
+            this.rtc.turnFailed("TURN_PROVIDER_INVALID");
+          }
+        }
         return;
       }
       case "OFFER":
@@ -303,7 +316,9 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
         }
         if (message.payload.targetSessionId !== this.confirmed.sessionId)
           return;
-        await this.rtc.receive(message.type, message.payload);
+        // The RTC queue owns SDP/candidate ordering. Do not block credential
+        // installation or signaling heartbeat behind slow native SDP operations.
+        void this.rtc.receive(message.type, message.payload);
         return;
       }
       case "ERROR": {
@@ -440,8 +455,27 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
                 : "正在建立点对点连接"),
           );
       },
-      onMessage: (data) => {
-        if (this.rtc === rtc) this.handleDataMessage(data);
+      onDiagnostics: (diagnostic) => {
+        if (this.rtc !== rtc) return;
+        const transport = diagnostic.pair
+          ? diagnostic.relay
+            ? "turn-relay"
+            : "p2p"
+          : "unknown";
+        if (this.snapshot.transport !== transport) {
+          this.snapshot = { ...this.snapshot, transport };
+          this.events.emit("connectionStateChanged", this.snapshot);
+        }
+      },
+      onAssetChannelClosed: () => {
+        for (const [transferId, assetId] of this.assetStreamTransfers) {
+          this.incomingAssets.abort(transferId);
+          this.emitAssetError(assetId, new Error("ASSET_CHANNEL_CLOSED"));
+        }
+        this.assetStreamTransfers.clear();
+      },
+      onMessage: (data, stream) => {
+        if (this.rtc === rtc) this.handleDataMessage(data, stream);
       },
     });
     this.rtc = rtc;
@@ -490,7 +524,6 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
 
   private onDataChannelReady(): void {
     if (!this.confirmed || this.dataChannel?.readyState !== "open") return;
-    const wasReconnecting = this.snapshot.state === "reconnecting";
     if (this.snapshot.state === "connected") return;
     this.reconnectAttempt = 0;
     this.hasEverConnected = true;
@@ -499,10 +532,9 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
     this.clearConnectWaiter();
     this.startPing();
     void this.requestState();
-    if (wasReconnecting) this.incomingAssets.reset();
   }
 
-  private handleDataMessage(data: unknown): void {
+  private handleDataMessage(data: unknown, stream = "control"): void {
     if (typeof data !== "string") {
       this.events.emit("error", {
         code: "BINARY_NOT_ALLOWED",
@@ -513,6 +545,11 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
     }
     try {
       const message = parseHostMessage(data);
+      if (
+        stream === "assets" &&
+        !["ASSET_START", "ASSET_CHUNK", "ASSET_COMPLETE"].includes(message.type)
+      )
+        throw new Error("UNEXPECTED_ASSET_MESSAGE");
       switch (message.type) {
         case "INITIAL_STATE":
           this.assertRoom(message.payload.state.roomId);
@@ -532,7 +569,13 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
         case "ASSET_START":
           try {
             this.incomingAssets.start(message.payload);
+            if (stream === "assets")
+              this.assetStreamTransfers.set(
+                message.payload.transferId,
+                message.payload.asset.assetId,
+              );
           } catch (error) {
+            this.assetStreamTransfers.delete(message.payload.transferId);
             this.incomingAssets.abort(message.payload.transferId);
             this.emitAssetError(message.payload.asset.assetId, error);
           }
@@ -541,17 +584,26 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
           try {
             this.incomingAssets.addChunk(message.payload);
           } catch (error) {
+            this.assetStreamTransfers.delete(message.payload.transferId);
             this.incomingAssets.abort(message.payload.transferId);
             this.emitAssetError(message.payload.assetId, error);
           }
           break;
         case "ASSET_COMPLETE":
-          void this.incomingAssets
-            .complete(message.payload)
-            .then((asset) => this.events.emit("assetReceived", asset))
-            .catch((error: unknown) =>
-              this.emitAssetError(message.payload.assetId, error),
-            );
+          this.assetStreamTransfers.delete(message.payload.transferId);
+          {
+            const epoch = this.assetEpoch;
+            void this.incomingAssets
+              .complete(message.payload)
+              .then((asset) => {
+                if (epoch === this.assetEpoch)
+                  this.events.emit("assetReceived", asset);
+              })
+              .catch((error: unknown) => {
+                if (epoch === this.assetEpoch)
+                  this.emitAssetError(message.payload.assetId, error);
+              });
+          }
           break;
         case "PONG": {
           const latencyMs = Math.max(
@@ -691,7 +743,11 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
   ): void {
     this.snapshot = {
       state,
-      transport: state === "connected" ? "p2p" : this.snapshot.transport,
+      transport: this.rtc?.getDiagnostic().pair
+        ? this.rtc.getDiagnostic().relay
+          ? "turn-relay"
+          : "p2p"
+        : "unknown",
       latencyMs: state === "connected" ? this.snapshot.latencyMs : null,
       lastPingAt: state === "connected" ? this.snapshot.lastPingAt : null,
       reason,
@@ -809,6 +865,10 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
   }
 
   private closePeer(): void {
+    this.assetEpoch += 1;
+    this.assetStreamTransfers.clear();
+    this.incomingAssets.reset();
+    this.events.emit("assetTransfersReset", undefined);
     const rtc = this.rtc;
     this.rtc = null;
     rtc?.close();

@@ -60,6 +60,7 @@ export class RemoteBpHost {
   private readonly listeners = new Set<RoomListener>()
   private readonly unsubscribers: Array<() => void>
   private readonly assetTransferQueues = new Map<string, Promise<void>>()
+  private readonly requestedAssets = new Map<string, Set<string>>()
   private assetManifestRefresh: Promise<AssetManifest | null> | null = null
   private lastAssetManifestRevision: number | null = null
   private state: RemoteBpRoomState
@@ -110,6 +111,7 @@ export class RemoteBpHost {
         ])
       }),
       dependencies.transport.onPeerConnecting((peer) => {
+        this.requestedAssets.delete(peer.peerId)
         this.updatePeer(peer, 'connecting')
         void this.broadcastState('STATE_UPDATE')
       }),
@@ -118,13 +120,16 @@ export class RemoteBpHost {
         void this.broadcastState('STATE_UPDATE')
       }),
       dependencies.transport.onPeerDisconnected((peer) => {
+        this.requestedAssets.delete(peer.peerId)
         this.updatePeer(peer, 'disconnected')
         void this.broadcastState('STATE_UPDATE')
       }),
       dependencies.transport.onStatusChange((status) => {
         this.patch({
           connectionState: status.connectionState,
-          ...(status.turnAuthorizedUntil !== undefined ? { turnAuthorizedUntil: status.turnAuthorizedUntil } : {}),
+          ...(status.turnAuthorizedUntil !== undefined
+            ? { turnAuthorizedUntil: status.turnAuthorizedUntil }
+            : {}),
           ...(status.error !== undefined ? { error: status.error } : {})
         })
       }),
@@ -150,6 +155,20 @@ export class RemoteBpHost {
 
   getRoomState(): RemoteBpRoomState {
     return structuredClone(this.state)
+  }
+
+  getNetworkOptions(): { forceRelay: boolean; assetRateKiBps: number } {
+    return (
+      this.dependencies.transport.getNetworkOptions?.() ?? {
+        forceRelay: false,
+        assetRateKiBps: 512
+      }
+    )
+  }
+
+  configureNetwork(options: { forceRelay: boolean; assetRateKiBps: number }): void {
+    if (this.state.lifecycle !== 'idle' && this.state.lifecycle !== 'error') return
+    this.dependencies.transport.configureNetwork?.(options)
   }
 
   async startRoom(options: StartRemoteRoomOptions): Promise<RemoteBpRoomState> {
@@ -218,6 +237,7 @@ export class RemoteBpHost {
     }
     await this.dependencies.transport.stop()
     this.assetTransferQueues.clear()
+    this.requestedAssets.clear()
     this.assetManifestRefresh = null
     this.lastAssetManifestRevision = null
     this.state = {
@@ -364,14 +384,20 @@ export class RemoteBpHost {
   destroy(): void {
     this.unsubscribers.forEach((unsubscribe) => unsubscribe())
     this.assetTransferQueues.clear()
+    this.requestedAssets.clear()
     this.listeners.clear()
   }
 
   private enqueueAssetRequest(peerId: string, requestedAssetIds: string[]): void {
+    const pending = this.requestedAssets.get(peerId) ?? new Set<string>()
+    this.requestedAssets.set(peerId, pending)
+    const unique = [...new Set(requestedAssetIds)].filter((id) => !pending.has(id))
+    unique.forEach((id) => pending.add(id))
+    if (!unique.length) return
     const previous = this.assetTransferQueues.get(peerId) ?? Promise.resolve()
     const queued = previous
       .catch(() => undefined)
-      .then(() => this.sendAssetsToPeer(peerId, [...new Set(requestedAssetIds)]))
+      .then(() => this.sendAssetsToPeer(peerId, unique, pending))
     this.assetTransferQueues.set(peerId, queued)
     void queued
       .catch(() => undefined)
@@ -382,10 +408,18 @@ export class RemoteBpHost {
       })
   }
 
-  private async sendAssetsToPeer(peerId: string, assetIds: string[]): Promise<void> {
+  private async sendAssetsToPeer(
+    peerId: string,
+    assetIds: string[],
+    pending: Set<string>
+  ): Promise<void> {
+    const current = (): boolean =>
+      this.state.lifecycle === 'active' && this.requestedAssets.get(peerId) === pending
     for (const requestedAssetId of assetIds) {
+      if (!current()) return
       try {
         const asset = await this.dependencies.getAsset(requestedAssetId)
+        if (!current()) return
         if (
           asset.descriptor.assetId !== requestedAssetId ||
           asset.descriptor.size !== asset.data.byteLength
@@ -407,6 +441,7 @@ export class RemoteBpHost {
           }
         })
         for (let index = 0; index < totalChunks; index += 1) {
+          if (!current()) return
           const offset = index * ASSET_CHUNK_SIZE
           const chunk = asset.data.subarray(offset, offset + ASSET_CHUNK_SIZE)
           await this.dependencies.transport.send(peerId, {
@@ -430,15 +465,20 @@ export class RemoteBpHost {
           }
         })
       } catch (error) {
-        await this.dependencies.transport.send(peerId, {
-          type: 'ERROR',
-          payload: {
-            code: 'ASSET_TRANSFER_FAILED',
-            message: error instanceof Error ? error.message : '资源传输失败',
-            recoverable: true,
-            assetId: requestedAssetId
-          }
-        })
+        if (!current()) return
+        await this.dependencies.transport
+          .send(peerId, {
+            type: 'ERROR',
+            payload: {
+              code: 'ASSET_TRANSFER_FAILED',
+              message: error instanceof Error ? error.message : '资源传输失败',
+              recoverable: true,
+              assetId: requestedAssetId
+            }
+          })
+          .catch(() => undefined)
+      } finally {
+        pending.delete(requestedAssetId)
       }
     }
   }

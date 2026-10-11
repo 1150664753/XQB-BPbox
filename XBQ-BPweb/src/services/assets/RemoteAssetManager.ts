@@ -20,12 +20,18 @@ type AssetManagerListener = () => void;
 export class RemoteAssetManager {
   private readonly listeners = new Set<AssetManagerListener>();
   private readonly urls = new Map<string, string>();
+  private readonly installedDescriptors = new Map<string, AssetManifestEntry>();
   private readonly states = new Map<string, AssetLoadState>();
   private readonly pendingRequestIds = new Set<string>();
   private readonly unsubscribers: Array<() => void>;
   private manifest: AssetManifest | null = null;
   private requestFlushScheduled = false;
   private manifestApplyToken = 0;
+  private connected: boolean;
+  private destroyed = false;
+  private readonly wanted = new Set<string>();
+  private readonly retries = new Map<string, number>();
+  private readonly retryTimers = new Set<ReturnType<typeof setTimeout>>();
   private snapshot: AssetManagerSnapshot = {
     manifest: null,
     states: this.states,
@@ -37,7 +43,23 @@ export class RemoteAssetManager {
     private readonly connection: RemoteBpConnection,
     private readonly cache: AssetCache,
   ) {
+    this.connected = connection.getSnapshot().state === "connected";
     this.unsubscribers = [
+      connection.on("assetTransfersReset", () => {
+        ++this.manifestApplyToken;
+        this.manifest = null;
+        this.pendingRequestIds.clear();
+        this.retries.clear();
+        for (const [id, state] of this.states)
+          if (state === "loading" || state === "failed")
+            this.states.set(id, "idle");
+        this.publish();
+      }),
+      connection.on("connectionStateChanged", (state) => {
+        const recovered = !this.connected && state.state === "connected";
+        this.connected = state.state === "connected";
+        if (recovered) void this.request([...this.wanted]);
+      }),
       connection.on("assetManifestReceived", (manifest) => {
         void this.applyManifest(manifest);
       }),
@@ -48,6 +70,20 @@ export class RemoteAssetManager {
         if (!error.assetId) return;
         this.states.set(error.assetId, "failed");
         this.publish();
+        const id = error.assetId,
+          epoch = this.manifestApplyToken;
+        const attempts = this.retries.get(id) ?? 0;
+        if (attempts >= 2 || !this.wanted.has(id)) return;
+        this.retries.set(id, attempts + 1);
+        const timer = setTimeout(
+          () => {
+            this.retryTimers.delete(timer);
+            if (!this.destroyed && epoch === this.manifestApplyToken)
+              void this.request([id]);
+          },
+          1000 * (attempts + 1),
+        );
+        this.retryTimers.add(timer);
       }),
     ];
   }
@@ -70,6 +106,8 @@ export class RemoteAssetManager {
   }
 
   async request(assetIds: string[]): Promise<void> {
+    assetIds.forEach((id) => this.wanted.add(id));
+    if (!this.connected || this.destroyed) return;
     const manifestIds = new Set(
       this.manifest?.assets.map((descriptor) => descriptor.assetId) ?? [],
     );
@@ -89,6 +127,9 @@ export class RemoteAssetManager {
   }
 
   destroy(): void {
+    this.destroyed = true;
+    ++this.manifestApplyToken;
+    this.retryTimers.forEach((timer) => clearTimeout(timer));
     this.unsubscribers.forEach((unsubscribe) => unsubscribe());
     this.urls.forEach((url) => URL.revokeObjectURL(url));
     this.urls.clear();
@@ -100,10 +141,9 @@ export class RemoteAssetManager {
     if (this.manifest && manifest.revision < this.manifest.revision) return;
     const applyToken = ++this.manifestApplyToken;
     const previousDescriptors = new Map(
-      this.manifest?.assets.map((descriptor) => [
-        descriptor.assetId,
-        descriptor,
-      ]) ?? [],
+      (this.manifest?.assets ?? [...this.installedDescriptors.values()]).map(
+        (descriptor) => [descriptor.assetId, descriptor],
+      ) ?? [],
     );
     this.manifest = manifest;
     const nextIds = new Set(
@@ -117,7 +157,8 @@ export class RemoteAssetManager {
       const url = this.urls.get(assetId);
       if (url) URL.revokeObjectURL(url);
       this.urls.delete(assetId);
-      await this.cache.remove(assetId);
+      this.installedDescriptors.delete(assetId);
+      this.wanted.delete(assetId);
     }
 
     for (const descriptor of manifest.assets) {
@@ -126,7 +167,11 @@ export class RemoteAssetManager {
         previous &&
         (previous.hash !== descriptor.hash ||
           previous.size !== descriptor.size ||
-          previous.mimeType !== descriptor.mimeType),
+          previous.mimeType !== descriptor.mimeType ||
+          previous.type !== descriptor.type ||
+          previous.ownerId !== descriptor.ownerId ||
+          previous.characterId !== descriptor.characterId ||
+          previous.lightConeId !== descriptor.lightConeId),
       );
       if (descriptorChanged) {
         const url = this.urls.get(descriptor.assetId);
@@ -134,16 +179,32 @@ export class RemoteAssetManager {
         this.urls.delete(descriptor.assetId);
         this.states.set(descriptor.assetId, "idle");
         this.pendingRequestIds.delete(descriptor.assetId);
-        await this.cache.remove(descriptor.assetId);
+        this.retries.delete(descriptor.assetId);
       }
       if (applyToken !== this.manifestApplyToken) return;
-      if (await this.cache.has(descriptor.assetId, descriptor.hash)) {
-        const cached = await this.cache.get(descriptor.assetId);
-        if (cached) {
+      if (
+        !descriptorChanged &&
+        this.states.get(descriptor.assetId) === "ready" &&
+        this.urls.has(descriptor.assetId)
+      )
+        continue;
+      {
+        const cached = await this.cache
+          .get(descriptor.assetId, descriptor.hash)
+          .catch(() => null);
+        if (applyToken !== this.manifestApplyToken || this.destroyed) return;
+        if (cached && this.matchesManifest(cached.descriptor)) {
           this.installUrl(cached);
           continue;
         }
       }
+      const installed = this.installedDescriptors.get(descriptor.assetId);
+      if (
+        this.states.get(descriptor.assetId) === "ready" &&
+        installed &&
+        this.matchesManifest(installed)
+      )
+        continue;
       if (
         !descriptorChanged &&
         this.states.get(descriptor.assetId) === "loading"
@@ -153,15 +214,16 @@ export class RemoteAssetManager {
     }
 
     this.publish();
+    void this.request([...this.wanted]);
   }
 
   private async acceptAsset(asset: ReceivedAsset): Promise<void> {
     if (!this.matchesManifest(asset.descriptor)) {
-      this.states.set(asset.descriptor.assetId, "failed");
-      this.publish();
       return;
     }
-    await this.cache.save(asset);
+    if (this.destroyed) return;
+    void this.cache.save(asset).catch(() => undefined);
+    this.retries.delete(asset.descriptor.assetId);
     this.installUrl(asset);
     this.publish();
   }
@@ -183,6 +245,7 @@ export class RemoteAssetManager {
   }
 
   private installUrl(asset: ReceivedAsset): void {
+    this.installedDescriptors.set(asset.descriptor.assetId, asset.descriptor);
     const previousUrl = this.urls.get(asset.descriptor.assetId);
     if (previousUrl) URL.revokeObjectURL(previousUrl);
     this.urls.set(asset.descriptor.assetId, URL.createObjectURL(asset.data));
@@ -218,6 +281,12 @@ export class RemoteAssetManager {
   }
 
   private async flushRequests(assetIds: string[]): Promise<void> {
+    if (this.destroyed || !this.connected) {
+      assetIds.forEach((id) => {
+        if (this.states.get(id) === "loading") this.states.set(id, "idle");
+      });
+      return;
+    }
     try {
       for (let offset = 0; offset < assetIds.length; offset += 128) {
         await this.connection.requestAssets(

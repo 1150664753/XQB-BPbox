@@ -4,6 +4,8 @@ import { BpPage } from "./pages/BpPage";
 import { JoinPage } from "./pages/JoinPage";
 import { createRemoteBpConnection } from "./services/createRemoteBpConnection";
 import { MemoryAssetCache } from "./services/assets/MemoryAssetCache";
+import { IndexedDbAssetCache } from "./services/assets/IndexedDbAssetCache";
+import { runtimeConfig } from "./config/runtime";
 import { RemoteAssetManager } from "./services/assets/RemoteAssetManager";
 import {
   RemoteBpSessionStore,
@@ -20,7 +22,9 @@ export default function App() {
     const connection = createRemoteBpConnection();
     const assetManager = new RemoteAssetManager(
       connection,
-      new MemoryAssetCache(),
+      runtimeConfig.transport === "mock"
+        ? new MemoryAssetCache()
+        : new IndexedDbAssetCache(),
     );
     const store = new RemoteBpSessionStore(connection);
     return { connection, assetManager, store };

@@ -88,13 +88,15 @@ BPbox 主控窗口按 **Ctrl+Shift+T**，输入密码并验证。成功后授权
 
 ## 连接、刷新和诊断
 
-首次协商保留现有 STUN/P2P。授权房间在连接失败、ICE 重启时按需获取 TURN；已有凭证到期前 90 秒触发更新和 ICE restart。更新通过 `setConfiguration` 合并原有 STUN 与服务器返回的 TURN，保留原 DataChannel、状态 revision 和资源分片逻辑。无权限、超时、配置缺失和无效上游返回均保留 P2P 并提供诊断。
+普通模式首次协商保留现有 STUN/P2P。授权房间在连接失败、ICE 重启时按需获取 TURN；实际使用中继时，在凭证剩余有效期进入刷新窗口后更新并 ICE restart（窗口为安装时剩余 TTL 的 1/3，最多 90 秒）。更新通过 `setConfiguration` 合并原有 STUN 与服务器返回的 TURN，保留原 DataChannel、状态 revision 和未完成的资源接收。普通模式无权限、超时、配置缺失和无效上游返回仍允许 P2P；强制模式明确失败，不回退直连。健康直连不因闲置凭证到期而重连。
 
 两端均过滤公共 `VITE_REMOTE_BP_ICE_SERVERS` 中的 TURN；请不要再把付费 TURN 用户名或 credential 放入 Vite 环境变量。只有服务端认证后下发的凭证能加入连接配置。
 
-Ctrl+Shift+T 弹窗的“连接诊断”显示 ICE 状态、选中 candidate pair 类型、是否 relay、领取状态/到期时间和原因。两端控制台 `[Remote BP RTC]` 也提供这些信息，不输出密码、令牌、TURN 用户名/credential、完整 SDP 或完整 candidate。
+远程连接区域的“网络诊断”显示实际选中的 candidate pair、RTT、收发字节/速率、发送缓冲、各层状态及凭证结果，并可导出脱敏日志。Ctrl+Shift+T 授权弹窗仍保留简要诊断。详见 [网络诊断与测试说明](REMOTE_BP_NETWORK_DIAGNOSTICS.md)。
 
-## 仅开发测试的强制 relay
+## 强制 TURN 测试
+
+正式界面中，在创建房间前展开“网络诊断”并勾选“强制 TURN 测试”，完成桌面端授权后再建房。房主从创建 PeerConnection 起使用 `iceTransportPolicy: 'relay'`，等凭证安装后才发 Offer；仅房主启用也能强制经过中继。结束测试后关闭房间并取消勾选。
 
 必须先完成 Worker Secrets 和 WTN TURN 开通。在两个独立 PowerShell 窗口启动：
 
@@ -112,7 +114,7 @@ $env:VITE_REMOTE_BP_TEST_FORCE_RELAY = '1'
 npm run dev
 ```
 
-在桌面端授权，再创建房间；用 Chrome 打开 Vite 显示的选手页面加入。此开关只在 `import.meta.env.DEV` 为真且已获得临时凭证时改为 `relay`，没有权限不会绕过服务端检查。生产构建即使残留该变量也仍为 `all`。测试后在两个窗口移除该变量或关闭终端。
+环境变量是可选的构建配置，开发和生产都生效，默认关闭。没有权限不会绕过服务端检查，也不会悄悄改用直连。测试后移除变量；生产构建不应默认开启强制测试。
 
 成功标准必须同时满足：两端临时凭证为 ready、选中 pair 至少一端为 relay、DataChannel 为 open、BP 状态同步和角色图片传输成功。只收到凭证或只显示“已授权”不算 TURN 连通成功。
 

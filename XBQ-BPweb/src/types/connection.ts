@@ -29,6 +29,7 @@ export interface RemoteConnectionError {
 }
 
 export interface RemoteBpConnectionEvents {
+  assetTransfersReset: undefined;
   connectionStateChanged: ConnectionSnapshot;
   bpStateReceived: RemoteBpState;
   bpStateUpdated: RemoteBpState;

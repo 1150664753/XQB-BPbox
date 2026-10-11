@@ -1,5 +1,7 @@
 # Remote BP 连接层修复
 
+本文记录早期连接层改造；2026-10-11 的后续排查、实际路径统计、TURN 时序、资源通道和缓存修复见 [网络诊断与测试说明](REMOTE_BP_NETWORK_DIAGNOSTICS.md)。当前 TURN 配置以 [TURN_SETUP.md](TURN_SETUP.md) 为准。
+
 本次只调整 WebRTC / WebSocket 信令层。BP Action、先后手权限、状态同步、Manifest、资源分片和背压处理继续使用原有业务实现。
 
 ## 修复的问题
@@ -45,7 +47,7 @@
 | ICE / PeerConnection failed | 请求 ICE Restart |
 | ICE 已连通，但 DTLS / DataChannel 尚未就绪 | 单独等待 20 秒 |
 | 初次建连或一次持续恢复过程 | 120 秒总时限，不因重复消息重置 |
-| Restart 次数 | 每个 PeerConnection 最多 2 次，由房主发 Offer |
+| Restart 次数 | 每次持续恢复过程最多 2 次；成功后重置恢复预算，由房主发 Offer；诊断保留累计次数 |
 | PeerConnection / DataChannel 明确关闭 | 终止该连接；若选手信令正重连，让有限时长的重新加入流程继续 |
 
 Restart 使用原 PeerConnection 的 createOffer({ iceRestart: true })。尚有未完成的本地 Offer 时先 rollback，再开始新轮次。网页只发 ICE_RESTART_REQUEST，由房主统一协商，避免 Offer 冲突。双方同时出现多个失败事件只触发一次正在进行的 Restart。
@@ -65,16 +67,15 @@ Restart 使用原 PeerConnection 的 createOffer({ iceRestart: true })。尚有�
 - `XQB-BPbox/src/renderer/src/config/remoteBp.ts`
 - `XBQ-BPweb/src/config/runtime.ts`
 
-默认 Google STUN 保留。两端均通过 VITE_REMOTE_BP_ICE_SERVERS 注入 RTCIceServer 数组，支持多个 urls、username 和 credential，无需修改 WebRTC 实现：
+默认 Google STUN 保留。两端通过 VITE_REMOTE_BP_ICE_SERVERS 配置公开的 STUN 地址；当前版本会过滤其中的 TURN。中继必须通过已授权房间从服务端领取临时凭证，不能把付费 TURN 密码写入前端构建变量：
 
 ```json
 [
-  { "urls": "stun:stun.l.google.com:19302" },
-  { "urls": "turns:turn.example.com:443?transport=tcp", "username": "example-user", "credential": "example-credential" }
+  { "urls": "stun:stun.l.google.com:19302" }
 ]
 ```
 
-示例 TURN 地址和凭证需要替换为实际服务。STUN 和 Restart 不能绕过不允许直连的 NAT / 防火墙；这类网络仍需要可达的 TURN 中继。
+STUN 和 Restart 不能绕过不允许直连的 NAT / 防火墙；这类网络仍需要可达的 TURN 中继。
 
 信令服务、网页和 BPbox 必须配套更新：旧服务不认识 PEER_READY / ICE_RESTART_REQUEST，旧客户端也不提供协商标识。本次未部署公网服务。构建需要保留仓库根目录的 shared 目录，Vite 已显式允许读取该目录。
 

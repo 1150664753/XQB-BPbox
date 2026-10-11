@@ -11,7 +11,7 @@ export function createRemoteHostTransport(): RemoteHostTransport {
   return new WebRtcRemoteHostTransport({
     signalingUrl: remoteBpRuntimeConfig.signalingUrl,
     turnAuth: window.bpAPI.turnAuth,
-    testOnlyForceRelay: import.meta.env.DEV && import.meta.env.VITE_REMOTE_BP_TEST_FORCE_RELAY === '1',
+    testOnlyForceRelay: import.meta.env.VITE_REMOTE_BP_TEST_FORCE_RELAY === '1',
     iceServers: remoteBpRuntimeConfig.iceServers
   })
 }

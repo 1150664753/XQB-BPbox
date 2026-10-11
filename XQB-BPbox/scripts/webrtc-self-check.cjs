@@ -92,6 +92,10 @@ function signal(connectionId, negotiationId, rest) {
 const description = (type, fragment) => ({ type, sdp: `v=0\r\na=ice-ufrag:${fragment}\r\n` })
 
 class Channel extends EventTarget {
+  constructor(label = 'xqb-remote-bp') {
+    super()
+    this.label = label
+  }
   label = 'xqb-remote-bp'
   readyState = 'connecting'
   bufferedAmount = 0
@@ -129,10 +133,14 @@ class Peer extends EventTarget {
     this.config = config
     Peer.all.push(this)
   }
-  setConfiguration(config) { this.config = config }
-  createDataChannel() {
-    this.channel = new Channel()
-    return this.channel
+  setConfiguration(config) {
+    this.config = config
+  }
+  createDataChannel(label = 'xqb-remote-bp') {
+    const channel = new Channel(label)
+    if (label === 'xqb-remote-bp') this.channel = channel
+    else this.assetChannel = channel
+    return channel
   }
   async createOffer(options) {
     this.offers.push(options)
@@ -254,49 +262,350 @@ async function run(name, test) {
 }
 
 async function main() {
-  await run('TURN refresh keeps DataChannel, removes expired/revoked relays, and redacts diagnostics', async () => {
-    let refreshed = 0, authorized = true
-    const credentials = { iceServers: [{ urls: ['turn:relay.example.test:3478'], username: 'SECRET_TURN_USER', credential: 'SECRET_TURN_CREDENTIAL' }], expiresAt: 100_000 }
-    const { rtc, pc } = session(true, 'turn-refresh', { prepareRestart: async () => { if (!authorized) return; refreshed++; rtc.applyTurn({ ...credentials, expiresAt: now + 3_600_000 }) } })
-    assert.equal(pc.config.iceTransportPolicy, 'all')
-    assert.equal(pc.config.iceServers.some(s => String(s.urls).includes('turn:')), false)
-    rtc.turnRequested(); rtc.applyTurn(credentials)
-    assert.equal(pc.config.iceServers.length, 2)
-    assert.equal(pc.config.iceTransportPolicy, 'all')
-    const channel = rtc.channel
+  await run(
+    'selected pair statistics, safe protocol fields, counter resets and ambiguity',
+    async () => {
+      const { rtc, pc } = session(true, 'statistics')
+      await rtc.start()
+      await rtc.receive(
+        'ANSWER',
+        signal(rtc.connectionId, 1, { description: description('answer', 'remote-1') })
+      )
+      pc.network('connected')
+      pc.channel.open()
+      const selected = {
+        id: 'pair',
+        type: 'candidate-pair',
+        state: 'succeeded',
+        nominated: true,
+        localCandidateId: 'local',
+        remoteCandidateId: 'remote',
+        currentRoundTripTime: 0.125,
+        bytesSent: 1000,
+        bytesReceived: 2000
+      }
+      const reports = new Map([
+        ['transport', { type: 'transport', selectedCandidatePairId: 'pair' }],
+        ['pair', selected],
+        [
+          'local',
+          {
+            type: 'local-candidate',
+            candidateType: 'relay',
+            protocol: 'udp',
+            relayProtocol: 'tls',
+            address: '192.0.2.99',
+            url: 'turns:SECRET_URL',
+            username: 'SECRET_USERNAME'
+          }
+        ],
+        ['remote', { type: 'remote-candidate', candidateType: 'srflx', protocol: 'udp' }],
+        ['asset', { type: 'data-channel', label: 'xqb-remote-bp-assets-v1', bytesSent: 500 }]
+      ])
+      pc.getStats = async () => reports
+      await tick(1000)
+      assert.equal(rtc.getDiagnostic().pair, 'relay / srflx')
+      assert.equal(rtc.getDiagnostic().localRelayProtocol, 'tls')
+      assert.equal(rtc.getDiagnostic().remoteRelayProtocol, null)
+      assert.equal(rtc.getDiagnostic().rttMs, 125)
+      assert.equal(rtc.getDiagnostic().sendBytesPerSecond, null)
+      selected.bytesSent += 3000
+      selected.bytesReceived += 1000
+      reports.get('asset').bytesSent += 2000
+      await tick(1000)
+      assert.equal(rtc.getDiagnostic().sendBytesPerSecond, 3000)
+      assert.equal(rtc.getDiagnostic().receiveBytesPerSecond, 1000)
+      assert.equal(rtc.getDiagnostic().assetBytesPerSecond, 2000)
+      selected.bytesSent = 1
+      await tick(1000)
+      assert.equal(
+        rtc.getDiagnostic().sendBytesPerSecond,
+        null,
+        'counter reset must not produce negative speed'
+      )
+      reports.delete('transport')
+      reports.set('pair-2', { ...selected, id: 'pair-2' })
+      await tick(1000)
+      assert.equal(rtc.getDiagnostic().pair, null, 'ambiguous nominated pairs must not be guessed')
+      assert.ok(!/SECRET_|192\.0\.2\.99/.test(JSON.stringify(rtc.getDiagnostic())))
+    }
+  )
+  await run('end-of-candidates is exchanged after SDP, buffered and deduplicated', async () => {
+    const { rtc, pc, sent } = session(true, 'completion')
+    pc.emitDuringLocal = true
     await rtc.start()
-    await rtc.receive('ANSWER', signal(rtc.connectionId, 1, {description: description('answer','remote-1')}))
-    pc.network('connected'); pc.channel.open(); await flush()
-    pc.getStats = async () => new Map([
-      ['transport',{type:'transport',selectedCandidatePairId:'pair'}],
-      ['pair',{type:'candidate-pair',localCandidateId:'local',remoteCandidateId:'remote'}],
-      ['local',{type:'local-candidate',candidateType:'relay',username:credentials.iceServers[0].username}],
-      ['remote',{type:'remote-candidate',candidateType:'host'}],
-    ])
-    await tick(31_000)
-    assert.equal(refreshed, 1)
-    assert.equal(rtc.channel, channel)
-    assert.equal(pc.offers[1].iceRestart, true)
-    assert.equal(getRtcDiagnostics().find(d=>d.connectionId==='turn-refresh').relay, true)
-    await rtc.receive('ANSWER',signal(rtc.connectionId, 2, {description:description('answer','remote-2')}))
-    await flush()
-    authorized = false
-    rtc.clearTurn('撤销测试'); await flush()
-    assert.equal(pc.config.iceTransportPolicy, 'all')
-    assert.equal(pc.config.iceServers.length, 1)
-    assert.equal(JSON.stringify(getRtcDiagnostics()).includes('SECRET_TURN'), false)
-    assert.equal(JSON.stringify(logs).includes('SECRET_TURN'), false)
+    emit(pc, 'icecandidate', { candidate: null })
+    assert.equal(sent[0].type, 'OFFER')
+    assert.equal(sent.at(-1).payload.candidate.candidate, '')
+    const complete = signal(rtc.connectionId, 1, { candidate: { candidate: '' } })
+    await rtc.receive(
+      'ICE_CANDIDATE',
+      signal(rtc.connectionId, 1, { candidate: candidate('early') })
+    )
+    await rtc.receive('ICE_CANDIDATE', complete)
+    assert.equal(pc.additions.length, 0)
+    await rtc.receive(
+      'ANSWER',
+      signal(rtc.connectionId, 1, { description: description('answer', 'remote-1') })
+    )
+    await rtc.receive('ICE_CANDIDATE', complete)
+    assert.deepEqual(pc.additions, [candidate('early').candidate, ''])
+    const counters = rtc.getDiagnostic().candidates
+    assert.equal(counters.applied, 2)
+    assert.equal(counters.duplicates, 1)
+    assert.equal(counters.localComplete, true)
+    assert.equal(counters.remoteComplete, true)
   })
+  for (const [dtls, sctp, code] of [
+    ['connecting', 'connecting', 'DTLS_TIMEOUT'],
+    ['connected', 'connecting', 'SCTP_TIMEOUT'],
+    ['connected', 'connected', 'DATA_CHANNEL_TIMEOUT']
+  ]) {
+    await run(`${code} has a distinct diagnosis and bounded restart`, async () => {
+      const { rtc, pc } = session(true, code)
+      pc.sctp = { state: sctp, transport: { state: dtls } }
+      await rtc.start()
+      await rtc.receive(
+        'ANSWER',
+        signal(rtc.connectionId, 1, { description: description('answer', 'remote-1') })
+      )
+      pc.network('connected')
+      await tick(20_000)
+      assert.equal(rtc.getDiagnostic().errorCode, code)
+      assert.equal(pc.offers.length, 2)
+      await tick(100_000)
+      assert.equal(rtc.phase, 'failed')
+      assert.ok(pc.offers.length <= 3)
+    })
+  }
+  await run(
+    'forced TURN cannot offer without credentials; unused expiry does not interrupt P2P',
+    async () => {
+      const forced = session(true, 'force-missing', { testOnlyForceRelay: true })
+      await forced.rtc.start()
+      assert.equal(forced.rtc.phase, 'failed')
+      assert.equal(forced.rtc.getDiagnostic().errorCode, 'TURN_REQUIRED')
+      assert.equal(forced.pc.offers.length, 0)
+      const { rtc, pc } = session(true, 'direct-expiry')
+      rtc.applyTurn({
+        iceServers: [{ urls: 'turn:relay.test', username: 'u', credential: 'c' }],
+        expiresAt: 3000
+      })
+      await rtc.start()
+      await rtc.receive(
+        'ANSWER',
+        signal(rtc.connectionId, 1, { description: description('answer', 'remote-1') })
+      )
+      pc.network('connected')
+      pc.channel.open()
+      await tick(4000)
+      assert.equal(rtc.phase, 'connected')
+      assert.equal(pc.offers.length, 1)
+      assert.equal(rtc.getDiagnostic().turn, 'expired')
+    }
+  )
+  await run(
+    'asynchronous TURN authorization and credentials do not block the signaling inbox',
+    async () => {
+      const binding = deferred()
+      const host = new WebRtcRemoteHostTransport({
+        signalingUrl: 'ws://test',
+        iceServers: [],
+        testOnlyForceRelay: true,
+        turnAuth: { binding: () => binding.promise, onChanged: () => () => {} }
+      })
+      const started = host.start()
+      await flush()
+      const ws = Socket.all.at(-1)
+      ws.message('ROOM_CREATED', {
+        roomCode: 'ABCDEF',
+        createdAt: '2026-10-11T00:00:00Z',
+        expiresAt: '9999-12-31T00:00:00Z',
+        resumeToken: '0123456789abcdef'
+      })
+      await started
+      ws.message('PEER_JOINED', { role: 'FIRST', sessionId: 'async-player' })
+      ws.message(
+        'PEER_READY',
+        signal('async-ready', 0, { fromRole: 'FIRST', fromSessionId: 'async-player' })
+      )
+      await flush()
+      const pc = Peer.all.at(-1)
+      assert.equal(pc.offers.length, 0)
+      binding.resolve('SECRET_BINDING')
+      await flush()
+      ws.message('TURN_STATUS', { turnAuthorizedUntil: 3_600_000 })
+      await flush()
+      const request = ws.sent.find((message) => message.type === 'TURN_REQUEST')
+      assert.ok(request, 'TURN status was blocked by pending peer startup')
+      assert.equal(pc.offers.length, 0)
+      ws.message(
+        'TURN_CREDENTIALS',
+        {
+          roomId: 'ABCDEF',
+          peerId: 'async-player',
+          connectionId: 'async-ready',
+          expiresAt: 3_600_000,
+          iceServers: [
+            { urls: 'turns:relay.test', username: 'SECRET_USER', credential: 'SECRET_PASSWORD' }
+          ]
+        },
+        request.requestId
+      )
+      await flush()
+      assert.equal(pc.offers.length, 1)
+      assert.equal(pc.config.iceTransportPolicy, 'relay')
+      assert.equal(pc.config.iceServers[0].credential, 'SECRET_PASSWORD')
+      assert.ok(!/SECRET_BINDING|SECRET_PASSWORD/.test(JSON.stringify(logs)))
+      await host.stop()
+    }
+  )
+  await run(
+    'image transfer pins its stream when optional channel opens late; close fails queued send',
+    async () => {
+      const { rtc, pc } = session(true, 'streams')
+      await rtc.start()
+      pc.channel.open()
+      const host = new WebRtcRemoteHostTransport({ signalingUrl: 'ws://test', iceServers: [] })
+      const peer = {
+        peerId: 'peer-1',
+        side: 'first',
+        role: 'FIRST',
+        rtc,
+        announced: true,
+        assetTransfers: new Map(),
+        nextAssetAt: 0,
+        controlUntil: 0
+      }
+      host.peers.set('first', peer)
+      await host.send(peer.peerId, {
+        type: 'ASSET_START',
+        payload: { transferId: 'first', asset: { size: 3 } }
+      })
+      const assets = new Channel('xqb-remote-bp-assets-v1')
+      emit(pc, 'datachannel', { channel: assets })
+      assets.open()
+      const completion = host.send(peer.peerId, {
+        type: 'ASSET_COMPLETE',
+        payload: { transferId: 'first' }
+      })
+      await tick(200)
+      await completion
+      assert.equal(assets.sent.length, 0)
+      assert.equal(pc.channel.sent.at(-1).type, 'ASSET_COMPLETE')
+      const second = host.send(peer.peerId, {
+        type: 'ASSET_START',
+        payload: { transferId: 'second', asset: { size: 3 } }
+      })
+      await tick(200)
+      await second
+      assert.equal(assets.sent.length, 1)
+      assets.bufferedAmount = 128 * 1024
+      const blocked = host
+        .send(peer.peerId, { type: 'ASSET_COMPLETE', payload: { transferId: 'second' } })
+        .catch((error) => error)
+      await flush()
+      assets.close()
+      await tick(20)
+      assert.match((await blocked).message, /已关闭/)
+      assert.equal(peer.assetTransfers.size, 0)
+    }
+  )
+  await run(
+    'TURN refresh keeps DataChannel, removes expired/revoked relays, and redacts diagnostics',
+    async () => {
+      let refreshed = 0,
+        authorized = true
+      const credentials = {
+        iceServers: [
+          {
+            urls: ['turn:relay.example.test:3478'],
+            username: 'SECRET_TURN_USER',
+            credential: 'SECRET_TURN_CREDENTIAL'
+          }
+        ],
+        expiresAt: 100_000
+      }
+      const { rtc, pc } = session(true, 'turn-refresh', {
+        prepareRestart: async () => {
+          if (!authorized) return
+          refreshed++
+          rtc.applyTurn({ ...credentials, expiresAt: now + 3_600_000 })
+        }
+      })
+      assert.equal(pc.config.iceTransportPolicy, 'all')
+      assert.equal(
+        pc.config.iceServers.some((s) => String(s.urls).includes('turn:')),
+        false
+      )
+      rtc.turnRequested()
+      rtc.applyTurn(credentials)
+      assert.equal(pc.config.iceServers.length, 2)
+      assert.equal(pc.config.iceTransportPolicy, 'all')
+      const channel = rtc.channel
+      await rtc.start()
+      await rtc.receive(
+        'ANSWER',
+        signal(rtc.connectionId, 1, { description: description('answer', 'remote-1') })
+      )
+      pc.network('connected')
+      pc.channel.open()
+      await flush()
+      pc.getStats = async () =>
+        new Map([
+          ['transport', { type: 'transport', selectedCandidatePairId: 'pair' }],
+          [
+            'pair',
+            { type: 'candidate-pair', localCandidateId: 'local', remoteCandidateId: 'remote' }
+          ],
+          [
+            'local',
+            {
+              type: 'local-candidate',
+              candidateType: 'relay',
+              username: credentials.iceServers[0].username
+            }
+          ],
+          ['remote', { type: 'remote-candidate', candidateType: 'host' }]
+        ])
+      await tick(70_000)
+      assert.equal(refreshed, 1)
+      assert.equal(rtc.channel, channel)
+      assert.equal(pc.offers[1].iceRestart, true)
+      assert.equal(getRtcDiagnostics().find((d) => d.connectionId === 'turn-refresh').relay, true)
+      await rtc.receive(
+        'ANSWER',
+        signal(rtc.connectionId, 2, { description: description('answer', 'remote-2') })
+      )
+      await flush()
+      authorized = false
+      rtc.clearTurn('撤销测试')
+      await flush()
+      assert.equal(pc.config.iceTransportPolicy, 'all')
+      assert.equal(pc.config.iceServers.length, 1)
+      assert.equal(JSON.stringify(getRtcDiagnostics()).includes('SECRET_TURN'), false)
+      assert.equal(JSON.stringify(logs).includes('SECRET_TURN'), false)
+    }
+  )
   await run('relay policy is opt-in and requires temporary credentials', async () => {
     const { rtc, pc } = session(false, 'test-relay', { testOnlyForceRelay: true })
-    assert.equal(pc.config.iceTransportPolicy, 'all')
-    rtc.applyTurn({ iceServers:[{urls:['turn:relay.example.test'],username:'mock-user',credential:'mock-credential'}], expiresAt: 2_000 })
+    assert.equal(pc.config.iceTransportPolicy, 'relay')
+    rtc.applyTurn({
+      iceServers: [
+        { urls: ['turn:relay.example.test'], username: 'mock-user', credential: 'mock-credential' }
+      ],
+      expiresAt: 2_000
+    })
     assert.equal(pc.config.iceTransportPolicy, 'relay')
     await tick(2_000)
-    assert.equal(pc.config.iceTransportPolicy, 'all')
+    assert.equal(
+      pc.config.iceTransportPolicy,
+      'relay',
+      'forced mode must never silently test direct connectivity'
+    )
     assert.equal(rtc.relayExpiresAt, null)
-    assert.equal(getRtcDiagnostics().find(d=>d.connectionId==='test-relay').turn, 'expired')
-    assert.throws(()=>rtc.applyTurn({ iceServers:[], expiresAt:0 }), /无效|过期/)
+    assert.equal(getRtcDiagnostics().find((d) => d.connectionId === 'test-relay').turn, 'expired')
+    assert.throws(() => rtc.applyTurn({ iceServers: [], expiresAt: 0 }), /无效|过期/)
   })
   await run(
     'signaling outage can skip an offer generation and late socket errors still reconnect',
@@ -410,8 +719,11 @@ async function main() {
         signal(rtc.connectionId, 2, { description: description('answer', 'remote-2') })
       )
       assert.equal(pc.additions.length, 1)
-      assert.deepEqual(pc.config.iceServers, [{ urls: ['stun:example.test'] }],
-        'public/static TURN configuration must never grant paid access')
+      assert.deepEqual(
+        pc.config.iceServers,
+        [{ urls: ['stun:example.test'] }],
+        'public/static TURN configuration must never grant paid access'
+      )
     }
   )
   await run(
@@ -491,7 +803,14 @@ async function main() {
       await tick(19_000)
       assert.notEqual(rtc.phase, 'failed')
       await tick(1_000)
-      assert.equal(rtc.phase, 'failed')
+      assert.equal(rtc.phase, 'reconnecting')
+      assert.equal(sent.at(-1).type, 'ICE_RESTART_REQUEST')
+      await tick(100_000)
+      assert.equal(
+        rtc.phase,
+        'failed',
+        'data transport recovery is still bounded by the total deadline'
+      )
     }
   )
   await run('old connection callbacks and in-flight SDP cannot send after close', async () => {
@@ -585,24 +904,41 @@ async function main() {
       pc.channel.open()
       assert.equal(pc.channel.bufferedAmountLowThreshold, 16 * 1024)
       pc.channel.bufferedAmount = 48 * 1024
-      const image = host.send('player-1', { type: 'ASSET_CHUNK', payload: { index: 0, data: 'YWJj' } })
-      const nextImage = host.send('player-1', { type: 'ASSET_COMPLETE', payload: {} })
+      const image = host.send('player-1', {
+        type: 'ASSET_START',
+        payload: { transferId: 'asset-1', asset: { size: 3 } }
+      })
+      const nextImage = host.send('player-1', {
+        type: 'ASSET_COMPLETE',
+        payload: { transferId: 'asset-1' }
+      })
       await flush()
       assert.equal(pc.channel.sent.length, 0, 'bulk transfer must pause on a congested relay')
       await host.send('player-1', { type: 'ACTION_RESULT', payload: { actionId: 'select-1' } })
       await host.send('player-1', { type: 'STATE_UPDATE', payload: { state: { revision: 2 } } })
       await host.send('player-1', { type: 'PONG', payload: {} })
-      assert.deepEqual(pc.channel.sent.map(m => m.type), ['ACTION_RESULT', 'STATE_UPDATE', 'PONG'],
-        'controls must pass waiting images, preserving acknowledgement/state order')
+      assert.deepEqual(
+        pc.channel.sent.map((m) => m.type),
+        ['ACTION_RESULT', 'STATE_UPDATE', 'PONG'],
+        'controls must pass waiting images, preserving acknowledgement/state order'
+      )
       pc.channel.bufferedAmount = 0
       emit(pc.channel, 'bufferedamountlow')
+      await tick(200)
       await Promise.all([image, nextImage])
-      assert.deepEqual(pc.channel.sent.slice(-2).map(m => m.type), ['ASSET_CHUNK', 'ASSET_COMPLETE'])
+      assert.deepEqual(
+        pc.channel.sent.slice(-2).map((m) => m.type),
+        ['ASSET_START', 'ASSET_COMPLETE']
+      )
       pc.channel.bufferedAmount = 48 * 1024
-      const interruptedImage = host.send('player-1', { type: 'ASSET_CHUNK', payload: {} })
-      const interruptedResult = interruptedImage.catch(error => error)
+      const interruptedImage = host.send('player-1', {
+        type: 'ASSET_START',
+        payload: { transferId: 'asset-2', asset: { size: 3 } }
+      })
+      const interruptedResult = interruptedImage.catch((error) => error)
       await flush()
       await host.stop()
+      await tick(20)
       assert.match((await interruptedResult).message, /已关闭/)
     }
   )

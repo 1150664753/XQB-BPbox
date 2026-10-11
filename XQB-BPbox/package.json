@@ -25,6 +25,7 @@
     "build:linux": "electron-vite build && electron-builder --linux",
     "test:webrtc": "node scripts/webrtc-self-check.cjs",
     "test:remote-images": "node scripts/remote-image-self-check.cjs",
+    "test:remote-network": "node scripts/remote-network-self-check.cjs",
     "test:turn-desktop": "node scripts/turn-desktop-self-check.cjs"
   },
   "dependencies": {

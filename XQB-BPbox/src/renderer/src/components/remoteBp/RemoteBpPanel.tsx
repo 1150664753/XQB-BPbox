@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import RemoteBpNetworkDiagnostics from './RemoteBpNetworkDiagnostics'
 
 import {
   DEFAULT_REMOTE_SIDE_MAPPING,
@@ -161,6 +162,7 @@ export default function RemoteBpPanel({ host }: { host: RemoteBpHost }): React.J
       </div>
 
       {room.error ? <small className="remote-bp-error">{room.error}</small> : null}
+      {room.transport === 'webrtc' ? <RemoteBpNetworkDiagnostics host={host} room={room} /> : null}
       <div className="bp-card-actions">
         <button
           type="button"
