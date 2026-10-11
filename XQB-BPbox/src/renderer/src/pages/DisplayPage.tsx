@@ -7,6 +7,7 @@ import DisplayCanvas, {
 import type {
   BpAction,
   BpActionRecord,
+  BpPreviewSelection,
   BpDisplayReplayClickType,
   BpEventRecord,
   BpRuntimeState,
@@ -21,6 +22,13 @@ import type {
 } from '../types/bp'
 import type { Character } from '../types/character'
 import { playManagedAudio, updateManagedAudioVolume } from '../utils/audioPlayback'
+import {
+  mainTimelinePoints,
+  replayTimeline,
+  sortClickPoints,
+  timelinePreviewAt,
+  type TimelineProgress
+} from '../../../shared/voiceTimeline'
 import { displayAudioGain } from '../../../shared/displayAudioVolume'
 import {
   DEFAULT_PV_END_TIME,
@@ -960,136 +968,55 @@ function pairedEffectKeysFromActions(actions: BpActionRecord[]): string[] {
 }
 
 function normalizeTimelineClickPoints(
-  clickPoints: VoiceTimelineClickPoint[] | null | undefined
+  points: VoiceTimelineClickPoint[] | null | undefined
 ): VoiceTimelineClickPoint[] {
-  if (!Array.isArray(clickPoints)) {
-    return []
-  }
-
-  return [...clickPoints]
-    .map((point): VoiceTimelineClickPoint | null => {
-      const type = point?.type === 'delay_extra_click' ? 'delay_extra_click' : 'bp_step'
-      const time = Number(point?.time)
-      if (!Number.isFinite(time) || time < 0) {
-        return null
-      }
-
-      return {
-        ...point,
-        type,
-        time
-      }
-    })
-    .filter((point): point is VoiceTimelineClickPoint => point !== null)
-    .sort((left, right) => {
-      if (left.time !== right.time) {
-        return left.time - right.time
-      }
-      if (left.type === right.type) {
-        return String(left.id).localeCompare(String(right.id))
-      }
-      return left.type === 'delay_extra_click' ? -1 : 1
-    })
-}
-
-interface TimelineReplayProgress {
-  cursor: number
-  completedDelayedChangeKeys: Set<string>
-  delayClickProgress: Record<string, number>
-  clickIndex: number
+  return sortClickPoints(
+    (Array.isArray(points) ? points : []).filter(
+      (point) =>
+        point &&
+        Number.isFinite(point.time) &&
+        point.time >= 0 &&
+        (point.type === 'bp_step' || point.type === 'delay_extra_click' || point.type === 'preview')
+    )
+  )
 }
 
 interface PendingUpPvContext {
   key: string
 }
 
-function applyPendingDelayedClicks(
-  pendingDelayedChanges: PendingDelayedPageChange[],
-  completedDelayedChangeKeys: Set<string>,
-  delayClickProgress: Record<string, number>
-): {
-  completedDelayedChangeKeys: Set<string>
-  delayClickProgress: Record<string, number>
-} {
-  const nextProgress = { ...delayClickProgress }
-  const nextCompletedKeys = new Set(completedDelayedChangeKeys)
-
-  pendingDelayedChanges.forEach((pendingDelayedChange) => {
-    const completedClicks = (nextProgress[pendingDelayedChange.key] ?? 0) + 1
-    if (completedClicks >= pendingDelayedChange.requiredClicks) {
-      delete nextProgress[pendingDelayedChange.key]
-      nextCompletedKeys.add(pendingDelayedChange.key)
-      return
-    }
-    nextProgress[pendingDelayedChange.key] = completedClicks
-  })
-
-  return {
-    completedDelayedChangeKeys: nextCompletedKeys,
-    delayClickProgress: nextProgress
-  }
-}
-
 function buildTimelineReplayProgress(
   sourceState: BpRuntimeState,
   pageChanges: DisplayPageChange[],
-  clickPoints: VoiceTimelineClickPoint[],
+  points: VoiceTimelineClickPoint[],
   time: number
-): TimelineReplayProgress {
-  const points = clickPoints.filter((point) => point.time <= time + 0.001)
-  let cursor = 0
-  let completedDelayedChangeKeys = new Set<string>()
-  let delayClickProgress: Record<string, number> = {}
-
-  for (const point of points) {
-    const replayState = buildReplayState(sourceState, cursor)
-    const pendingDelayedChanges = resolveRuntimeEvents(
-      replayState,
-      pageChanges,
-      completedDelayedChangeKeys,
-      delayClickProgress
-    ).pendingDelayedChanges
-
-    if (point.type === 'delay_extra_click') {
-      if (pendingDelayedChanges.length === 0) {
-        continue
-      }
-      const next = applyPendingDelayedClicks(
-        pendingDelayedChanges,
-        completedDelayedChangeKeys,
-        delayClickProgress
-      )
-      completedDelayedChangeKeys = next.completedDelayedChangeKeys
-      delayClickProgress = next.delayClickProgress
-      continue
-    }
-
-    if (pendingDelayedChanges.length > 0) {
-      const next = applyPendingDelayedClicks(
-        pendingDelayedChanges,
-        completedDelayedChangeKeys,
-        delayClickProgress
-      )
-      completedDelayedChangeKeys = next.completedDelayedChangeKeys
-      delayClickProgress = next.delayClickProgress
-      continue
-    }
-
-    cursor = Math.min(cursor + 1, sourceState.actions.length)
-  }
-
-  return {
-    cursor,
-    completedDelayedChangeKeys,
-    delayClickProgress,
-    clickIndex: points.length
-  }
+): TimelineProgress {
+  return replayTimeline(
+    points,
+    time,
+    sourceState.actions.length,
+    (progress) =>
+      resolveRuntimeEvents(
+        buildReplayState(sourceState, progress.cursor),
+        pageChanges,
+        progress.completedDelayedChangeKeys,
+        progress.delayClickProgress
+      ).pendingDelayedChanges
+  )
 }
 
 function DisplayPage(): React.JSX.Element {
   const [settings, setSettings] = useState<DisplaySettings>(emptyDisplaySettings)
   const [sourceState, setSourceState] = useState<BpRuntimeState>(emptyState)
   const [replayCursor, setReplayCursor] = useState(0)
+  const [timelinePreview, setTimelinePreview] = useState<BpPreviewSelection | null>(null)
+  const timelineCursorRef = useRef(0)
+  const timelineTimeRef = useRef(0)
+  const timelineMainKeyRef = useRef('')
+  const timelinePageChangesRef = useRef(settings.pageChanges)
+  useEffect(() => {
+    timelinePageChangesRef.current = settings.pageChanges
+  }, [settings.pageChanges])
   const [chantVideo, setChantVideo] = useState<DisplayChantVideo | null>(null)
   const [preloadChantVideo, setPreloadChantVideo] = useState<DisplayChantVideo | null>(null)
   const [completedDelayedChangeKeys, setCompletedDelayedChangeKeys] = useState<Set<string>>(
@@ -1510,15 +1437,39 @@ function DisplayPage(): React.JSX.Element {
   }, [])
 
   const processVoiceTimelineAudioTime = useCallback((time: number): void => {
-    const clickPoints = voiceTimelineClickPointsRef.current
-    while (voiceTimelineClickIndexRef.current < clickPoints.length) {
-      const clickPoint = clickPoints[voiceTimelineClickIndexRef.current]
-      if (time + 0.01 < clickPoint.time) {
-        break
+    const points = voiceTimelineClickPointsRef.current
+    const next = points[voiceTimelineClickIndexRef.current]
+    const rewound = time < timelineTimeRef.current
+    timelineTimeRef.current = time
+    if (rewound || (next && next.time <= time + 0.001)) {
+      let end = voiceTimelineClickIndexRef.current
+      let hasMainClick = false
+      while (points[end] && points[end].time <= time + 0.001) {
+        if (points[end].type !== 'preview') hasMainClick = true
+        end += 1
       }
-      performReplayClickRef.current(clickPoint.type)
-      voiceTimelineClickIndexRef.current += 1
+      if (rewound || hasMainClick) {
+        // Recompute once for the whole batch, including simultaneous steps and extra clicks.
+        const progress = buildTimelineReplayProgress(
+          sourceStateRef.current,
+          timelinePageChangesRef.current,
+          points,
+          time
+        )
+        completedDelayedChangeKeysRef.current = progress.completedDelayedChangeKeys
+        delayClickProgressRef.current = progress.delayClickProgress
+        setCompletedDelayedChangeKeys(progress.completedDelayedChangeKeys)
+        setDelayClickProgress(progress.delayClickProgress)
+        setReplayCursor(progress.cursor)
+        timelineCursorRef.current = progress.cursor
+        voiceTimelineClickIndexRef.current = progress.clickIndex
+      } else {
+        voiceTimelineClickIndexRef.current = end
+      }
     }
+    setTimelinePreview(
+      timelinePreviewAt(points, time, sourceStateRef.current.actions[timelineCursorRef.current])
+    )
   }, [])
 
   const startVoiceTimelineFrame = useCallback(
@@ -1622,12 +1573,17 @@ function DisplayPage(): React.JSX.Element {
   const state = useMemo(() => {
     return {
       ...replayState,
+      previewSelection: voiceTimelineLinked
+        ? timelinePreview
+        : sourceState.playbackMode === 'live'
+          ? replayState.previewSelection
+          : null,
       eventHistory: eventState.eventHistory,
       currentEvents: eventState.currentEvents,
       executedPageChangeIds: eventState.executedPageChangeIds,
       currentPageChangeIds: eventState.currentPageChangeIds
     }
-  }, [eventState, replayState])
+  }, [eventState, replayState, sourceState.playbackMode, timelinePreview, voiceTimelineLinked])
   const currentCompletedPageChangeIds = useMemo(() => {
     const currentPageChangeIds = new Set(state.currentPageChangeIds ?? [])
     return [...completedPageChangeIds].filter((pageChangeId) =>
@@ -2313,6 +2269,12 @@ function DisplayPage(): React.JSX.Element {
       voiceTimelineAudioRef.current = null
     }
     voiceTimelineClickIndexRef.current = 0
+    timelineCursorRef.current = 0
+    timelineTimeRef.current = 0
+    timelineMainKeyRef.current = ''
+    // Reset the transient overlay together with the external audio session.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setTimelinePreview(null)
     voiceTimelineClickPointsRef.current = []
     voiceTimelinePlayingRef.current = false
     voiceTimelineSessionKeyRef.current = ''
@@ -2348,6 +2310,7 @@ function DisplayPage(): React.JSX.Element {
     }
     const handleEnded = (): void => {
       voiceTimelinePlayingRef.current = false
+      processVoiceTimelineAudioTime(audio.currentTime)
       cancelVoiceTimelineFrame()
     }
     const handleTimeUpdate = (): void => {
@@ -2410,24 +2373,52 @@ function DisplayPage(): React.JSX.Element {
         !voiceTimelinePlayingRef.current ||
         Math.abs(audio.currentTime - nextTime) > 0.35
 
+      const mainKey = JSON.stringify([mainTimelinePoints(clickPoints), settings.pageChanges])
+      const shouldRestoreMain =
+        isNewSession ||
+        mainKey !== timelineMainKeyRef.current ||
+        (shouldSyncTime && Math.abs(audio.currentTime - nextTime) > 0.02)
+      timelineMainKeyRef.current = mainKey
+
       if (shouldSyncTime && Math.abs(audio.currentTime - nextTime) > 0.02) {
         audio.currentTime = nextTime
       }
-      if (shouldSyncTime) {
+      {
+        const replayTime = shouldSyncTime ? nextTime : audio.currentTime
         const progress = buildTimelineReplayProgress(
           sourceStateRef.current,
           settings.pageChanges,
           clickPoints,
-          nextTime
+          replayTime
         )
-        completedDelayedChangeKeysRef.current = progress.completedDelayedChangeKeys
-        delayClickProgressRef.current = progress.delayClickProgress
-        setCompletedDelayedChangeKeys(progress.completedDelayedChangeKeys)
-        setDelayClickProgress(progress.delayClickProgress)
-        setDismissedEffectKeys(new Set())
-        clearPageChangeCompletionTracking()
-        lastPlayedCursorRef.current = Math.max(progress.cursor - 1, 0)
-        setReplayCursor(progress.cursor)
+        if (
+          shouldRestoreMain ||
+          progress.cursor !== timelineCursorRef.current ||
+          JSON.stringify(progress.delayClickProgress) !==
+            JSON.stringify(delayClickProgressRef.current) ||
+          [...progress.completedDelayedChangeKeys].join('|') !==
+            [...completedDelayedChangeKeysRef.current].join('|')
+        ) {
+          completedDelayedChangeKeysRef.current = progress.completedDelayedChangeKeys
+          delayClickProgressRef.current = progress.delayClickProgress
+          setCompletedDelayedChangeKeys(progress.completedDelayedChangeKeys)
+          setDelayClickProgress(progress.delayClickProgress)
+          setDismissedEffectKeys(new Set())
+          clearPageChangeCompletionTracking()
+          if (timelineCursorRef.current !== progress.cursor || isNewSession) {
+            lastPlayedCursorRef.current = Math.max(progress.cursor - 1, 0)
+          }
+          timelineCursorRef.current = progress.cursor
+          setReplayCursor(progress.cursor)
+        }
+        setTimelinePreview(
+          timelinePreviewAt(
+            clickPoints,
+            replayTime,
+            sourceStateRef.current.actions[progress.cursor]
+          )
+        )
+        timelineTimeRef.current = replayTime
         voiceTimelineClickIndexRef.current = progress.clickIndex
       }
       voiceTimelineAppliedSessionKeyRef.current = sessionKey

@@ -1,5 +1,6 @@
 ﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, MouseEvent as ReactMouseEvent } from 'react'
+import { closePreviewRecords, recordPreviewSelection } from '../../../shared/voiceTimeline'
 import { createPortal } from 'react-dom'
 
 import type {
@@ -1242,7 +1243,8 @@ function buildBpResultPayload(runtime: BpRuntimeState, flow: FlowConfig, name: s
     createdAt: runtime.createdAt,
     starTeam: runtime.starTeam,
     railTeam: runtime.railTeam,
-    actions: runtime.actions
+    actions: runtime.actions,
+    previewRecords: closePreviewRecords(runtime.previewRecords)
   }
   const upCharacterPvPath = cleanOptionalPath(runtime.upCharacterPvPath)
 
@@ -1296,6 +1298,7 @@ function createRuntimeFromResult(
   runtime.starTeam = result.starTeam
   runtime.railTeam = result.railTeam
   runtime.actions = result.actions
+  runtime.previewRecords = result.previewRecords ?? []
   runtime.upCharacterPvPath = cleanOptionalPath(result.upCharacterPvPath)
   runtime.upCharacterPvUrl = null
   runtime.upCharacterPvStartTime = normalizePvStartTime(result.upCharacterPvStartTime)
@@ -5848,6 +5851,11 @@ function StartBpPanel({
         : null
       const runtimeWithMode = {
         ...withFollowingStep(nextRuntime, flow),
+        previewSelection: mode === 'live' ? nextRuntime.previewSelection : null,
+        previewRecords:
+          mode === 'live'
+            ? nextRuntime.previewRecords
+            : closePreviewRecords(nextRuntime.previewRecords),
         upCharacterPvPath,
         upCharacterPvUrl,
         upCharacterPvStartTime: normalizePvStartTime(nextRuntime.upCharacterPvStartTime),
@@ -6123,6 +6131,7 @@ function StartBpPanel({
       buildRuntimeFromActions(bpFlowRef.current, actions, currentRuntime.createdAt),
       currentRuntime
     )
+    nextRuntime.previewRecords = closePreviewRecords(currentRuntime.previewRecords)
 
     selectedCharacterIdRef.current = null
     selectedLightConeIdRef.current = null
@@ -6282,6 +6291,7 @@ function StartBpPanel({
       buildRuntimeFromActions(bpFlowRef.current, actions, currentRuntime.createdAt),
       currentRuntime
     )
+    nextRuntime.previewRecords = closePreviewRecords(currentRuntime.previewRecords)
 
     selectedCharacterIdRef.current = null
     selectedLightConeIdRef.current = null
@@ -6332,18 +6342,31 @@ function StartBpPanel({
       const currentRuntime = runtimeRef.current
       const step = currentRuntime.currentStep
       const previewSelection =
+        bpMode === 'live' &&
         !liveWaitingExtraClick &&
         target &&
         step &&
         (step.action === 'ban' || step.action === 'pick')
           ? { side: actorSide, action: step.action, target }
           : null
-      await window.bpAPI.bp.sendStateToDisplay({
+      const nextRuntime = {
         ...currentRuntime,
-        previewSelection
-      })
+        previewSelection,
+        previewRecords:
+          bpMode === 'live' && step
+            ? recordPreviewSelection(
+                currentRuntime.previewRecords,
+                step,
+                previewSelection,
+                createBpActionId()
+              )
+            : currentRuntime.previewRecords
+      }
+      runtimeRef.current = nextRuntime
+      setRuntime(nextRuntime)
+      await window.bpAPI.bp.sendStateToDisplay(nextRuntime)
     },
-    [liveWaitingExtraClick]
+    [bpMode, liveWaitingExtraClick]
   )
 
   useEffect(() => {
@@ -6494,6 +6517,9 @@ function StartBpPanel({
     const nextRuntime = withUpCharacterPv(
       buildRuntimeFromActions(bpFlow, runtime.actions.slice(0, -1), runtime.createdAt),
       runtime
+    )
+    nextRuntime.previewRecords = closePreviewRecords(runtime.previewRecords).filter(
+      (record) => record.stepIndex <= (nextRuntime.currentStep?.index ?? 0)
     )
     setSelectedCharacterId(null)
     setSelectedLightConeId(null)

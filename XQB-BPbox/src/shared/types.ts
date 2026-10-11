@@ -410,6 +410,15 @@ export interface BpPreviewSelection {
   target: BpTeamTarget
 }
 
+/** Optional live selections; never part of the authoritative BAN/PICK actions. */
+export interface BpPreviewRecord {
+  id: string
+  stepIndex: number
+  selection: BpPreviewSelection
+  createdAt: string
+  duration?: number
+}
+
 export interface TeamBpState {
   name: string
   picks: BpTeamTarget[]
@@ -465,6 +474,7 @@ export interface BpRuntimeState {
   status: 'idle' | 'running' | 'complete'
   currentStep: FlowStep | null
   previewSelection?: BpPreviewSelection | null
+  previewRecords?: BpPreviewRecord[]
   slotEffectPreview?: BpSlotEffectPreview | null
   followingStep?: FlowStep | null
   slotCounts: BpSlotCounts
@@ -488,6 +498,7 @@ export interface BpResult {
   starTeam: TeamBpState
   railTeam: TeamBpState
   actions: BpActionRecord[]
+  previewRecords?: BpPreviewRecord[]
 }
 
 export interface BpResultListItem {
@@ -499,12 +510,17 @@ export interface BpResultListItem {
   actionCount: number
 }
 
-export type VoiceTimelineClickPointType = 'bp_step' | 'delay_extra_click'
+export type VoiceTimelineClickPointType = 'bp_step' | 'delay_extra_click' | 'preview'
 
 export interface VoiceTimelineClickPoint {
   id: string
   time: number
   type: VoiceTimelineClickPointType
+  /** Stable insertion order, including when several clicks share a timestamp. */
+  sequence?: number
+  previewRecord?: BpPreviewRecord | null
+  /** Legacy metadata only; preview playback lasts until the next selection or confirmation. */
+  previewDuration?: number
   stepIndex?: number | null
   stepName?: string | null
   side?: BpSide | null

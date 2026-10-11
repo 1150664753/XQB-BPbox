@@ -5,6 +5,7 @@ export type {
   BpEventRecord,
   BpPlaybackMode,
   BpPreviewSelection,
+  BpPreviewRecord,
   BpResult,
   BpResultListItem,
   BpRuntimeState,

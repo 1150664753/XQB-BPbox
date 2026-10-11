@@ -35,6 +35,7 @@ import type {
   VoiceTimelinePlayback
 } from '../../shared/types'
 import { normalizePvEndTime, normalizePvStartTime } from '../../shared/pvPlayback'
+import { normalizePreviewRecords } from '../../shared/voiceTimeline'
 
 let latestRuntimeState: BpRuntimeState | null = null
 let latestPreviewState: BpRuntimeState | null = null
@@ -85,7 +86,8 @@ function normalizeResult(result: Partial<BpResult>, fallbackName: string): BpRes
       picks: [],
       bans: []
     },
-    actions: Array.isArray(result.actions) ? result.actions : []
+    actions: Array.isArray(result.actions) ? result.actions : [],
+    previewRecords: normalizePreviewRecords(result.previewRecords)
   }
 }
 

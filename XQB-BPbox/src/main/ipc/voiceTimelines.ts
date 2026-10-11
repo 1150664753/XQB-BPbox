@@ -18,6 +18,7 @@ import {
   storedPathToFileUrl
 } from '../assets'
 import { notifyProjectFilesChanged } from '../projectFileWatchers'
+import { normalizePreviewRecords, withPointSequences } from '../../shared/voiceTimeline'
 import type {
   BpAction,
   BpSide,
@@ -83,7 +84,12 @@ function normalizeTargetType(value: unknown): BpTargetType | null {
 function normalizeClickPoint(value: unknown, index: number): VoiceTimelineClickPoint {
   const raw =
     value && typeof value === 'object' ? (value as Partial<VoiceTimelineClickPoint>) : undefined
-  const type = raw?.type === 'delay_extra_click' ? 'delay_extra_click' : 'bp_step'
+  const type =
+    raw?.type === 'preview'
+      ? 'preview'
+      : raw?.type === 'delay_extra_click'
+        ? 'delay_extra_click'
+        : 'bp_step'
   const time = Math.max(0, numberOrFallback(raw?.time, 0))
   const stepIndex =
     raw?.stepIndex === null || raw?.stepIndex === undefined
@@ -100,6 +106,13 @@ function normalizeClickPoint(value: unknown, index: number): VoiceTimelineClickP
     id,
     time,
     type,
+    sequence: Number.isFinite(raw?.sequence) ? raw?.sequence : undefined,
+    previewRecord:
+      type === 'preview' ? (normalizePreviewRecords([raw?.previewRecord])[0] ?? null) : null,
+    previewDuration:
+      type === 'preview' && Number.isFinite(raw?.previewDuration)
+        ? raw?.previewDuration
+        : undefined,
     stepIndex,
     stepName: stringOrEmpty(raw?.stepName) || null,
     side: normalizeSide(raw?.side),
@@ -122,17 +135,11 @@ function normalizeVoiceTimeline(
   const name = stringOrEmpty(value.name) || fallbackName || '未命名配音轴'
   const createdAt = stringOrEmpty(value.createdAt) || now
   const audioPath = stringOrEmpty(value.audioPath)
-  const clickPoints = (Array.isArray(value.clickPoints) ? value.clickPoints : [])
-    .map((point, index) => normalizeClickPoint(point, index))
-    .sort((left, right) => {
-      if (left.time !== right.time) {
-        return left.time - right.time
-      }
-      if (left.type === right.type) {
-        return left.id.localeCompare(right.id)
-      }
-      return left.type === 'delay_extra_click' ? -1 : 1
-    })
+  const clickPoints = withPointSequences(
+    (Array.isArray(value.clickPoints) ? value.clickPoints : []).map((point, index) =>
+      normalizeClickPoint(point, index)
+    )
+  )
 
   return {
     id: stringOrEmpty(value.id) || `voice-timeline-${Date.now()}`,

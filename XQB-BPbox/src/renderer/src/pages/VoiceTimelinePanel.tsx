@@ -4,6 +4,7 @@ import DisplayCanvas, { type DisplayChantVideo } from '../components/display/Dis
 import type {
   BpAction,
   BpActionRecord,
+  BpPreviewRecord,
   BpResult,
   BpResultListItem,
   BpRuntimeState,
@@ -23,6 +24,16 @@ import type {
 import type { Character } from '../types/character'
 import type { LightCone } from '../types/lightCone'
 import { playManagedAudio, updateManagedAudioVolume } from '../utils/audioPlayback'
+import {
+  mainTimelinePoints,
+  previewCandidatesForStep,
+  removeTimelinePoint,
+  moveTimelinePoint,
+  replayTimeline,
+  sortClickPoints,
+  timelinePreviewAt,
+  withPointSequences
+} from '../../../shared/voiceTimeline'
 import { displayAudioGain } from '../../../shared/displayAudioVolume'
 import {
   getPvPlaybackRange,
@@ -74,12 +85,6 @@ interface TimelineStepTemplate {
 interface PendingDelayedPageChange {
   key: string
   requiredClicks: number
-}
-
-interface ReplayProgress {
-  cursor: number
-  completedDelayedChangeKeys: Set<string>
-  delayClickProgress: Record<string, number>
 }
 
 const playbackRates = [0.5, 0.75, 1, 1.25, 1.5, 2]
@@ -622,18 +627,6 @@ function emptyTimelineConfig(name = '新建配音轴'): VoiceTimelineConfig {
   }
 }
 
-function sortClickPoints(points: VoiceTimelineClickPoint[]): VoiceTimelineClickPoint[] {
-  return [...points].sort((left, right) => {
-    if (left.time !== right.time) {
-      return left.time - right.time
-    }
-    if (left.type === right.type) {
-      return left.id.localeCompare(right.id)
-    }
-    return left.type === 'delay_extra_click' ? -1 : 1
-  })
-}
-
 function VoiceTimelinePanel({
   active,
   selectedVoiceTimelineFile,
@@ -654,7 +647,6 @@ function VoiceTimelinePanel({
   const [pendingPointDragId, setPendingPointDragId] = useState<string | null>(null)
   const [audioError, setAudioError] = useState('')
   const [displayLinked, setDisplayLinked] = useState(false)
-  const [extraClickSerial, setExtraClickSerial] = useState(0)
   const [audioUrl, setAudioUrl] = useState<string | null>(null)
   const [audioDuration, setAudioDuration] = useState(0)
   const [previewChantVideo, setPreviewChantVideo] = useState<DisplayChantVideo | null>(null)
@@ -677,7 +669,6 @@ function VoiceTimelinePanel({
   const displaySessionIdRef = useRef('')
   const displayLinkedRef = useRef(false)
   const trackRef = useRef<HTMLDivElement>(null)
-  const pointIdSerialRef = useRef(0)
   const characterLookup = useMemo(
     () => new Map(characters.map((character) => [character.id, character])),
     [characters]
@@ -790,7 +781,13 @@ function VoiceTimelinePanel({
       }
 
       const loaded = await window.bpAPI.voiceTimelines.load(fileName)
-      setTimeline({ ...loaded, clickPoints: sortClickPoints(loaded.clickPoints) })
+      setTimeline({ ...loaded, clickPoints: withPointSequences(loaded.clickPoints) })
+      setSelectedPointId(null)
+      currentTimeRef.current = 0
+      playingRef.current = false
+      setPlaying(false)
+      audioRef.current?.pause()
+      if (audioRef.current) audioRef.current.currentTime = 0
       setPlaybackRate(
         playbackRates.includes(Number(loaded.playbackRate)) ? Number(loaded.playbackRate) : 1
       )
@@ -1040,93 +1037,41 @@ function VoiceTimelinePanel({
     })
   }, [selectedResult])
 
-  const insertedStepIds = useMemo(() => {
-    return new Set(
-      timeline.clickPoints
-        .filter((point) => point.type === 'bp_step')
-        .map((point) => `${point.stepIndex}-${point.action}-${point.targetId}`)
-    )
-  }, [timeline.clickPoints])
-
-  const pendingTemplates = useMemo(() => {
-    return stepTemplates.filter(
-      (step) => !insertedStepIds.has(`${step.stepIndex}-${step.action}-${step.targetId}`)
-    )
-  }, [insertedStepIds, stepTemplates])
-
   const sortedClickPoints = useMemo(
     () => sortClickPoints(timeline.clickPoints),
     [timeline.clickPoints]
   )
-
-  const previewProgress = useMemo<ReplayProgress>(() => {
-    const points = sortedClickPoints.filter((point) => point.time <= currentTime + 0.001)
-    let progress: ReplayProgress = {
-      cursor: 0,
-      completedDelayedChangeKeys: new Set(),
-      delayClickProgress: {}
-    }
-
-    for (const point of points) {
-      const replayState = buildReplayState(sourceRuntime, progress.cursor)
-      const pending = pendingDelayedChanges(
-        replayState,
+  const mainPoints = useMemo(() => mainTimelinePoints(sortedClickPoints), [sortedClickPoints])
+  const lastMainPoint = mainPoints.at(-1)
+  const progressAt = useCallback(
+    (time: number) =>
+      replayTimeline(sortedClickPoints, time, sourceRuntime.actions.length, (progress) =>
+        pendingDelayedChanges(
+          buildReplayState(sourceRuntime, progress.cursor),
+          displaySettings?.pageChanges ?? [],
+          progress.completedDelayedChangeKeys,
+          progress.delayClickProgress
+        )
+      ),
+    [sortedClickPoints, sourceRuntime, displaySettings?.pageChanges]
+  )
+  const previewProgress = useMemo(() => progressAt(currentTime), [progressAt, currentTime])
+  // Insertion follows the complete authored stream, never the playhead's replay cursor.
+  const insertionProgress = useMemo(() => progressAt(Infinity), [progressAt])
+  const insertionDelays = useMemo(
+    () =>
+      pendingDelayedChanges(
+        buildReplayState(sourceRuntime, insertionProgress.cursor),
         displaySettings?.pageChanges ?? [],
-        progress.completedDelayedChangeKeys,
-        progress.delayClickProgress
-      )
-
-      if (point.type === 'delay_extra_click') {
-        if (pending.length === 0) {
-          continue
-        }
-        const next = { ...progress.delayClickProgress }
-        const completed = new Set(progress.completedDelayedChangeKeys)
-        for (const pendingPoint of pending) {
-          const clicks = (next[pendingPoint.key] ?? 0) + 1
-          if (clicks >= pendingPoint.requiredClicks) {
-            delete next[pendingPoint.key]
-            completed.add(pendingPoint.key)
-          } else {
-            next[pendingPoint.key] = clicks
-          }
-        }
-        progress = {
-          ...progress,
-          delayClickProgress: next,
-          completedDelayedChangeKeys: completed
-        }
-        continue
-      }
-
-      if (pending.length > 0) {
-        const next = { ...progress.delayClickProgress }
-        const completed = new Set(progress.completedDelayedChangeKeys)
-        for (const pendingPoint of pending) {
-          const clicks = (next[pendingPoint.key] ?? 0) + 1
-          if (clicks >= pendingPoint.requiredClicks) {
-            delete next[pendingPoint.key]
-            completed.add(pendingPoint.key)
-          } else {
-            next[pendingPoint.key] = clicks
-          }
-        }
-        progress = {
-          ...progress,
-          delayClickProgress: next,
-          completedDelayedChangeKeys: completed
-        }
-        continue
-      }
-
-      progress = {
-        ...progress,
-        cursor: Math.min(progress.cursor + 1, sourceRuntime.actions.length)
-      }
-    }
-
-    return progress
-  }, [currentTime, displaySettings?.pageChanges, sortedClickPoints, sourceRuntime])
+        insertionProgress.completedDelayedChangeKeys,
+        insertionProgress.delayClickProgress
+      ),
+    [sourceRuntime, insertionProgress, displaySettings?.pageChanges]
+  )
+  const currentTemplate = stepTemplates[insertionProgress.cursor]
+  const waitingTemplate = stepTemplates[insertionProgress.cursor + (insertionDelays.length ? 0 : 1)]
+  const selectedPoint = sortedClickPoints.find((point) => point.id === selectedPointId)
+  const previewRecords = selectedResult?.previewRecords ?? []
 
   const previewRuntime = useMemo(() => {
     const replayState = buildReplayState(sourceRuntime, previewProgress.cursor)
@@ -1138,12 +1083,17 @@ function VoiceTimelinePanel({
     )
     return {
       ...replayState,
+      previewSelection: timelinePreviewAt(
+        sortedClickPoints,
+        currentTime,
+        sourceRuntime.actions[previewProgress.cursor]
+      ),
       currentEvents: eventState.currentEvents,
       eventHistory: eventState.eventHistory,
       executedPageChangeIds: eventState.executedPageChangeIds,
       currentPageChangeIds: eventState.currentPageChangeIds
     }
-  }, [displaySettings?.pageChanges, previewProgress, sourceRuntime])
+  }, [currentTime, sortedClickPoints, displaySettings?.pageChanges, previewProgress, sourceRuntime])
 
   const pendingDelayForNow = useMemo(() => {
     const replayState = buildReplayState(sourceRuntime, previewProgress.cursor)
@@ -1419,10 +1369,33 @@ function VoiceTimelinePanel({
     }))
   }
 
+  const addPoint = (point: Omit<VoiceTimelineClickPoint, 'id' | 'sequence'>): void => {
+    const nextPoint = { ...point, id: crypto.randomUUID() }
+    setTimeline((current) => ({
+      ...current,
+      clickPoints: sortClickPoints([
+        ...current.clickPoints,
+        {
+          ...nextPoint,
+          sequence: Math.max(-1, ...current.clickPoints.map((item) => item.sequence ?? -1)) + 1
+        }
+      ])
+    }))
+    setSelectedPointId(nextPoint.id)
+    // The clickPoints effect synchronizes the complete updated stream to the linked player.
+  }
+
+  const canAppendMain = (): boolean => {
+    if (lastMainPoint && currentTime < lastMainPoint.time) {
+      onMessage('info', '请将时间定位到最后一次主流程操作之后再插入')
+      return false
+    }
+    return true
+  }
+
   const insertStepAtCurrentTime = (template: TimelineStepTemplate): void => {
-    pointIdSerialRef.current += 1
-    const point: VoiceTimelineClickPoint = {
-      id: `click-${pointIdSerialRef.current}`,
+    if (template !== currentTemplate || insertionDelays.length || !canAppendMain()) return
+    addPoint({
       time: currentTime,
       type: 'bp_step',
       stepIndex: template.stepIndex,
@@ -1433,45 +1406,75 @@ function VoiceTimelinePanel({
       targetId: template.targetId,
       targetName: template.targetName,
       iconPath: template.iconPath
-    }
-    const nextPoints = sortClickPoints([...timeline.clickPoints, point])
-    setTimeline((current) => ({
-      ...current,
-      clickPoints: nextPoints
-    }))
-    syncDisplayPlayback({ clickPoints: nextPoints, currentTime })
-    onMessage('success', `已插入：${template.stepName} @ ${formatTimeLabel(currentTime)}`)
+    })
   }
 
   const insertExtraClickAtCurrentTime = (): void => {
-    setExtraClickSerial((current) => current + 1)
-    const index = extraClickSerial + 1
-    pointIdSerialRef.current += 1
-    const point: VoiceTimelineClickPoint = {
-      id: `extra-${pointIdSerialRef.current}`,
+    if (!insertionDelays.length || !canAppendMain()) return
+    addPoint({
       time: currentTime,
       type: 'delay_extra_click',
-      label: `额外点击 ${index}`
-    }
-    const nextPoints = sortClickPoints([...timeline.clickPoints, point])
-    setTimeline((current) => ({
-      ...current,
-      clickPoints: nextPoints
-    }))
-    syncDisplayPlayback({ clickPoints: nextPoints, currentTime })
-    onMessage('success', `已插入额外点击 @ ${formatTimeLabel(currentTime)}`)
+      label: '额外点击',
+      stepIndex: sourceRuntime.actions[insertionProgress.cursor - 1]?.stepIndex ?? null,
+      relatedDelayChangeId: insertionDelays[0].key
+    })
+  }
+
+  const insertPreview = (record: BpPreviewRecord): void => {
+    const template = stepTemplates.find((step) => step.stepIndex === record.stepIndex)
+    if (!template) return
+    const target = record.selection.target
+    addPoint({
+      time: currentTime,
+      type: 'preview',
+      stepIndex: record.stepIndex,
+      stepName: template.stepName,
+      side: record.selection.side,
+      action: record.selection.action,
+      targetType: isLightConeTarget(target) ? 'lightCone' : 'character',
+      targetId: target.id,
+      targetName: isLightConeTarget(target) ? target.name : target.chinese_name,
+      iconPath: isLightConeTarget(target) ? target.small_image_url : target.avatar_small_image_url,
+      previewRecord: record
+    })
   }
 
   const deletePoint = (pointId: string): void => {
-    const nextPoints = timeline.clickPoints.filter((point) => point.id !== pointId)
-    setTimeline((current) => ({
-      ...current,
-      clickPoints: nextPoints
-    }))
+    const nextPoints = removeTimelinePoint(timeline.clickPoints, pointId)
+    if (nextPoints === timeline.clickPoints) return
+    setTimeline((current) => ({ ...current, clickPoints: nextPoints }))
     syncDisplayPlayback({ clickPoints: nextPoints, currentTime })
-    if (selectedPointId === pointId) {
-      setSelectedPointId(null)
-    }
+    if (selectedPointId === pointId) setSelectedPointId(null)
+  }
+
+  const renderPreviewCards = (stepIndex: number): React.JSX.Element | null => {
+    const records = previewCandidatesForStep(previewRecords, stepIndex)
+    if (!records.length) return null
+    return (
+      <div className="voice-preview-children">
+        {records.map((record) => {
+          const target = record.selection.target
+          const name = isLightConeTarget(target) ? target.name : target.chinese_name
+          const icon = isLightConeTarget(target)
+            ? target.small_image_url
+            : target.avatar_small_image_url
+          return (
+            <article className="voice-preview-child" key={record.id}>
+              {icon ? <img src={icon} alt="" /> : null}
+              <span title={name}>预选 · {name}</span>
+              <button
+                type="button"
+                title="插入此预选（可重复插入）"
+                aria-label={'插入预选 ' + name}
+                onClick={() => insertPreview(record)}
+              >
+                +
+              </button>
+            </article>
+          )
+        })}
+      </div>
+    )
   }
 
   const saveTimeline = async (forceSaveAs = false): Promise<void> => {
@@ -1559,11 +1562,7 @@ function VoiceTimelinePanel({
       const time = duration * ratio
       setTimeline((current) => ({
         ...current,
-        clickPoints: sortClickPoints(
-          current.clickPoints.map((point) =>
-            point.id === pendingPointDragId ? { ...point, time } : point
-          )
-        )
+        clickPoints: moveTimelinePoint(current.clickPoints, pendingPointDragId, time)
       }))
     }
 
@@ -1718,7 +1717,9 @@ function VoiceTimelinePanel({
               const label =
                 point.type === 'delay_extra_click'
                   ? point.label || '额外点击'
-                  : point.stepName || 'BP点击'
+                  : point.type === 'preview'
+                    ? `${point.stepName} · 预选`
+                    : point.stepName || 'BP点击'
               const tooltip = [
                 `步骤：${label}`,
                 `时间：${formatTimeLabel(point.time)}`,
@@ -1743,7 +1744,12 @@ function VoiceTimelinePanel({
                     setPendingPointDragId(point.id)
                   }}
                 >
-                  {template?.iconUrl ? <img src={template.iconUrl} alt="" /> : null}
+                  {(point.type === 'preview' ? point.iconPath : template?.iconUrl) ? (
+                    <img
+                      src={(point.type === 'preview' ? point.iconPath : template?.iconUrl) ?? ''}
+                      alt=""
+                    />
+                  ) : null}
                   <span>{label}</span>
                 </button>
               )
@@ -1755,6 +1761,50 @@ function VoiceTimelinePanel({
               }}
             />
           </div>
+
+          {selectedPoint ? (
+            <div className={`voice-point-editor ${selectedPoint.type}`}>
+              <strong>
+                {selectedPoint.type === 'preview'
+                  ? `预选 · ${selectedPoint.targetName} → ${selectedPoint.stepName}`
+                  : selectedPoint.stepName || '额外点击'}
+              </strong>
+              <label>
+                时间（秒）
+                <input
+                  type="number"
+                  min={0}
+                  max={Math.max(timeline.duration, audioDuration) || undefined}
+                  step={0.1}
+                  value={Number(selectedPoint.time.toFixed(3))}
+                  onChange={(event) => {
+                    const time = Math.min(
+                      Number(event.target.value),
+                      Math.max(timeline.duration, audioDuration) || Infinity
+                    )
+                    setTimeline((current) => ({
+                      ...current,
+                      clickPoints: moveTimelinePoint(current.clickPoints, selectedPoint.id, time)
+                    }))
+                  }}
+                />
+              </label>
+              {selectedPoint.type === 'preview' ? (
+                <>
+                  <button
+                    type="button"
+                    className="danger"
+                    onClick={() => deletePoint(selectedPoint.id)}
+                  >
+                    删除预选
+                  </button>
+                  <small>持续展示至下一次预选或本步正式确选。</small>
+                </>
+              ) : (
+                <small>主流程时间不能越过相邻操作。</small>
+              )}
+            </div>
+          ) : null}
 
           <div className="voice-audio-scrubber">
             <input
@@ -1820,17 +1870,17 @@ function VoiceTimelinePanel({
             <h3>已插入流程</h3>
             <div className="voice-bottom-info">
               <span>当前时间：{formatTimeLabel(currentTime)}</span>
-              <span>已插入点击：{timeline.clickPoints.length}</span>
+              <span>主流程操作：{mainPoints.length}</span>
               <span>
                 预览进度：{previewProgress.cursor}/{sourceRuntime.actions.length}
               </span>
               {pendingDelayForNow.length > 0 ? (
-                <span className="warning">当前存在延迟变化，BP 点击会被拦截，请插入额外点击。</span>
+                <span className="warning">预览当前位置等待额外点击。</span>
               ) : null}
             </div>
           </header>
           <div className="voice-inserted-list">
-            {sortedClickPoints.map((point) => {
+            {mainPoints.slice(-2).map((point) => {
               const template = stepTemplates.find(
                 (item) =>
                   item.stepIndex === point.stepIndex &&
@@ -1847,38 +1897,44 @@ function VoiceTimelinePanel({
                   : actionLabel(point.action || 'pick')
 
               return (
-                <article
-                  key={point.id}
-                  className={`voice-point-item ${point.type} ${selectedPointId === point.id ? 'active' : ''}`}
-                  onClick={() => {
-                    setSelectedPointId(point.id)
-                    jumpTo(point.time)
-                  }}
-                >
-                  <div className="voice-point-main">
-                    {template?.iconUrl ? <img src={template.iconUrl} alt="" /> : null}
-                    <div className="voice-point-meta">
-                      <strong>{pointLabel}</strong>
-                      <span>{formatTimeLabel(point.time)}</span>
-                      <small>{actionText}</small>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    className="danger"
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      deletePoint(point.id)
+                <div key={point.id} className="voice-inserted-group">
+                  <article
+                    key={point.id}
+                    className={`voice-point-item ${point.type} ${selectedPointId === point.id ? 'active' : ''}`}
+                    onClick={() => {
+                      setSelectedPointId(point.id)
+                      jumpTo(point.time)
                     }}
                   >
-                    删除
-                  </button>
-                </article>
+                    <div className="voice-point-main">
+                      {template?.iconUrl ? <img src={template.iconUrl} alt="" /> : null}
+                      <div className="voice-point-meta">
+                        <strong>
+                          {point.id === lastMainPoint?.id ? '本步' : '上一步'} · {pointLabel}
+                        </strong>
+                        <span>{formatTimeLabel(point.time)}</span>
+                        <small>
+                          {actionText} {point.targetName}
+                        </small>
+                      </div>
+                    </div>
+                    {point.id === lastMainPoint?.id ? (
+                      <button
+                        type="button"
+                        className="danger"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          deletePoint(point.id)
+                        }}
+                      >
+                        撤回
+                      </button>
+                    ) : null}
+                  </article>
+                </div>
               )
             })}
-            {sortedClickPoints.length === 0 ? (
-              <div className="voice-empty">暂无点击点。</div>
-            ) : null}
+            {mainPoints.length === 0 ? <div className="voice-empty">暂无主流程操作。</div> : null}
           </div>
         </section>
       </div>
@@ -1886,31 +1942,83 @@ function VoiceTimelinePanel({
       <aside className="voice-pending-panel">
         <header>
           <h2>待插入 BP 内容</h2>
-          <button type="button" onClick={insertExtraClickAtCurrentTime}>
-            插入额外点击
-          </button>
+          <span>
+            {insertionProgress.cursor}/{stepTemplates.length}
+          </span>
         </header>
-        {pendingTemplates.length === 0 ? (
-          <div className="voice-empty">已插入全部 BP 步骤。</div>
-        ) : (
-          <div className="voice-pending-list">
-            {pendingTemplates.map((template) => (
-              <article key={template.id} className="voice-pending-item">
+        {insertionDelays.length ? (
+          <article className="voice-pending-item voice-current-step delay_extra_click">
+            <div className="voice-pending-meta">
+              <strong>额外点击</strong>
+              <span>
+                还需{' '}
+                {Math.max(
+                  ...insertionDelays.map(
+                    (change) =>
+                      change.requiredClicks -
+                      (insertionProgress.delayClickProgress[change.key] ?? 0)
+                  )
+                )}{' '}
+                次
+              </span>
+            </div>
+            <button type="button" className="primary" onClick={insertExtraClickAtCurrentTime}>
+              插入
+            </button>
+          </article>
+        ) : currentTemplate ? (
+          <div className="voice-current-group">
+            <article className="voice-pending-item voice-current-step">
+              <div className="voice-point-main">
+                {currentTemplate.iconUrl ? <img src={currentTemplate.iconUrl} alt="" /> : null}
                 <div className="voice-pending-meta">
-                  <strong>{template.stepName}</strong>
+                  <strong>{currentTemplate.stepName}</strong>
                   <span>
-                    {actionLabel(template.action)} /{' '}
-                    {template.side === 'star' ? '先手' : template.side === 'rail' ? '后手' : '双方'}
+                    {actionLabel(currentTemplate.action)} /{' '}
+                    {currentTemplate.side === 'star'
+                      ? '先手'
+                      : currentTemplate.side === 'rail'
+                        ? '后手'
+                        : '双方'}
                   </span>
-                  <span>{template.targetName || '-'}</span>
+                  <span>{currentTemplate.targetName || '-'}</span>
                 </div>
-                <button type="button" onClick={() => insertStepAtCurrentTime(template)}>
-                  插入
-                </button>
-              </article>
-            ))}
+              </div>
+              <button
+                type="button"
+                className="primary"
+                onClick={() => insertStepAtCurrentTime(currentTemplate)}
+              >
+                插入
+              </button>
+            </article>
+            {renderPreviewCards(currentTemplate.stepIndex)}
+          </div>
+        ) : (
+          <div className="voice-empty">
+            {selectedResult ? '已插入全部 BP 步骤。' : '请选择 BP 结果。'}
           </div>
         )}
+        {waitingTemplate ? (
+          <article className="voice-pending-item voice-waiting-step" aria-disabled="true">
+            <div className="voice-point-main">
+              {waitingTemplate.iconUrl ? <img src={waitingTemplate.iconUrl} alt="" /> : null}
+              <div className="voice-pending-meta">
+                <strong>等待 · {waitingTemplate.stepName}</strong>
+                <span>
+                  {waitingTemplate.side === 'star'
+                    ? '先手'
+                    : waitingTemplate.side === 'rail'
+                      ? '后手'
+                      : '双方'}{' '}
+                  / {actionLabel(waitingTemplate.action)}
+                </span>
+                <span>{waitingTemplate.targetName}</span>
+              </div>
+            </div>
+            <span>下一步</span>
+          </article>
+        ) : null}
       </aside>
     </section>
   )
