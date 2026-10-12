@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { exportRtcDiagnostics } from "../../../shared/remoteBpDiagnostics";
 import { CharacterCard } from "../components/CharacterCard";
 import { ConnectionBadge } from "../components/ConnectionBadge";
 import { EnergyFlowBackground } from "../components/EnergyFlowBackground";
@@ -334,7 +335,8 @@ export function BpPage({
                 </div>
               ) : (
                 <div className="empty-locks">
-                  没有符合筛选条件的可操作{showingLightCones ? "光锥" : "角色"}
+                  没有符合筛选条件的可操作
+                  {showingLightCones ? "光锥" : "角色"}
                 </div>
               )}
             </div>
@@ -422,6 +424,23 @@ export function BpPage({
           </span>
           <span>版本 {state.revision}</span>
           <span>{session.connection.latencyMs ?? "—"} 毫秒</span>
+          <button
+            type="button"
+            onClick={() => {
+              const url = URL.createObjectURL(
+                new Blob([exportRtcDiagnostics()], {
+                  type: "application/json",
+                }),
+              );
+              const link = document.createElement("a");
+              link.href = url;
+              link.download = "remote-bp-player-network.json";
+              link.click();
+              window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+            }}
+          >
+            导出网络诊断
+          </button>
         </section>
       </div>
     </main>

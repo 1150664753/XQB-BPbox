@@ -1,5 +1,10 @@
 /** Connection-layer only: BP messages and asset transfer stay in the existing adapters. */
-import { createRtcDiagnostics, type RtcDiagnostics } from './remoteBpDiagnostics'
+import {
+  createRtcDiagnostics,
+  iceServerEndpoint,
+  type RtcDiagnostics,
+  type AssetTransferDiagnostic
+} from './remoteBpDiagnostics'
 export { getRtcDiagnostics, exportRtcDiagnostics, type RtcDiagnostics } from './remoteBpDiagnostics'
 export type RtcPhase =
   | 'idle'
@@ -50,7 +55,9 @@ export const RTC_TIMING = {
   disconnectedGraceMs: 15_000,
   maxRestarts: 2,
   signalTtlMs: 120_000,
-  maxCandidates: 256
+  maxCandidates: 256,
+  relayFallbackMs: 5_000,
+  udpPreferenceMs: 3_000
 } as const
 
 export interface BufferedRtcSignal {
@@ -202,12 +209,19 @@ export class RemoteBpRtcSession {
   private diagnostic: RtcDiagnostics
   private turnRequestedAt: number | null = null
   private turnRefreshLeadMs = 90_000
+  private relayServers: RTCIceServer[] = []
+  private tcpFallbackAt: number | null = null
+  private triedEarlyRelay = false
+  private refreshingRelay = false
+  private iceErrorLoggedAt = new Map<string, number>()
   private sample: {
     pairId: string
     at: number
     sent: number
     received: number
     assetSent: number
+    packetsSent: number | null
+    packetsDiscarded: number | null
   } | null = null
 
   constructor(private readonly options: RtcSessionOptions) {
@@ -257,14 +271,52 @@ export class RemoteBpRtcSession {
       this.flushLocalCandidates()
     })
     this.pc.addEventListener('icecandidateerror', (event) => {
-      if (this.active) {
-        this.recordError(
-          'ICE_SERVER_ERROR',
-          `ICE 服务收集失败（${Number.isInteger(event.errorCode) ? event.errorCode : '未知'}）`
-        )
+      if (!this.active) return
+      const server = iceServerEndpoint(event.url)
+      const code = Number.isInteger(event.errorCode) ? event.errorCode : 0
+      // Browser text is not trusted logging input. Preserve the concrete cause via an allowlist.
+      const native = String(event.errorText ?? '')
+      const reason = /host lookup|resolve|dns/i.test(native)
+        ? 'DNS_LOOKUP_FAILED'
+        : /timed? ?out|timeout/i.test(native)
+          ? 'SERVER_TIMEOUT'
+          : /unauthori|authenticat/i.test(native)
+            ? 'AUTHENTICATION_FAILED'
+            : /unreachable|not reachable|could not be reached/i.test(native)
+              ? 'SERVER_UNREACHABLE'
+              : code === 701
+                ? 'NO_LOCAL_CANDIDATE_REACHED_SERVER'
+                : 'SERVER_ERROR'
+      const protocol = server
+        ? /^turns:|^stuns:/i.test(server)
+          ? 'tls'
+          : /transport=tcp/i.test(server)
+            ? 'tcp'
+            : 'udp'
+        : null
+      const key = `${server}:${code}:${reason}`
+      const now = Date.now()
+      let entry = this.diagnostic.iceServerErrors.find(
+        (e) => e.server === server && e.code === code && e.reason === reason
+      )
+      if (!entry) {
+        entry = { server, protocol, code, reason, count: 0, firstAt: now, lastAt: now }
+        this.diagnostic.iceServerErrors.push(entry)
+        if (this.diagnostic.iceServerErrors.length > 32) this.diagnostic.iceServerErrors.shift()
+      }
+      entry.count++
+      entry.lastAt = now
+      if (now - (this.iceErrorLoggedAt.get(key) ?? -Infinity) >= 30_000) {
+        this.iceErrorLoggedAt.set(key, now)
+        if (this.iceErrorLoggedAt.size > 32)
+          this.iceErrorLoggedAt.delete(this.iceErrorLoggedAt.keys().next().value!)
+        this.recordError('ICE_SERVER_ERROR', `ICE ${code} · ${reason}`)
         this.log('candidate gathering error', {
-          errorCode: event.errorCode,
-          reason: 'ICE server candidate gathering failed'
+          server,
+          protocol,
+          errorCode: code,
+          reason,
+          count: entry.count
         })
       }
     })
@@ -303,6 +355,9 @@ export class RemoteBpRtcSession {
   get roundTripTimeMs(): number | null {
     return this.diagnostic.rttMs
   }
+  get selectedPairId(): string | null {
+    return this.diagnostic.selectedPair?.id ?? null
+  }
   get needsTurnRefresh(): boolean {
     return (
       this.relayExpiresAt === null || this.relayExpiresAt - Date.now() <= this.turnRefreshLeadMs
@@ -312,6 +367,52 @@ export class RemoteBpRtcSession {
     Object.assign(this.diagnostic.assets, patch)
     this.diagnostic.assetRateLimit = rate
   }
+  beginTransfer(id: string, direction: 'send' | 'receive', totalBytes: number): void {
+    const now = Date.now()
+    this.diagnostic.transfers.push({
+      id,
+      direction,
+      totalBytes,
+      bytes: 0,
+      startedAt: now,
+      updatedAt: now,
+      status: 'transferring',
+      durationMs: null,
+      reason: null
+    })
+    if (this.diagnostic.transfers.length > 64) this.diagnostic.transfers.shift()
+  }
+  advanceTransfer(id: string, bytes: number): void {
+    const entry = this.diagnostic.transfers.find((t) => t.id === id && t.status === 'transferring')
+    if (entry) {
+      entry.bytes = Math.min(entry.totalBytes, entry.bytes + bytes)
+      entry.updatedAt = Date.now()
+    }
+  }
+  finishTransfer(
+    id: string,
+    status: AssetTransferDiagnostic['status'],
+    reason: string | null = null
+  ): void {
+    const entry = this.diagnostic.transfers.find((t) => t.id === id && t.status === 'transferring')
+    if (!entry) return
+    entry.status = status
+    entry.reason = reason && /^[A-Z0-9_]{1,64}$/.test(reason) ? reason : null
+    entry.updatedAt = Date.now()
+    entry.durationMs = entry.updatedAt - entry.startedAt
+    this.log('asset transfer finished', {
+      status,
+      durationMs: entry.durationMs,
+      bytes: entry.bytes,
+      code: entry.reason
+    })
+  }
+  recordActionResponse(durationMs: number): void {
+    if (!Number.isFinite(durationMs) || durationMs < 0) return
+    this.diagnostic.actionResponseMs = Math.round(durationMs)
+    this.diagnostic.actionResponses.push({ at: Date.now(), durationMs: Math.round(durationMs) })
+    if (this.diagnostic.actionResponses.length > 100) this.diagnostic.actionResponses.shift()
+  }
   recordError(code: string, reason: string): void {
     this.diagnostic.errorCode = /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : 'RTC_ERROR'
     this.diagnostic.reason = reason
@@ -319,12 +420,31 @@ export class RemoteBpRtcSession {
     this.log('connection error', { code: this.diagnostic.errorCode })
   }
 
-  applyTurn(payload: Record<string, unknown>): void {
-    if (!this.active) return
+  applyTurn(payload: Record<string, unknown>): boolean {
+    if (!this.active) return false
     const credentials = readTurnCredentials(payload)
-    if (credentials.expiresAt === this.relayExpiresAt) return
+    if (credentials.expiresAt === this.relayExpiresAt) return false
+    const firstInstall = this.relayExpiresAt === null
+    this.relayServers = credentials.iceServers
+    const udp = credentials.iceServers.flatMap((server) => {
+      const urls = (Array.isArray(server.urls) ? server.urls : [server.urls]).filter(
+        (url) => /^turn:/i.test(url) && !/transport=tcp/i.test(url)
+      )
+      return urls.length ? [{ ...server, urls }] : []
+    })
+    // A short UDP-only first attempt; TCP/TLS are retained and restored on timeout/failure.
+    const preferUdp = firstInstall && udp.length > 0
+    const hasTcp = credentials.iceServers.some((server) =>
+      (Array.isArray(server.urls) ? server.urls : [server.urls]).some(
+        (url) => /^turns:/i.test(url) || /transport=tcp/i.test(url)
+      )
+    )
+    this.tcpFallbackAt = preferUdp && hasTcp ? Date.now() + RTC_TIMING.udpPreferenceMs : null
     this.pc.setConfiguration({
-      iceServers: [...directIceServers(this.options.iceServers), ...credentials.iceServers],
+      iceServers: [
+        ...directIceServers(this.options.iceServers),
+        ...(preferUdp ? udp : credentials.iceServers)
+      ],
       iceTransportPolicy: this.options.testOnlyForceRelay ? 'relay' : 'all'
     })
     this.relayExpiresAt = credentials.expiresAt
@@ -334,6 +454,24 @@ export class RemoteBpRtcSession {
     )
     this.diagnostic.turn = 'ready'
     this.diagnostic.expiresAt = credentials.expiresAt
+    this.diagnostic.turnRequestedTtl = nonnegative(payload.requestedTtl)
+    this.diagnostic.turnActualTtl = nonnegative(payload.ttl)
+    this.diagnostic.turnTtlReason = enumValue(payload.ttlReason, [
+      'PROVIDER_TTL_MISMATCH_REASON_NOT_SUPPLIED',
+      'HOST_AUTH_EXPIRING',
+      'CONFIG_OVERRIDE'
+    ])
+    this.diagnostic.turnApiDomain = enumValue(payload.apiDomain, [
+      'wtn.volcvideo.com',
+      'wtn-lf.volcvideo.com',
+      'wtn-va.volcvideos.com',
+      'wtn-fr.volcvideos.com',
+      'wtn-sg.volcvideos.com'
+    ])
+    this.diagnostic.turnServers = credentials.iceServers
+      .flatMap((server) => (Array.isArray(server.urls) ? server.urls : [server.urls]))
+      .map(iceServerEndpoint)
+      .filter((url): url is string => url !== null)
     this.diagnostic.reason = null
     this.diagnostic.turnRequestMs =
       this.turnRequestedAt === null ? null : Date.now() - this.turnRequestedAt
@@ -347,6 +485,18 @@ export class RemoteBpRtcSession {
       )
     ]
     this.log('room TURN credentials installed', { expiresAt: credentials.expiresAt })
+    return true
+  }
+
+  private enableTcpFallback(): boolean {
+    if (this.tcpFallbackAt === null) return false
+    this.tcpFallbackAt = null
+    this.pc.setConfiguration({
+      iceServers: [...directIceServers(this.options.iceServers), ...this.relayServers],
+      iceTransportPolicy: this.options.testOnlyForceRelay ? 'relay' : 'all'
+    })
+    this.log('TURN TCP fallback enabled')
+    return true
   }
 
   turnRequested(): void {
@@ -367,6 +517,8 @@ export class RemoteBpRtcSession {
     if (!this.active) return
     const installed = this.relayExpiresAt !== null
     this.relayExpiresAt = null
+    this.relayServers = []
+    this.tcpFallbackAt = null
     this.diagnostic.turn = expired ? 'expired' : 'disabled'
     this.diagnostic.expiresAt = null
     this.diagnostic.reason = reason
@@ -437,15 +589,50 @@ export class RemoteBpRtcSession {
       this.diagnostic.sendBytesPerSecond = delta(sent, previous?.sent ?? 0)
       this.diagnostic.receiveBytesPerSecond = delta(received, previous?.received ?? 0)
       this.diagnostic.assetBytesPerSecond = delta(assetSent, previous?.assetSent ?? 0)
+      const packetsSent = nonnegative(selected?.packetsSent)
+      const packetsDiscarded = nonnegative(selected?.packetsDiscardedOnSend)
+      const packetDelta =
+        previous?.pairId === pairId && packetsSent !== null && previous.packetsSent !== null
+          ? packetsSent - previous.packetsSent
+          : 0
+      const discardDelta =
+        packetsDiscarded !== null && previous?.packetsDiscarded != null
+          ? packetsDiscarded - previous.packetsDiscarded
+          : -1
+      this.diagnostic.sendDiscardRatio =
+        packetDelta > 0 && discardDelta >= 0 ? Math.min(1, discardDelta / packetDelta) : null
       this.sample =
         pairId && sent !== null && received !== null
-          ? { pairId, at: now, sent, received, assetSent: assetSent ?? 0 }
+          ? {
+              pairId,
+              at: now,
+              sent,
+              received,
+              assetSent: assetSent ?? 0,
+              packetsSent,
+              packetsDiscarded
+            }
           : null
       this.diagnostic.relay = local === 'relay' || remote === 'relay'
-      if (this.diagnostic.pair !== pairType) {
-        this.diagnostic.pair = pairType
+      this.diagnostic.pair = pairType
+      if (pairId && this.diagnostic.selectedPair?.id !== pairId) {
+        this.diagnostic.selectedPair = {
+          at: now,
+          id: pairId,
+          localId: selected.localCandidateId ?? null,
+          remoteId: selected.remoteCandidateId ?? null,
+          localType: local,
+          remoteType: remote,
+          protocol: this.diagnostic.protocol,
+          localRelayProtocol: this.diagnostic.localRelayProtocol,
+          remoteRelayProtocol: this.diagnostic.remoteRelayProtocol,
+          server: iceServerEndpoint(localReport?.url)
+        }
+        this.diagnostic.pairHistory.push(this.diagnostic.selectedPair)
+        if (this.diagnostic.pairHistory.length > 50) this.diagnostic.pairHistory.shift()
         this.log('selected candidate pair', { pair: pairType, relay: this.diagnostic.relay })
       }
+      if (!pairId) this.diagnostic.selectedPair = null
       this.options.onDiagnostics?.(this.getDiagnostic())
     } catch {
       /* Stats are diagnostic only; never disrupt a BP connection. */
@@ -509,7 +696,10 @@ export class RemoteBpRtcSession {
 
   start(): Promise<void> {
     return this.enqueue(async () => {
-      if (this.options.testOnlyForceRelay && this.needsTurnRefresh) {
+      if (
+        this.options.testOnlyForceRelay &&
+        (this.relayExpiresAt === null || this.relayExpiresAt <= Date.now())
+      ) {
         this.fail('强制 TURN 测试缺少有效凭证', 'TURN_REQUIRED')
         return
       }
@@ -606,6 +796,8 @@ export class RemoteBpRtcSession {
         }
       } else {
         this.beginRound(generation)
+        if (this.tcpFallbackAt !== null && Date.now() >= this.tcpFallbackAt)
+          this.enableTcpFallback()
         if (generation > 1) {
           this.restartInFlight = true
           this.log('ICE Restart started (remote)')
@@ -794,10 +986,14 @@ export class RemoteBpRtcSession {
     this.log('ICE Restart started', { attempt: this.restartCount, reason })
     void this.enqueue(async () => {
       if (this.options.offerer) {
-        // Initial negotiation stays STUN-only. Obtain relay credentials only at recovery time.
-        if (this.options.prepareRestart) await this.options.prepareRestart()
+        // Retain an existing valid credential while a replacement is being obtained.
+        if (this.options.prepareRestart && this.needsTurnRefresh)
+          await this.options.prepareRestart()
         if (!this.active) return
-        if (this.options.testOnlyForceRelay && this.needsTurnRefresh) {
+        if (
+          this.options.testOnlyForceRelay &&
+          (this.relayExpiresAt === null || this.relayExpiresAt <= Date.now())
+        ) {
           this.fail('强制 TURN 测试无法取得有效凭证', 'TURN_REQUIRED')
           return
         }
@@ -921,16 +1117,37 @@ export class RemoteBpRtcSession {
       this.episodeStartedAt = null
       this.disconnectedAt = null
       this.iceConnectedAt = null
+      // UDP succeeded. Keep TCP available for a future restart, without letting
+      // the expired preference timer bypass the normal transient-disconnect grace.
+      this.enableTcpFallback()
       this.transition('connected', null)
       if (
         this.options.offerer &&
         this.relayExpiresAt !== null &&
         this.needsTurnRefresh &&
         (this.diagnostic.relay || this.options.testOnlyForceRelay) &&
+        !this.refreshingRelay &&
+        this.options.prepareRestart &&
         now - this.lastRelayRefreshAt >= Math.min(30_000, this.turnRefreshLeadMs)
       ) {
         this.lastRelayRefreshAt = now
-        this.requestRestart('中继凭证即将到期，正在更新')
+        this.refreshingRelay = true
+        const previousExpiry = this.relayExpiresAt
+        // A failed provider call must not restart a working match with the same credential.
+        void this.options
+          .prepareRestart()
+          .then(() => {
+            if (
+              this.active &&
+              this.relayExpiresAt !== null &&
+              this.relayExpiresAt !== previousExpiry
+            )
+              this.requestRestart('中继凭证已更新，正在切换 ICE')
+          })
+          .catch(() => this.turnFailed('TURN_UNAVAILABLE'))
+          .finally(() => {
+            this.refreshingRelay = false
+          })
       }
       return
     }
@@ -945,8 +1162,9 @@ export class RemoteBpRtcSession {
           : this.diagnostic.dtlsState === 'failed'
             ? 'DTLS_FAILED'
             : 'PEER_CONNECTION_FAILED'
-      this.recordError(code, '网络传输建立失败，正在受控恢复')
-      this.requestRestart(code)
+      if (!this.restartInFlight) this.recordError(code, '网络传输建立失败，正在受控恢复')
+      const promoted = this.enableTcpFallback()
+      this.requestRestart(code, promoted)
     } else if (ice === 'disconnected' || connection === 'disconnected') {
       if (this.disconnectedAt === null) this.disconnectedAt = now
       this.transition('reconnecting', '网络暂时中断，等待恢复')
@@ -959,6 +1177,32 @@ export class RemoteBpRtcSession {
           healthyIce ? 'connecting' : ice === 'checking' ? 'ice-checking' : 'signaling',
           null
         )
+    }
+    if (
+      !healthyIce &&
+      this.generation > 0 &&
+      this.tcpFallbackAt !== null &&
+      now >= this.tcpFallbackAt
+    ) {
+      this.enableTcpFallback()
+      if (this.options.offerer) {
+        this.requestRestart('TURN UDP 尚未连通，加入 TCP 备用', true)
+        return
+      }
+    }
+    if (
+      !healthyIce &&
+      this.options.offerer &&
+      this.options.prepareRestart &&
+      !this.triedEarlyRelay &&
+      !this.restartInFlight &&
+      this.generation > 0 &&
+      this.relayExpiresAt === null &&
+      now - this.roundStartedAt >= RTC_TIMING.relayFallbackMs
+    ) {
+      this.triedEarlyRelay = true
+      this.requestRestart('直连尚未建立，提前尝试 TURN')
+      return
     }
     if (
       healthyIce &&
@@ -1002,19 +1246,22 @@ export class RemoteBpRtcSession {
   private fail(reason: string, code?: string): void {
     if (!this.active) return
     if (this.restartInFlight) this.log('ICE Restart failure', { reason })
-    this.dispose()
+    this.dispose('ASSET_NETWORK_INTERRUPTED')
     if (code) this.recordError(code, reason)
     this.transition('failed', reason)
   }
 
-  close(): void {
+  close(reason = 'ASSET_CANCELLED'): void {
     if (!this.active) return
-    this.dispose()
+    this.dispose(reason)
     this.transition('closed', null)
   }
 
-  private dispose(): void {
+  private dispose(reason: string): void {
     this.active = false
+    for (const entry of this.diagnostic.transfers)
+      if (entry.status === 'transferring')
+        this.finishTransfer(entry.id, reason === 'ASSET_CANCELLED' ? 'cancelled' : 'failed', reason)
     window.clearInterval(this.timer)
     this.candidates = []
     this.seenCandidates.clear()

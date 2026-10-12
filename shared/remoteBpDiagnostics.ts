@@ -1,4 +1,34 @@
-/** An explicit allowlist: never retain SDP, addresses, ICE URLs or credentials. */
+/** Only credential-free STUN/TURN endpoints may be retained, never SDP or peer addresses. */
+export function iceServerEndpoint(value: unknown): string | null {
+  return typeof value === 'string' &&
+    value.length <= 512 &&
+    /^(?:stun|stuns|turn|turns):[a-z0-9.\-\[\]:]+(?:\?transport=(?:udp|tcp))?$/i.test(value)
+    ? value
+    : null
+}
+export interface AssetTransferDiagnostic {
+  id: string
+  direction: 'send' | 'receive'
+  startedAt: number
+  updatedAt: number
+  totalBytes: number
+  bytes: number
+  status: 'transferring' | 'submitted' | 'verified' | 'failed' | 'cancelled'
+  durationMs: number | null
+  reason: string | null
+}
+export interface CandidatePairDiagnostic {
+  at: number
+  id: string
+  localId: string | null
+  remoteId: string | null
+  localType: string | null
+  remoteType: string | null
+  protocol: string | null
+  localRelayProtocol: string | null
+  remoteRelayProtocol: string | null
+  server: string | null
+}
 export interface RtcDiagnostics {
   connectionId: string
   roomId: string
@@ -24,6 +54,24 @@ export interface RtcDiagnostics {
   relay: boolean
   forceRelay: boolean
   rttMs: number | null
+  selectedPair: CandidatePairDiagnostic | null
+  pairHistory: CandidatePairDiagnostic[]
+  iceServerErrors: Array<{
+    server: string | null
+    protocol: string | null
+    code: number
+    reason: string
+    count: number
+    firstAt: number
+    lastAt: number
+  }>
+  // SCTP/DataChannel has no interoperable packetsLost statistic. Do not substitute RTP or STUN loss.
+  packetLossRatio: number | null
+  packetLossSource: 'unavailable'
+  sendDiscardRatio: number | null
+  actionResponseMs: number | null
+  actionResponses: Array<{ at: number; durationMs: number }>
+  transfers: AssetTransferDiagnostic[]
   bytesSent: number | null
   bytesReceived: number | null
   sendBytesPerSecond: number | null
@@ -51,6 +99,11 @@ export interface RtcDiagnostics {
   expiresAt: number | null
   turnRequestMs: number | null
   turnProtocols: string[]
+  turnServers: string[]
+  turnApiDomain: string | null
+  turnRequestedTtl: number | null
+  turnActualTtl: number | null
+  turnTtlReason: string | null
   reason: string | null
   errorCode: string | null
   errorMessage: string | null
@@ -105,6 +158,15 @@ export function createRtcDiagnostics(
     relay: false,
     forceRelay,
     rttMs: null,
+    selectedPair: null,
+    pairHistory: [],
+    iceServerErrors: [],
+    packetLossRatio: null,
+    packetLossSource: 'unavailable',
+    sendDiscardRatio: null,
+    actionResponseMs: null,
+    actionResponses: [],
+    transfers: [],
     bytesSent: null,
     bytesReceived: null,
     sendBytesPerSecond: null,
@@ -132,6 +194,11 @@ export function createRtcDiagnostics(
     expiresAt: null,
     turnRequestMs: null,
     turnProtocols: [],
+    turnServers: [],
+    turnApiDomain: null,
+    turnRequestedTtl: null,
+    turnActualTtl: null,
+    turnTtlReason: null,
     reason: null,
     errorCode: null,
     errorMessage: null,
@@ -151,9 +218,9 @@ export function getRtcDiagnostics(roomId?: string | null): RtcDiagnostics[] {
 export function exportRtcDiagnostics(roomId?: string | null): string {
   return JSON.stringify(
     {
-      schemaVersion: 1,
+      schemaVersion: 2,
       exportedAt: new Date().toISOString(),
-      note: 'Candidate pair bytes are transport measurements; submitted assets are not receipt acknowledgements. No SDP, IP addresses, tokens or ICE credentials are exported.',
+      note: 'Includes credential-free ICE server endpoints and opaque selected pair IDs, never peer addresses, SDP, tokens or credentials. Submitted assets are not receipt acknowledgements; verified means receiver SHA-256 passed. DataChannel packet loss is unavailable; sendDiscardRatio measures local send discards only.',
       connections: getRtcDiagnostics(roomId)
     },
     null,

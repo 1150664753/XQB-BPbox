@@ -78,7 +78,23 @@ async function main() {
       return true
     },
     onState: () => {},
-    onMessage: () => {}
+    onMessage: (data) => {
+      const message = JSON.parse(String(data))
+      if (message.type === 'ACTION_REQUEST') {
+        peer.controlUntil = Date.now() + 150
+        void transport.send('player', {
+          type: 'ACTION_RESULT',
+          payload: {
+            actionId: message.payload.action.actionId,
+            accepted: true,
+            code: 'OK',
+            message: 'OK',
+            resultingRevision: 1,
+            stateChanged: false
+          }
+        })
+      }
+    }
   })
   player = new RemoteBpRtcSession({
     connectionId: 'loopback',
@@ -168,19 +184,21 @@ async function main() {
     'dedicated stream did not receive chunks'
   )
   const sentAt = performance.now()
-  await transport.send('player', {
-    type: 'ACTION_RESULT',
-    payload: {
-      actionId: 'test',
-      accepted: true,
-      code: 'OK',
-      message: 'OK',
-      resultingRevision: 1,
-      stateChanged: false
-    }
+  await client.sendAction({
+    actionId: 'test',
+    actorSide: 'first',
+    expectedRevision: 0,
+    stepIndex: 0,
+    createdAt: new Date().toISOString(),
+    kind: 'CONFIRM',
+    targets: []
   })
   await until(() => actionAt > 0, 'control result blocked behind image')
   check(received === 0, 'test did not exercise control during bulk transfer')
+  check(
+    player.getDiagnostic().actionResponseMs !== null,
+    'end-to-end action response was not recorded'
+  )
   // Simulate the client adapter's ready callback for the same PC during an ICE restart.
   ;(client as any).snapshot.state = 'reconnecting'
   ;(client as any).onDataChannelReady()
@@ -192,6 +210,19 @@ async function main() {
   )
   await sleep(1200)
   const diagnostic = host.getDiagnostic()
+  check(
+    player
+      .getDiagnostic()
+      .transfers.some(
+        (t) =>
+          t.id === 'one' && t.status === 'verified' && t.bytes === blob.size && t.durationMs! > 0
+      ),
+    'receiver completion was not SHA-256 verified and timed'
+  )
+  check(
+    diagnostic.transfers.some((t) => t.id === 'one' && t.status === 'submitted'),
+    'sender submission was not recorded'
+  )
   check(diagnostic.pair && !diagnostic.relay, 'actual selected ICE pair not diagnosed')
   check(diagnostic.bytesSent! > 0 && diagnostic.assetBytesSent! > 0, 'actual byte counters missing')
   check(
@@ -199,7 +230,7 @@ async function main() {
     'transport stages unavailable'
   )
   checks.push(
-    `real Chromium WebRTC, image integrity, control during bulk (${Math.round(actionAt - sentAt)} ms), ICE restart continuation, getStats counters`
+    `real Chromium WebRTC, image integrity, action round trip during bulk (${player.getDiagnostic().actionResponseMs} ms), ICE restart continuation, getStats counters`
   )
   host.assetChannel!.close()
   await until(

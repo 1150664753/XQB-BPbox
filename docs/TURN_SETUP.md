@@ -20,7 +20,7 @@ Cloudflare Worker **Secrets**（三个都不要写进源码、Vite 环境变量�
 | --- | --- |
 | `WTN_APP_ID` | `6ac735fb7305ab038c2e3546` |
 | `WTN_API_DOMAIN` | `wtn.volcvideo.com` |
-| `WTN_TURN_TTL_SECONDS` | `3600` |
+| `WTN_TURN_TTL_SECONDS` | `14400`（4 小时） |
 
 Worker 绑定：保留 `BP_ROOMS → BpRoom`，新增 `TURN_AUTH → TurnAuthority`；迁移 `v2-turn-auth` 创建 SQLite Durable Object。不要删除旧 `v1` 迁移，也不要清空现有房间存储。
 
@@ -88,7 +88,13 @@ BPbox 主控窗口按 **Ctrl+Shift+T**，输入密码并验证。成功后授权
 
 ## 连接、刷新和诊断
 
-普通模式首次协商保留现有 STUN/P2P。授权房间在连接失败、ICE 重启时按需获取 TURN；实际使用中继时，在凭证剩余有效期进入刷新窗口后更新并 ICE restart（窗口为安装时剩余 TTL 的 1/3，最多 90 秒）。更新通过 `setConfiguration` 合并原有 STUN 与服务器返回的 TURN，保留原 DataChannel、状态 revision 和未完成的资源接收。普通模式无权限、超时、配置缺失和无效上游返回仍允许 P2P；强制模式明确失败，不回退直连。健康直连不因闲置凭证到期而重连。
+普通模式首次协商保留现有 STUN/P2P；5 秒仍未连通时提前按需获取 TURN。首次中继尝试仅使用接口实际返回的 UDP URL，3 秒仍未连通或 ICE 明确失败时加入原始 TCP/TLS URL，并受控 ICE restart；只有 TCP 的响应直接使用 TCP。保留 15 秒短暂掉线宽限、两次重试和 120 秒总恢复期限，不因 701 单独重建连接。
+
+实际使用中继时，在凭证剩余有效期进入刷新窗口后更新（窗口为安装时剩余 TTL 的 1/3，最多 90 秒）。成功拿到新凭证才 ICE restart；请求失败保留仍有效的原连接，通常每 30 秒重试（短 TTL 按刷新窗口限频）。更新通过 `setConfiguration` 保留原 DataChannel、状态 revision 和未完成的资源接收。普通模式无权限、超时、配置缺失和无效上游返回仍允许 P2P；强制模式明确失败，不回退直连。健康直连不因闲置凭证到期而重连。
+
+房主授权为 7 天；请求 WTN API 的 JWT 为 300 秒；TURN 访问凭证请求 TTL 为 14400 秒，三者互相独立。房主授权临近到期时会缩短请求 TTL 并记录 `HOST_AUTH_EXPIRING`。`expiresAt` 始终从请求开始时间加接口实际返回 `ttl` 计算，不从客户端硬编码 4 小时推算。上游返回不同 TTL 时记录请求值、实际值；供应商没有说明原因时明确标记 `PROVIDER_TTL_MISMATCH_REASON_NOT_SUPPLIED`，不猜测原因。
+
+地域接入仍采用官方推荐的 `wtn.volcvideo.com`，支持配置文档列出的区域域名。这里的调用方是 Worker，其就近节点不一定适合双方玩家。诊断记录 API 域名、实际返回的无凭证服务器 URL、被选中的候选对及中继协议，供跨网实测后选择地域；不固定任何未经验证的中继 IP。详见 [2026-10-12 优化及验证记录](REMOTE_BP_NETWORK_OPTIMIZATION.md)。
 
 两端均过滤公共 `VITE_REMOTE_BP_ICE_SERVERS` 中的 TURN；请不要再把付费 TURN 用户名或 credential 放入 Vite 环境变量。只有服务端认证后下发的凭证能加入连接配置。
 

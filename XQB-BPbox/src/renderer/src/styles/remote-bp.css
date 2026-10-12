@@ -196,6 +196,11 @@
   color: #b42318;
 }
 
+.remote-bp-warning {
+  color: #946200;
+  line-height: 1.6;
+}
+
 .turn-auth-dialog { width: min(460px, calc(100vw - 48px)); padding: 24px; border: 1px solid var(--color-border, #d0d7de); border-radius: 8px; background: var(--color-bg, #fff); color: var(--color-text, #24292f); box-shadow: 0 18px 60px #0003; }
 .turn-auth-dialog::backdrop { background: #17202a66; }
 .turn-auth-dialog header, .turn-auth-dialog footer { display: flex; align-items: center; gap: 10px; }

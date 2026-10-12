@@ -87,6 +87,7 @@ export interface RemoteHostTransportStartResult {
 export interface RemoteHostTransportStatus {
   connectionState: RemoteBpRoomState['connectionState']
   error?: string | null
+  turnWarning?: string | null
   turnAuthorizedUntil?: number | null
 }
 

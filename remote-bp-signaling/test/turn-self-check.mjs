@@ -26,20 +26,43 @@ const providerData = ttl => ({ code: 200, ttl, ice_servers: [ { urls: ['stun:ign
 function checkProvider(url, authorization) {
   assert.equal(url.origin, 'https://wtn.volcvideo.com');
   assert.equal(url.pathname, '/turn/test-app');
-  assert.equal(url.searchParams.get('TTL'), '3600');
+  assert.equal(url.searchParams.get('TTL'), '14400');
   const [header, payload, signature] = authorization.slice(7).split('.');
   assert.equal(signature, createHmac('sha256', env.WTN_APP_KEY).update(`${header}.${payload}`).digest('base64url'));
   assert.deepEqual(Object.keys(JSON.parse(Buffer.from(payload, 'base64url'))).sort(), ['appID','exp','version']);
   assert.equal(JSON.parse(Buffer.from(payload, 'base64url')).version, '1.0');
+  assert.ok(Math.abs(JSON.parse(Buffer.from(payload, 'base64url')).exp - Date.now()/1000 - 300) < 2, 'API JWT remains 5 minutes, independent of TURN TTL');
 }
-const provider = async (url, options) => { providerCalls++; checkProvider(url, options.headers.Authorization); return Response.json(providerData(3600)); };
+const provider = async (url, options) => { providerCalls++; checkProvider(url, options.headers.Authorization); return Response.json(providerData(14400)); };
 const g = grant();
 await assert.rejects(issueTurnCredentials(mockEnv, null, 'peer', provider), /TURN_NOT_AUTHORIZED/);
 await assert.rejects(issueTurnCredentials({ ...mockEnv, WTN_APP_KEY: '' }, g, 'peer', provider), /TURN_NOT_CONFIGURED/);
 const credentials = await issueTurnCredentials(mockEnv, g, 'peer', provider);
+assert.equal(credentials.requestedTtl, 14400);
+assert.equal(credentials.ttl, 14400);
+assert.ok(Math.abs(credentials.expiresAt - Date.now() - 14400*1000) < 2000);
+assert.equal(credentials.apiDomain, 'wtn.volcvideo.com');
 assert.equal(credentials.iceServers[0].urls.length, 2);
 assert.deepEqual(await issueTurnCredentials(mockEnv, g, 'peer', provider), credentials);
 assert.equal(providerCalls, 1);
+for (const actualTtl of [3600, 7200, 18000]) {
+  const result = await issueTurnCredentials(mockEnv, grant(), 'ttl-test', async () => Response.json(providerData(actualTtl)));
+  assert.equal(result.ttl, actualTtl);
+  assert.equal(result.requestedTtl, 14400);
+  assert.equal(result.ttlReason, 'PROVIDER_TTL_MISMATCH_REASON_NOT_SUPPLIED');
+  assert.ok(Math.abs(result.expiresAt - Date.now() - actualTtl*1000) < 2000);
+}
+const expiringGrant = { ...grant(), expiresAt: Date.now() + 120_000 };
+const short = await issueTurnCredentials(mockEnv, expiringGrant, 'expiring-host', async url => {
+  const ttl = Number(url.searchParams.get('TTL'));
+  assert.ok(ttl <= 120 && ttl >= 118);
+  return Response.json(providerData(ttl));
+});
+assert.equal(short.ttlReason, 'HOST_AUTH_EXPIRING');
+await issueTurnCredentials({ ...mockEnv, WTN_API_DOMAIN: 'wtn-lf.volcvideo.com' }, grant(), 'region', async url => {
+  assert.equal(url.hostname, 'wtn-lf.volcvideo.com');
+  return Response.json(providerData(14400));
+});
 for (const [reply, error] of [
   [() => new Response('', { status: 403 }), 'TURN_PROVIDER_DENIED'],
   [() => new Response('', { status: 503 }), 'TURN_PROVIDER_HTTP'],
@@ -69,7 +92,7 @@ const options = {
     catch (error) { console.error('Mock WTN request validation failed:', error.message); throw error; }
     if (mode === 'wait') { enteredProvider(); await new Promise(resolve => { releaseProvider=resolve; }); }
     if (mode === 'denied') return new MFResponse('', { status: 403 });
-    return MFResponse.json(providerData(3600));
+    return MFResponse.json(providerData(14400));
   },
 };
 let mf = new Miniflare(convertV4MiniflareOptions(options));

@@ -1,6 +1,9 @@
 // WTN signing stays server-side. Never log provider responses, JWTs or ICE credentials.
 const encoder = new TextEncoder();
 export const AUTH_SECONDS = 7 * 24 * 60 * 60;
+// These are separate lifetimes: host authorization, API JWT, and relay access.
+export const TURN_ACCESS_SECONDS = 14400;
+const WTN_API_TOKEN_SECONDS = 300;
 export const turnErrors = {
   TURN_AUTH_NOT_CONFIGURED: "TURN未授权；若无法连接请联系QQ 2727755165",
   TURN_PASSWORD_INVALID: "授权密码错误",
@@ -75,6 +78,8 @@ export async function issueTurnCredentials(env, grant, peerKey, fetcher = (url, 
     const result = await fetchTurnCredentials(env, grant, peerKey, fetcher);
     console.info('[WTN TURN]', { result: 'ok', source: result === cached ? 'cache' : 'provider',
       elapsedMs: Date.now() - started, expiresAt: result.expiresAt,
+      requestedTtl: result.requestedTtl, actualTtl: result.ttl, ttlReason: result.ttlReason,
+      apiDomain: result.apiDomain, servers: result.iceServers.flatMap(server => server.urls),
       protocols: [...new Set(result.iceServers.flatMap(server => server.urls.map(url => /^turns:/i.test(url) ? 'tls' : /transport=tcp/i.test(url) ? 'tcp' : 'udp')))] });
     return result;
   } catch (error) {
@@ -93,13 +98,13 @@ async function fetchTurnCredentials(env, grant, peerKey, fetcher) {
   grant.requestTimes = (grant.requestTimes ?? []).filter(t => now - t < 60_000);
   if (grant.requestTimes.length >= 4) throw new Error("TURN_RATE_LIMITED");
   grant.requestTimes.push(now);
-  const requestedTtl = Number(env.WTN_TURN_TTL_SECONDS ?? 3600);
+  const requestedTtl = Number(env.WTN_TURN_TTL_SECONDS ?? TURN_ACCESS_SECONDS);
   if (!Number.isInteger(requestedTtl) || requestedTtl < 60 || requestedTtl > 86400) throw new Error("TURN_PROVIDER_INVALID");
   const ttl = Math.min(requestedTtl, Math.floor((grant.expiresAt - now) / 1000));
   if (ttl < 60) throw new Error("TURN_AUTH_EXPIRED");
   const domain = env.WTN_API_DOMAIN ?? "wtn.volcvideo.com";
   if (!["wtn.volcvideo.com", "wtn-lf.volcvideo.com", "wtn-va.volcvideos.com", "wtn-fr.volcvideos.com", "wtn-sg.volcvideos.com"].includes(domain)) throw new Error("TURN_PROVIDER_INVALID");
-  const token = await signToken(env.WTN_APP_KEY, { version: "1.0", appID: env.WTN_APP_ID, exp: Math.floor(now / 1000) + 300 });
+  const token = await signToken(env.WTN_APP_KEY, { version: "1.0", appID: env.WTN_APP_ID, exp: Math.floor(now / 1000) + WTN_API_TOKEN_SECONDS });
   const url = new URL(`https://${domain}/turn/${encodeURIComponent(env.WTN_APP_ID)}`);
   url.searchParams.set("TTL", String(ttl));
   url.searchParams.set("SessionID", peerKey);
@@ -122,7 +127,13 @@ async function fetchTurnCredentials(env, grant, peerKey, fetcher) {
     console.warn('[WTN TURN]', { result: 'provider-error', code: Number.isSafeInteger(data?.code) ? data.code : null });
     throw new Error("TURN_PROVIDER_CODE");
   }
-  if (!Number.isInteger(data.ttl) || data.ttl < 60 || data.ttl > ttl || !Array.isArray(data.ice_servers) || data.ice_servers.length > 8)
+  // The provider may clamp or ignore TTL. Retain its actual lifetime, never invent 4h.
+  if (!Number.isInteger(data.ttl) || data.ttl < 60 || data.ttl > 86400) {
+    console.warn('[WTN TURN]', { result: 'invalid-ttl', requestedTtl: ttl,
+      actualTtl: Number.isSafeInteger(data.ttl) ? data.ttl : null, reason: 'TTL_OUT_OF_RANGE' });
+    throw new Error("TURN_PROVIDER_INVALID");
+  }
+  if (!Array.isArray(data.ice_servers) || data.ice_servers.length > 8)
     throw new Error("TURN_PROVIDER_INVALID");
   const iceServers = [];
   for (const item of data.ice_servers) {
@@ -133,7 +144,12 @@ async function fetchTurnCredentials(env, grant, peerKey, fetcher) {
   }
   if (!iceServers.length) throw new Error("TURN_PROVIDER_INVALID");
   if (!await turnPermission(env, grant)) throw new Error("TURN_NOT_AUTHORIZED");
-  const result = { iceServers, expiresAt: now + data.ttl * 1000 };
+  const ttlReason = data.ttl !== ttl ? 'PROVIDER_TTL_MISMATCH_REASON_NOT_SUPPLIED' :
+    ttl !== requestedTtl ? 'HOST_AUTH_EXPIRING' : requestedTtl !== TURN_ACCESS_SECONDS ? 'CONFIG_OVERRIDE' : null;
+  const result = { iceServers, expiresAt: now + data.ttl * 1000, requestedTtl: ttl,
+    configuredTtl: requestedTtl, ttl: data.ttl, ttlReason, apiDomain: domain };
+  if (ttlReason) console.warn('[WTN TURN]', { result: 'ttl-adjusted', requestedTtl: ttl,
+    configuredTtl: requestedTtl, actualTtl: data.ttl, reason: ttlReason });
   for (const [id, value] of Object.entries(grant.cache)) if (value.expiresAt <= now) delete grant.cache[id];
   while (Object.keys(grant.cache).length >= 2) delete grant.cache[Object.keys(grant.cache)[0]];
   grant.cache[peerKey] = result;

@@ -162,6 +162,18 @@ export default function RemoteBpPanel({ host }: { host: RemoteBpHost }): React.J
       </div>
 
       {room.error ? <small className="remote-bp-error">{room.error}</small> : null}
+      {room.turnWarning ? (
+        <small className="remote-bp-warning" role="status">
+          TURN 请求未成功：{room.turnWarning}
+          <br />
+          {room.firstPlayer.connectionState === 'connected' ||
+          room.secondPlayer.connectionState === 'connected'
+            ? '已有选手数据通道连接成功，实际直连或中继路径请查看网络诊断。'
+            : host.getNetworkOptions().forceRelay
+              ? '已启用强制 TURN 测试，需要取得有效中继凭证才能连接。'
+              : '普通模式仍允许直连，请以选手连接状态和网络诊断为准。'}
+        </small>
+      ) : null}
       {room.transport === 'webrtc' ? <RemoteBpNetworkDiagnostics host={host} room={room} /> : null}
       <div className="bp-card-actions">
         <button

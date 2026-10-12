@@ -6,7 +6,7 @@
   "vars": {
     "WTN_APP_ID": "6ac735fb7305ab038c2e3546",
     "WTN_API_DOMAIN": "wtn.volcvideo.com",
-    "WTN_TURN_TTL_SECONDS": "3600"
+    "WTN_TURN_TTL_SECONDS": "14400"
   },
   "routes": [
     {

@@ -8,9 +8,10 @@ export interface TurnEnvironment {
   WTN_TURN_TTL_SECONDS?: string;
   TURN_AUTH?: DurableObjectNamespace<import('./turnAuth').TurnAuthority>;
 }
-export interface TurnCredentials { iceServers: { urls: string[]; username: string; credential: string }[]; expiresAt: number }
+export interface TurnCredentials { iceServers: { urls: string[]; username: string; credential: string }[]; expiresAt: number; requestedTtl?: number; configuredTtl?: number; ttl?: number; ttlReason?: string | null; apiDomain?: string }
 export interface TurnGrant extends TurnClaims { expiresAt: number; requestTimes: number[]; cache: Record<string, TurnCredentials> }
 export const AUTH_SECONDS: number;
+export const TURN_ACCESS_SECONDS: number;
 export const turnErrors: Record<string, string>;
 export function digest(value: string): Promise<string>;
 export function signToken(secret: string, claims: object): Promise<string>;

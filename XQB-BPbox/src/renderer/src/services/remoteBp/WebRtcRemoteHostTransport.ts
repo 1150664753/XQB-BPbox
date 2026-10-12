@@ -5,6 +5,7 @@ import {
   RTC_TIMING,
   type BufferedRtcSignal
 } from '../../../../../../shared/remoteBpRtc'
+import { AssetPacer } from '../../../../../../shared/remoteBpFlowControl'
 import type {
   RemoteHostIncomingMessage,
   RemoteHostOutgoingMessage,
@@ -34,6 +35,7 @@ interface HostPeerSession extends RemoteHostPeer {
   assetTransfers: Map<string, RTCDataChannel>
   nextAssetAt: number
   controlUntil: number
+  pacer?: AssetPacer
 }
 
 export interface WebRtcRemoteHostTransportOptions {
@@ -49,8 +51,8 @@ export interface WebRtcRemoteHostTransportOptions {
 }
 
 const MAX_SIGNALING_MESSAGE_BYTES = 64 * 1024
-const DATA_CHANNEL_HIGH_WATER_MARK = 32 * 1024
-const DATA_CHANNEL_DRAIN_TIMEOUT_MS = 15_000
+const DATA_CHANNEL_HIGH_WATER_MARK = 16 * 1024
+const DATA_CHANNEL_DRAIN_TIMEOUT_MS = 30_000
 const SIGNALING_HEARTBEAT_INTERVAL_MS = 20_000
 const MAX_RECONNECT_DELAY_MS = 15_000
 
@@ -179,7 +181,7 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
         void this.bindTurnAuthorization()
       }) ?? null
     const lifecycle = ++this.lifecycle
-    this.emitStatus({ connectionState: 'connecting', error: null })
+    this.emitStatus({ connectionState: 'connecting', error: null, turnWarning: null })
     console.info('[Remote BP signaling] WebSocket connect start', this.options.signalingUrl)
     await this.openSocket(this.options.signalingUrl)
     if (this.lifecycle !== lifecycle || this.stopping) throw new Error('创建房间已取消')
@@ -254,7 +256,7 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
     this.turnRequests.clear()
     if (this.resumeTimer !== null) window.clearTimeout(this.resumeTimer)
     this.resumeTimer = null
-    this.emitStatus({ connectionState: 'offline', error: null })
+    this.emitStatus({ connectionState: 'offline', error: null, turnWarning: null })
   }
 
   async kick(side: 'first' | 'second'): Promise<void> {
@@ -271,7 +273,7 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
     const channel = peer?.rtc.channel
     if (!peer || !channel || channel.readyState !== 'open') {
       if (['ASSET_START', 'ASSET_CHUNK', 'ASSET_COMPLETE'].includes(message.type))
-        throw new Error('资源通道已关闭')
+        throw new Error(this.stopping || !peer ? 'ASSET_CANCELLED' : 'ASSET_NETWORK_INTERRUPTED')
       return
     }
     const raw = encodeHostMessage(message)
@@ -497,7 +499,8 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
         this.emitStatus({
           connectionState: 'connected',
           error: null,
-          turnAuthorizedUntil: this.turnAuthorizedUntil
+          turnAuthorizedUntil: this.turnAuthorizedUntil,
+          ...(!this.turnAuthorizedUntil ? { turnWarning: null } : {})
         })
         return
       }
@@ -518,8 +521,9 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
             message.payload.connectionId !== peer.rtc.connectionId
           )
             return
-          peer.rtc.applyTurn(message.payload)
-          if (!request) peer.rtc.requestRestart('选手已获取 TURN 凭证')
+          const changed = peer.rtc.applyTurn(message.payload)
+          this.emitStatus({ connectionState: 'connected', turnWarning: null })
+          if (changed && !request) peer.rtc.requestRestart('选手已获取 TURN 凭证')
         } catch {
           ;(request?.peer ?? matchedPeer)?.rtc.turnFailed('TURN_PROVIDER_INVALID')
         } finally {
@@ -540,12 +544,12 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
           turnRequest.peer.rtc.turnFailed(code)
           if (code === 'TURN_NOT_AUTHORIZED' || code === 'TURN_AUTH_EXPIRED')
             turnRequest.peer.rtc.clearTurn('房主 TURN 授权已撤销或到期')
-          this.emitStatus({ connectionState: 'connected', error: text })
+          this.emitStatus({ connectionState: 'connected', turnWarning: text })
           turnRequest.finish()
           return
         }
         if (code.startsWith('TURN_')) {
-          this.emitStatus({ connectionState: 'connected', error: text })
+          this.emitStatus({ connectionState: 'connected', turnWarning: text })
           return
         }
         const wasStarting = this.startReject !== null
@@ -676,6 +680,7 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
         if (
           status.turnAuthorizedUntil !== undefined ||
           status.error ||
+          status.turnWarning ||
           status.connectionState === 'offline'
         )
           finish()
@@ -696,7 +701,7 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
         for (const peer of this.peers.values()) peer.rtc.clearTurn('本机 TURN 授权已停用或到期')
       }
     } catch {
-      this.emitStatus({ connectionState: 'connected', error: '无法读取 TURN 授权，仍可使用 P2P' })
+      this.emitStatus({ connectionState: 'connected', turnWarning: '无法读取 TURN 授权' })
     }
   }
 
@@ -846,6 +851,7 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
       if (!channel) throw new Error('资源通道尚未打开')
       peer.assetTransfers.set(id, channel)
       const assets = peer.rtc.getTransferMetrics()
+      peer.rtc.beginTransfer(id, 'send', message.payload.asset.size)
       peer.rtc.updateTransfer(
         {
           requested: assets.requested + 1,
@@ -857,40 +863,68 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
     const channel = peer.assetTransfers.get(id)
     if (!channel) throw new Error('资源传输会话已失效')
     try {
-      const rtt = peer.rtc.roundTripTimeMs ?? 0
-      const rate = Math.min(
+      const pacer = (peer.pacer ??= new AssetPacer())
+      pacer.sample(
+        Date.now(),
         this.getNetworkOptions().assetRateKiBps * 1024,
-        rtt > 1000 ? 32 * 1024 : rtt > 500 ? 64 * 1024 : rtt > 250 ? 128 * 1024 : Infinity
+        peer.rtc.roundTripTimeMs,
+        channel.bufferedAmount,
+        peer.rtc.selectedPairId
       )
-      await this.waitForWritable(peer, channel, rtt > 500 ? 8 * 1024 : DATA_CHANNEL_HIGH_WATER_MARK)
+      // Legacy peers share the control stream; allow only one small image frame in flight.
+      await this.waitForWritable(
+        peer,
+        channel,
+        channel === peer.rtc.channel ? 0 : DATA_CHANNEL_HIGH_WATER_MARK
+      )
       if (this.peers.get(peer.side) !== peer || channel.readyState !== 'open')
-        throw new Error('资源通道已关闭')
+        throw new Error(
+          this.stopping || this.peers.get(peer.side) !== peer
+            ? 'ASSET_CANCELLED'
+            : 'ASSET_NETWORK_INTERRUPTED'
+        )
+      const rate = pacer.rate
       channel.send(raw)
       peer.nextAssetAt = Date.now() + (new TextEncoder().encode(raw).byteLength / rate) * 1000
       const assets = peer.rtc.getTransferMetrics()
+      const chunkBytes =
+        message.type === 'ASSET_CHUNK'
+          ? Math.floor((message.payload.data.length * 3) / 4) -
+            (message.payload.data.endsWith('==') ? 2 : message.payload.data.endsWith('=') ? 1 : 0)
+          : 0
+      if (chunkBytes) peer.rtc.advanceTransfer(id, chunkBytes)
       peer.rtc.updateTransfer(
         {
           ...(message.type === 'ASSET_CHUNK'
             ? {
-                queuedBytes:
-                  assets.queuedBytes +
-                  Math.floor((message.payload.data.length * 3) / 4) -
-                  (message.payload.data.endsWith('==')
-                    ? 2
-                    : message.payload.data.endsWith('=')
-                      ? 1
-                      : 0)
+                queuedBytes: assets.queuedBytes + chunkBytes
               }
             : {}),
           ...(message.type === 'ASSET_COMPLETE' ? { submitted: assets.submitted + 1 } : {})
         },
         rate
       )
-      if (message.type === 'ASSET_COMPLETE') peer.assetTransfers.delete(id)
+      if (message.type === 'ASSET_COMPLETE') {
+        peer.rtc.finishTransfer(id, 'submitted')
+        peer.assetTransfers.delete(id)
+      }
     } catch (error) {
       peer.assetTransfers.delete(id)
-      peer.rtc.recordError('ASSET_SEND_FAILED', '资源发送中断或长时间无进展')
-      throw error
+      const code =
+        this.stopping || this.peers.get(peer.side) !== peer
+          ? 'ASSET_CANCELLED'
+          : channel.readyState !== 'open'
+            ? 'ASSET_NETWORK_INTERRUPTED'
+            : error instanceof Error && error.message === 'ASSET_SEND_TIMEOUT'
+              ? 'ASSET_SEND_TIMEOUT'
+              : 'ASSET_SEND_FAILED'
+      peer.rtc.finishTransfer(id, code === 'ASSET_CANCELLED' ? 'cancelled' : 'failed', code)
+      if (code !== 'ASSET_CANCELLED')
+        peer.rtc.recordError(
+          code,
+          code === 'ASSET_SEND_TIMEOUT' ? '资源发送缓冲区 30 秒无进展' : '资源发送通道中断'
+        )
+      throw new Error(code)
     }
   }
 
@@ -902,17 +936,37 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
     let progressAt = Date.now(),
       previous = Infinity
     while (true) {
-      if (this.peers.get(peer.side) !== peer || channel.readyState !== 'open')
-        throw new Error('资源通道已关闭')
-      const buffered =
-        (peer.rtc.channel?.bufferedAmount ?? 0) + (peer.rtc.assetChannel?.bufferedAmount ?? 0)
+      if (this.stopping || this.peers.get(peer.side) !== peer) throw new Error('ASSET_CANCELLED')
+      if (channel.readyState !== 'open') throw new Error('ASSET_NETWORK_INTERRUPTED')
+      const buffered = channel.bufferedAmount
+      const controlBuffered =
+        channel === peer.rtc.channel ? 0 : (peer.rtc.channel?.bufferedAmount ?? 0)
       if (buffered < previous) progressAt = Date.now()
       previous = buffered
-      if (buffered <= highWater && Date.now() >= Math.max(peer.nextAssetAt, peer.controlUntil))
+      if (
+        buffered <= highWater &&
+        controlBuffered === 0 &&
+        Date.now() >= Math.max(peer.nextAssetAt, peer.controlUntil)
+      )
         return
-      if (Date.now() - progressAt > DATA_CHANNEL_DRAIN_TIMEOUT_MS)
-        throw new Error('资源发送缓冲区长时间无进展')
-      await new Promise<void>((resolve) => window.setTimeout(resolve, 20))
+      // BP activity/pacing alone is not a network stall. Only an undrained image buffer times out.
+      if (buffered === 0) progressAt = Date.now()
+      if (buffered > highWater && Date.now() - progressAt >= 250) peer.pacer?.congested(Date.now())
+      if (buffered > 0 && Date.now() - progressAt > DATA_CHANNEL_DRAIN_TIMEOUT_MS)
+        throw new Error('ASSET_SEND_TIMEOUT')
+      await new Promise<void>((resolve) => {
+        const finish = (): void => {
+          window.clearTimeout(timer)
+          channel.removeEventListener('bufferedamountlow', finish)
+          channel.removeEventListener('close', finish)
+          resolve()
+        }
+        channel.bufferedAmountLowThreshold = highWater
+        channel.addEventListener('bufferedamountlow', finish)
+        channel.addEventListener('close', finish)
+        // Polling remains a fallback for missed threshold events and short control yields.
+        const timer = window.setTimeout(finish, 25)
+      })
     }
   }
 

@@ -32,6 +32,7 @@ interface IncomingTransfer {
   totalChunks: number;
   chunks: Array<Uint8Array | undefined>;
   receivedBytes: number;
+  lastActivityAt: number;
 }
 
 const MAX_CONCURRENT_TRANSFERS = 8;
@@ -125,6 +126,7 @@ export class IncomingAssetTransfers {
       totalChunks: payload.totalChunks,
       chunks: new Array<Uint8Array | undefined>(payload.totalChunks),
       receivedBytes: 0,
+      lastActivityAt: Date.now(),
     });
   }
 
@@ -157,6 +159,7 @@ export class IncomingAssetTransfers {
     }
     transfer.chunks[payload.index] = chunk;
     transfer.receivedBytes += chunk.byteLength;
+    transfer.lastActivityAt = Date.now();
   }
 
   async complete(payload: AssetCompletePayload): Promise<ReceivedAsset> {
@@ -193,6 +196,16 @@ export class IncomingAssetTransfers {
 
   abort(transferId: string): void {
     this.transfers.delete(transferId);
+  }
+
+  expireIdle(now = Date.now()): Array<{ transferId: string; assetId: string }> {
+    const expired: Array<{ transferId: string; assetId: string }> = [];
+    for (const [transferId, transfer] of this.transfers) {
+      if (now - transfer.lastActivityAt < 30_000) continue;
+      this.transfers.delete(transferId);
+      expired.push({ transferId, assetId: transfer.descriptor.assetId });
+    }
+    return expired;
   }
 
   reset(): void {

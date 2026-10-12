@@ -6,7 +6,7 @@ const root = path.resolve(__dirname, '../..')
 const output = path.join(root, 'XQB-BPbox/.tmp/webrtc-self-check.cjs')
 buildSync({
   stdin: {
-    contents: `export * from './shared/remoteBpRtc'; export * from './XQB-BPbox/src/renderer/src/services/remoteBp/WebRtcRemoteHostTransport'; export * from './XBQ-BPweb/src/services/WebRtcRemoteBpConnection';`,
+    contents: `export * from './shared/remoteBpRtc'; export * from './shared/remoteBpFlowControl'; export * from './XBQ-BPweb/src/services/assets/IncomingAssetTransfers'; export * from './XQB-BPbox/src/renderer/src/services/remoteBp/WebRtcRemoteHostTransport'; export * from './XBQ-BPweb/src/services/WebRtcRemoteBpConnection';`,
     resolveDir: root,
     loader: 'ts'
   },
@@ -22,7 +22,9 @@ const {
   WebRtcRemoteBpConnection,
   bufferRtcSignal,
   getRtcDiagnostics,
-  RTC_TIMING
+  RTC_TIMING,
+  AssetPacer,
+  IncomingAssetTransfers
 } = require(output)
 
 let now = 0
@@ -52,6 +54,7 @@ const flush = async () => {
   for (let n = 0; n < 80; n++) await Promise.resolve()
 }
 async function tick(ms) {
+  await flush()
   const end = now + ms
   while (true) {
     const next = [...timers].filter(([, t]) => t.at <= end).sort((a, b) => a[1].at - b[1].at)[0]
@@ -250,7 +253,19 @@ function session(offerer = false, id = 'connection-1', options = {}) {
   sessions.push(rtc)
   return { rtc, pc: rtc.pc, sent, states, messages }
 }
+let runningCase = ''
+let suiteFinished = false
+process.on('beforeExit', () => {
+  if (!suiteFinished) {
+    console.error(`Unfinished fake-clock test: ${runningCase}`, {
+      now,
+      timers: [...timers.values()].map((t) => t.at)
+    })
+    process.exitCode = 1
+  }
+})
 async function run(name, test) {
+  runningCase = name
   try {
     await test()
     realInfo(`PASS ${name}`)
@@ -262,6 +277,277 @@ async function run(name, test) {
 }
 
 async function main() {
+  await run(
+    'successful UDP does not leave a fallback timer that restarts on a brief outage',
+    async () => {
+      const { rtc, pc } = session(true, 'udp-success', { testOnlyForceRelay: true })
+      rtc.applyTurn({
+        expiresAt: 14_400_000,
+        iceServers: [
+          {
+            urls: ['turn:relay.test?transport=udp', 'turn:relay.test?transport=tcp'],
+            username: 'u',
+            credential: 'p'
+          }
+        ]
+      })
+      await rtc.start()
+      await rtc.receive(
+        'ANSWER',
+        signal(rtc.connectionId, 1, { description: description('answer', 'remote-1') })
+      )
+      pc.network('connected')
+      pc.channel.open()
+      await tick(4000)
+      pc.network('disconnected')
+      await tick(5000)
+      assert.equal(pc.offers.length, 1)
+      pc.network('connected')
+      assert.equal(rtc.phase, 'connected')
+    }
+  )
+  await run('UDP first, bounded TCP fallback and transient disconnect grace', async () => {
+    const { rtc, pc } = session(true, 'udp-first', { testOnlyForceRelay: true })
+    rtc.applyTurn({
+      expiresAt: 14_400_000,
+      requestedTtl: 14400,
+      ttl: 14400,
+      apiDomain: 'wtn.volcvideo.com',
+      iceServers: [
+        {
+          urls: ['turn:relay.test:3479?transport=tcp', 'turn:relay.test:3478?transport=udp'],
+          username: 'SECRET_TURN_USER',
+          credential: 'SECRET_TURN_PASSWORD'
+        }
+      ]
+    })
+    assert.ok(!JSON.stringify(pc.config).includes('transport=tcp'))
+    assert.equal(rtc.getDiagnostic().turnActualTtl, 14400)
+    await rtc.start()
+    await rtc.receive(
+      'ANSWER',
+      signal(rtc.connectionId, 1, { description: description('answer', 'remote-1') })
+    )
+    pc.network('checking', 'connecting')
+    await tick(RTC_TIMING.udpPreferenceMs)
+    assert.ok(JSON.stringify(pc.config).includes('transport=tcp'))
+    assert.equal(pc.offers.length, 2)
+    assert.equal(pc.config.iceTransportPolicy, 'relay')
+    await rtc.receive(
+      'ANSWER',
+      signal(rtc.connectionId, 2, { description: description('answer', 'remote-2') })
+    )
+    pc.network('connected')
+    pc.channel.open()
+    pc.network('disconnected')
+    await tick(5000)
+    pc.network('connected')
+    assert.equal(pc.offers.length, 2, 'short interruptions must not churn ICE')
+  })
+  await run(
+    'automatic mode adds TURN after five seconds, failed refresh preserves live ICE',
+    async () => {
+      let requested = 0
+      const early = session(true, 'early-relay', {
+        prepareRestart: async () => {
+          requested++
+        }
+      })
+      await early.rtc.start()
+      await tick(5000)
+      assert.equal(requested, 1)
+      early.rtc.close()
+      const { rtc, pc } = session(true, 'refresh-failed', {
+        testOnlyForceRelay: true,
+        prepareRestart: async () => {
+          requested++
+          rtc.turnFailed('TURN_UNAVAILABLE')
+        }
+      })
+      rtc.applyTurn({
+        expiresAt: now + 120_000,
+        iceServers: [{ urls: 'turn:relay.test', username: 'u', credential: 'p' }]
+      })
+      await rtc.start()
+      await rtc.receive(
+        'ANSWER',
+        signal(rtc.connectionId, 1, { description: description('answer', 'remote-1') })
+      )
+      pc.network('connected')
+      pc.channel.open()
+      await tick(90_000)
+      assert.equal(pc.offers.length, 1)
+      assert.equal(rtc.phase, 'connected')
+      assert.ok(requested > 1)
+    }
+  )
+  await run(
+    'ICE 701 logs safe server/protocol/cause, suppresses repeats and never restarts on its own',
+    async () => {
+      const { rtc, pc } = session(true, '701')
+      const before = logs.length
+      for (let i = 0; i < 30; i++)
+        emit(pc, 'icecandidateerror', {
+          url: 'turn:relay.test:3478?transport=udp',
+          errorCode: 701,
+          errorText: 'STUN host lookup received error.'
+        })
+      assert.equal(rtc.getDiagnostic().iceServerErrors[0].count, 30)
+      assert.equal(rtc.getDiagnostic().iceServerErrors[0].reason, 'DNS_LOOKUP_FAILED')
+      assert.equal(rtc.getDiagnostic().iceServerErrors[0].protocol, 'udp')
+      assert.equal(
+        logs.slice(before).filter((x) => x[1]?.event === 'candidate gathering error').length,
+        1
+      )
+      emit(pc, 'icecandidateerror', {
+        url: 'turn:user:SECRET_TOKEN@relay.test?password=SECRET_KEY',
+        errorCode: 701,
+        errorText: 'SECRET_PASSWORD'
+      })
+      assert.ok(!JSON.stringify(rtc.getDiagnostic()).includes('SECRET_'))
+      assert.equal(pc.offers.length, 0)
+    }
+  )
+  await run(
+    'adaptive pacing grows on stable high RTT, reduces on congestion and always has a ceiling',
+    async () => {
+      const pacer = new AssetPacer()
+      for (let at = 1000; at <= 12000; at += 1000) pacer.sample(at, 256 * 1024, 650, 0)
+      assert.equal(pacer.rate, 256 * 1024)
+      pacer.sample(13000, 256 * 1024, 950, 64 * 1024)
+      assert.ok(pacer.rate < 256 * 1024)
+      for (let at = 14000; at <= 60000; at += 1000) pacer.sample(at, 256 * 1024, 1200, 64 * 1024)
+      assert.equal(pacer.rate, 16 * 1024)
+      assert.ok(pacer.sample(61000, 64 * 1024, 650, 0) <= 64 * 1024)
+    }
+  )
+  await run('receiver idle timeout is distinct and drops partial bytes for retry', async () => {
+    const store = new IncomingAssetTransfers()
+    const asset = {
+      assetId: 'asset',
+      size: 6,
+      hash: 'a'.repeat(64),
+      type: 'avatar',
+      mimeType: 'image/png'
+    }
+    store.setManifest({ assets: [asset] })
+    store.start({ transferId: 'idle', asset, chunkSize: 3, totalChunks: 2 })
+    await tick(20000)
+    store.addChunk({ transferId: 'idle', assetId: 'asset', index: 0, total: 2, data: 'AQID' })
+    await tick(20000)
+    assert.equal(
+      store.expireIdle().length,
+      0,
+      'active transfer must not expire from its start time'
+    )
+    await tick(10000)
+    assert.deepEqual(store.expireIdle(), [{ transferId: 'idle', assetId: 'asset' }])
+    store.start({ transferId: 'retry', asset, chunkSize: 3, totalChunks: 2 })
+    store.reset()
+  })
+  await run(
+    'sender stalls have a timeout diagnosis, independent of room-close cancellation',
+    async () => {
+      const { rtc, pc } = session(true, 'send-timeout')
+      await rtc.start()
+      await rtc.receive(
+        'ANSWER',
+        signal(rtc.connectionId, 1, { description: description('answer', 'remote-1') })
+      )
+      pc.network('connected')
+      pc.channel.open()
+      const transport = new WebRtcRemoteHostTransport({ signalingUrl: 'ws://test', iceServers: [] })
+      transport.peers.set('first', {
+        peerId: 'p',
+        side: 'first',
+        rtc,
+        assetTransfers: new Map(),
+        nextAssetAt: 0,
+        controlUntil: 0
+      })
+      pc.channel.bufferedAmount = 64 * 1024
+      const send = transport
+        .send('p', {
+          type: 'ASSET_START',
+          payload: { transferId: 'stalled', asset: { size: 100 } }
+        })
+        .catch((e) => e)
+      await flush()
+      await tick(31000)
+      assert.equal((await send).message, 'ASSET_SEND_TIMEOUT')
+      assert.equal(rtc.getDiagnostic().transfers[0].reason, 'ASSET_SEND_TIMEOUT')
+      assert.equal(rtc.phase, 'connected')
+    }
+  )
+  await run(
+    'TURN denial is a separate warning and does not mark a connected room as failed',
+    async () => {
+      const host = new WebRtcRemoteHostTransport({ signalingUrl: 'ws://test', iceServers: [] })
+      const statuses = []
+      host.onStatusChange((status) => statuses.push(status))
+      const started = host.start()
+      await flush()
+      const ws = Socket.all.at(-1)
+      ws.message('ROOM_CREATED', {
+        roomCode: 'ABCDEF',
+        createdAt: '2026-10-11T00:00:00Z',
+        expiresAt: '9999-12-31T00:00:00Z',
+        resumeToken: '0123456789abcdef',
+        turnAuthorizedUntil: 3_600_000
+      })
+      await started
+      ws.message('PEER_JOINED', { role: 'FIRST', sessionId: 'warning-player' })
+      ws.message(
+        'PEER_READY',
+        signal('warning-ready', 0, { fromRole: 'FIRST', fromSessionId: 'warning-player' })
+      )
+      await flush()
+      ws.message(
+        'ANSWER',
+        signal('warning-ready', 1, {
+          fromRole: 'FIRST',
+          fromSessionId: 'warning-player',
+          description: description('answer', 'remote-1')
+        })
+      )
+      await flush()
+      const peer = host.peers.get('first'),
+        pc = peer.rtc.pc
+      pc.network('connected')
+      pc.channel.open()
+      const denied = host.prepareTurn(peer)
+      await flush()
+      const request = ws.sent.filter((message) => message.type === 'TURN_REQUEST').at(-1)
+      ws.message(
+        'ERROR',
+        { code: 'TURN_PROVIDER_DENIED', message: 'WTN 拒绝请求' },
+        request.requestId
+      )
+      await denied
+      assert.equal(statuses.at(-1).turnWarning, 'WTN 拒绝请求')
+      assert.equal(statuses.at(-1).error, undefined)
+      assert.equal(peer.rtc.phase, 'connected')
+      assert.equal(pc.channel.readyState, 'open')
+      assert.equal(peer.rtc.getDiagnostic().errorCode, 'TURN_PROVIDER_DENIED')
+      const retry = host.prepareTurn(peer)
+      await flush()
+      const next = ws.sent.filter((message) => message.type === 'TURN_REQUEST').at(-1)
+      ws.message(
+        'TURN_CREDENTIALS',
+        {
+          roomId: 'ABCDEF',
+          peerId: 'warning-player',
+          connectionId: 'warning-ready',
+          expiresAt: 3_600_000,
+          iceServers: [{ urls: 'turn:relay.test', username: 'u', credential: 'c' }]
+        },
+        next.requestId
+      )
+      await retry
+      assert.equal(statuses.at(-1).turnWarning, null)
+      await host.stop()
+    }
+  )
   await run(
     'selected pair statistics, safe protocol fields, counter resets and ambiguity',
     async () => {
@@ -327,6 +613,14 @@ async function main() {
       reports.set('pair-2', { ...selected, id: 'pair-2' })
       await tick(1000)
       assert.equal(rtc.getDiagnostic().pair, null, 'ambiguous nominated pairs must not be guessed')
+      reports.set('transport', { type: 'transport', selectedCandidatePairId: 'pair-2' })
+      await tick(1000)
+      assert.deepEqual(
+        rtc.getDiagnostic().pairHistory.map((pair) => pair.id),
+        ['pair', 'pair-2'],
+        'same candidate types on a new pair must still record the route change'
+      )
+      assert.equal(rtc.getDiagnostic().packetLossRatio, null, 'missing SCTP loss is not zero loss')
       assert.ok(!/SECRET_|192\.0\.2\.99/.test(JSON.stringify(rtc.getDiagnostic())))
     }
   )
@@ -507,7 +801,7 @@ async function main() {
       await flush()
       assets.close()
       await tick(20)
-      assert.match((await blocked).message, /已关闭/)
+      assert.match((await blocked).message, /ASSET_NETWORK_INTERRUPTED/)
       assert.equal(peer.assetTransfers.size, 0)
     }
   )
@@ -939,7 +1233,7 @@ async function main() {
       await flush()
       await host.stop()
       await tick(20)
-      assert.match((await interruptedResult).message, /已关闭/)
+      assert.match((await interruptedResult).message, /ASSET_CANCELLED/)
     }
   )
   await run(
@@ -990,6 +1284,7 @@ main()
     process.exitCode = 1
   })
   .finally(() => {
+    suiteFinished = true
     Date.now = realNow
     console.info = realInfo
   })

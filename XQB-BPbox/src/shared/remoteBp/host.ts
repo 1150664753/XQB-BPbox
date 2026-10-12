@@ -130,7 +130,8 @@ export class RemoteBpHost {
           ...(status.turnAuthorizedUntil !== undefined
             ? { turnAuthorizedUntil: status.turnAuthorizedUntil }
             : {}),
-          ...(status.error !== undefined ? { error: status.error } : {})
+          ...(status.error !== undefined ? { error: status.error } : {}),
+          ...(status.turnWarning !== undefined ? { turnWarning: status.turnWarning } : {})
         })
       }),
       dependencies.dispatcher.subscribe((event) => {
@@ -175,7 +176,7 @@ export class RemoteBpHost {
     if (this.state.lifecycle !== 'idle' && this.state.lifecycle !== 'error') {
       return this.getRoomState()
     }
-    this.patch({ lifecycle: 'starting', error: null })
+    this.patch({ lifecycle: 'starting', error: null, turnWarning: null })
     try {
       this.dependencies.dispatcher.startAuthoritySession(1)
       const manifest = await this.dependencies.getAssetManifest()
@@ -251,7 +252,8 @@ export class RemoteBpHost {
       expiresAt: null,
       assetCount: 0,
       lastPublishedRevision: null,
-      error: null
+      error: null,
+      turnWarning: null
     }
     this.notify()
     return this.getRoomState()

@@ -91,7 +91,7 @@ export default function RemoteBpNetworkDiagnostics({
           </select>
         </label>
         <small>
-          创建房间前设置。默认优先直连；强制测试需要有效 TURN 授权，失败时不会回退直连。
+          创建房间前设置。自动模式先尝试直连；中继优先 UDP，TCP 备用。强制 TURN 需要有效授权。
         </small>
         <button type="button" onClick={download}>
           导出诊断日志
@@ -122,6 +122,10 @@ export default function RemoteBpNetworkDiagnostics({
               <dl>
                 <dt>候选路径</dt>
                 <dd>{item.pair ?? '尚未选中'}</dd>
+                <dt>选中候选对 / 变化</dt>
+                <dd>
+                  {item.selectedPair?.id ?? '—'} / {item.pairHistory.length} 次（详见导出）
+                </dd>
                 <dt>协议</dt>
                 <dd>
                   {item.protocol?.toUpperCase() ?? '—'}；本地中继{' '}
@@ -135,6 +139,19 @@ export default function RemoteBpNetworkDiagnostics({
                 <dt>实际发送 / 接收</dt>
                 <dd>
                   {bytes(item.sendBytesPerSecond)}/s · {bytes(item.receiveBytesPerSecond)}/s
+                </dd>
+                <dt>丢包统计</dt>
+                <dd>
+                  浏览器未提供 DataChannel 丢包率；本地发送丢弃{' '}
+                  {item.sendDiscardRatio === null
+                    ? '—'
+                    : `${(item.sendDiscardRatio * 100).toFixed(2)}%`}
+                </dd>
+                <dt>操作往返响应</dt>
+                <dd>
+                  {item.actionResponseMs === null
+                    ? '请在选手端导出诊断'
+                    : `${item.actionResponseMs} ms`}
                 </dd>
                 <dt>当前路径累计</dt>
                 <dd>
@@ -164,6 +181,33 @@ export default function RemoteBpNetworkDiagnostics({
                 </dd>
                 <dt>凭证支持协议</dt>
                 <dd>{item.turnProtocols.join(' / ').toUpperCase() || '—'}</dd>
+                <dt>凭证 TTL（请求 / 实际）</dt>
+                <dd>
+                  {item.turnRequestedTtl ?? '—'} / {item.turnActualTtl ?? '—'} 秒
+                  {item.turnTtlReason ? ` · ${item.turnTtlReason}` : ''}
+                </dd>
+                <dt>TURN 接入域名</dt>
+                <dd>{item.turnApiDomain ?? '服务端未提供'}</dd>
+                <dt>ICE 服务错误</dt>
+                <dd>
+                  {item.iceServerErrors.length
+                    ? item.iceServerErrors
+                        .map(
+                          (e) => `${e.server ?? '未知服务器'} · ${e.code} ${e.reason} ×${e.count}`
+                        )
+                        .join('；')
+                    : '无'}
+                </dd>
+                <dt>最近资源传输</dt>
+                <dd>
+                  {item.transfers
+                    .slice(-3)
+                    .map(
+                      (t) =>
+                        `${t.status} · ${bytes(t.bytes)}/${bytes(t.totalBytes)} · ${t.durationMs ?? item.updatedAt - t.startedAt} ms${t.reason ? ` · ${t.reason}` : ''}`
+                    )
+                    .join('；') || '无'}
+                </dd>
                 <dt>信令 / 收集</dt>
                 <dd>
                   {item.signalingState} / {item.iceGatheringState}
@@ -205,8 +249,7 @@ export default function RemoteBpNetworkDiagnostics({
         })
       )}
       <small>
-        速率来自浏览器网络统计；资源进度表示已提交发送，不代表选手已完成校验。导出日志不含地址、SDP
-        或凭证。
+        资源提交不代表选手已完成校验。导出包含不带凭证的 ICE 服务器地址，不含选手 IP、SDP 或密钥。
       </small>
     </details>
   )
