@@ -141,10 +141,12 @@ async function main() {
     sockets.push(host);
     const createdMessage = nextMessage(host);
     host.send(
-      JSON.stringify({ type: "CREATE_ROOM", requestId: "create", payload: {} }),
+      JSON.stringify({ type: "CREATE_ROOM", requestId: "create", payload: { forceRelay: true } }),
     );
     const created = await createdMessage;
     assert.equal(created.type, "ROOM_CREATED");
+    assert.equal(created.payload.forceRelay, true);
+    assert.equal(created.payload.turnDiagnostic.appIdSource, 'env.WTN_APP_ID');
     assert.match(created.payload.roomCode, /^[A-Z2-9]{6}$/);
     assert.match(created.payload.resumeToken, /^[0-9a-f-]{36}$/i);
     const roomUrl = `${wsUrl}?roomId=${created.payload.roomCode}`;
@@ -174,6 +176,7 @@ async function main() {
       peerJoinedMessage,
     ]);
     assert.equal(joined.payload.role, "FIRST");
+    assert.equal(joined.payload.forceRelay, true);
     assert.equal(peerJoined.payload.role, "FIRST");
 
     // Readiness and recovery stay in signaling; BP operation messages are untouched.
@@ -186,12 +189,14 @@ async function main() {
             targetRole: "HOST",
             connectionId: "connection-test",
             negotiationId: type === "PEER_READY" ? 0 : 1,
+            forceRelay: true,
             fromSessionId: "forged",
           },
         }),
       );
       const ready = await readyMessage;
       assert.equal(ready.type, type);
+      assert.equal(ready.payload.forceRelay, true);
       assert.equal(ready.payload.connectionId, "connection-test");
       assert.equal(ready.payload.fromSessionId, joined.payload.sessionId);
       assert.equal(ready.payload.roomId, created.payload.roomCode);
@@ -220,6 +225,7 @@ async function main() {
           connectionId: "connection-test",
           negotiationId: 2,
           description: { type: "offer", sdp: "restart-sdp" },
+          forceRelay: true,
         },
       }),
     );
@@ -236,6 +242,7 @@ async function main() {
       }),
     );
     const relayed = await offerAndCandidate;
+    assert.equal(relayed[0].payload.forceRelay, true);
     assert.deepEqual(
       relayed.map((message) => message.type),
       ["OFFER", "ICE_CANDIDATE"],
@@ -254,10 +261,12 @@ async function main() {
           connectionId: "connection-test",
           negotiationId: 2,
           description: { type: "answer", sdp: "restart-answer" },
+          forceRelay: true,
         },
       }),
     );
     const answerWithIdentity = await restartAnswer;
+    assert.equal(answerWithIdentity.payload.forceRelay, true);
     assert.equal(answerWithIdentity.payload.negotiationId, 2);
     assert.equal(
       answerWithIdentity.payload.fromSessionId,
@@ -402,6 +411,7 @@ async function main() {
     const [roomResumed, firstResumedPeer, secondResumedPeer] =
       await resumedMessages;
     assert.equal(roomResumed.type, "ROOM_RESUMED");
+    assert.equal(roomResumed.payload.forceRelay, true);
     assert.deepEqual(
       new Set([firstResumedPeer.payload.role, secondResumedPeer.payload.role]),
       new Set(["FIRST", "SECOND"]),

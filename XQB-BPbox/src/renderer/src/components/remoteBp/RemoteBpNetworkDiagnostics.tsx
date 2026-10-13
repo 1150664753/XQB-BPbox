@@ -116,10 +116,39 @@ export default function RemoteBpNetworkDiagnostics({
               <header>
                 <strong>{side}</strong>
                 <span>
-                  {item.pair ? (item.relay ? 'TURN 中继' : '直连') : '路径未确认'} · {item.phase}
+                  {item.turnUsage === 'relay'
+                    ? 'TURN 中继实际被选中'
+                    : item.turnUsage === 'direct'
+                      ? '当前没有经过 TURN'
+                      : '路径未确认'}{' '}
+                  · {item.phase}
                 </span>
               </header>
               <dl>
+                <dt>实际 ICE 策略</dt>
+                <dd>
+                  {item.iceTransportPolicy} ·{' '}
+                  {item.forceRelay
+                    ? item.relayVerified
+                      ? '双方 relay 已核实'
+                      : '强制中继待核实'
+                    : '自动选择路径'}
+                </dd>
+                <dt>TURN 配置 / 候选</dt>
+                <dd>
+                  {item.turnConfigured ? '已安装到连接' : '未安装'} · 本地 relay{' '}
+                  {item.candidates.localRelay} / 对端 relay {item.candidates.remoteRelay}
+                </dd>
+                <dt>生效 AppID / 来源</dt>
+                <dd>
+                  {item.turnAppId ?? '服务端未提供'} / {item.turnAppIdSource ?? '未知'}
+                </dd>
+                <dt>TURN 接口结果</dt>
+                <dd>
+                  {item.turnRequests.at(-1)?.source ?? '尚未请求'} · HTTP{' '}
+                  {item.turnRequests.at(-1)?.httpStatus ?? '—'} / code{' '}
+                  {item.turnRequests.at(-1)?.providerCode ?? '—'}
+                </dd>
                 <dt>候选路径</dt>
                 <dd>{item.pair ?? '尚未选中'}</dd>
                 <dt>选中候选对 / 变化</dt>

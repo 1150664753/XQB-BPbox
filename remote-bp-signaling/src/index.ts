@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { issueTurnCredentials, turnPermission, verifyToken, turnErrors, type TurnEnvironment, type TurnGrant } from "./turn.mjs";
+import { issueTurnCredentials, turnPermission, verifyToken, turnErrors, turnDiagnostic, type TurnEnvironment, type TurnGrant } from "./turn.mjs";
 import { handleTurnHttp } from "./turnAuth";
 export { TurnAuthority } from "./turnAuth";
 
@@ -35,6 +35,7 @@ type SignalingRole = "HOST" | "FIRST" | "SECOND";
 type ConnectionMode = "CREATE" | "JOIN" | "RESUME";
 
 interface RoomMetadata {
+  forceRelay?: boolean;
   turn?: TurnGrant | null;
   roomCode: string;
   sessionId: string;
@@ -147,6 +148,10 @@ function relayMetadata(
 ): Record<string, unknown> {
   // Metadata is optional only for legacy clients. New peers require it and ignore legacy SDP.
   const metadata: Record<string, unknown> = {};
+  if (payload.forceRelay !== undefined) {
+    if (typeof payload.forceRelay !== 'boolean') throw new Error('INVALID_RELAY_METADATA');
+    metadata.forceRelay = payload.forceRelay;
+  }
   for (const key of ["connectionId", "targetSessionId"]) {
     if (payload[key] !== undefined) {
       if (!isString(payload[key], 1, 128))
@@ -191,6 +196,8 @@ function parseClientMessage(raw: string): SignalingMessage {
   const payload = value.payload;
   switch (value.type) {
     case "CREATE_ROOM":
+      if (payload.forceRelay !== undefined && typeof payload.forceRelay !== 'boolean')
+        throw new Error('INVALID_RELAY_METADATA');
       if (
         payload.displayName !== undefined &&
         !isString(payload.displayName, 1, 64)
@@ -200,7 +207,7 @@ function parseClientMessage(raw: string): SignalingMessage {
       return {
         type: value.type,
         ...(value.requestId ? { requestId: value.requestId } : {}),
-        payload: { displayName: payload.displayName },
+        payload: { displayName: payload.displayName, forceRelay: payload.forceRelay === true },
       };
     case "RESUME_ROOM": {
       const roomCode = normalizeRoomCode(payload.roomCode);
@@ -530,12 +537,8 @@ export class BpRoom extends DurableObject<WorkerEnvironment> {
       }
     } catch (error) {
       const code = error instanceof Error ? error.message : "SIGNALING_ERROR";
-      this.sendError(
-        socket,
-        code,
-        this.processingMessage(code),
-        message.requestId,
-      );
+      this.send(socket, 'ERROR', { code, message: this.processingMessage(code), recoverable: true,
+        ...(code.startsWith('TURN_') ? {turnDiagnostic: turnDiagnostic(this.env, error)} : {}) }, message.requestId);
       if (!this.getAttachment(socket)?.role) this.closeUnassigned(socket);
     }
   }
@@ -598,6 +601,7 @@ export class BpRoom extends DurableObject<WorkerEnvironment> {
       expiresAt: null,
     });
     await this.ctx.storage.put<RoomMetadata>(ROOM_METADATA_KEY, {
+      forceRelay: message.payload.forceRelay === true,
       turn,
       roomCode: attachment.roomCode,
       sessionId,
@@ -615,6 +619,8 @@ export class BpRoom extends DurableObject<WorkerEnvironment> {
         createdAt: new Date(now).toISOString(),
         expiresAt: PERSISTENT_ROOM_EXPIRES_AT,
         resumeToken,
+        forceRelay: message.payload.forceRelay === true,
+        turnDiagnostic: turnDiagnostic(this.env),
         turnAuthorizedUntil: null,
       },
       message.requestId,
@@ -662,6 +668,8 @@ export class BpRoom extends DurableObject<WorkerEnvironment> {
       socket,
       "ROOM_RESUMED",
       {
+        forceRelay: metadata.forceRelay === true,
+        turnDiagnostic: turnDiagnostic(this.env),
         turnAuthorizedUntil: await turnPermission(this.env, metadata.turn) ? metadata.turn!.expiresAt : null,
         roomCode: metadata.roomCode,
         sessionId: metadata.sessionId,
@@ -730,6 +738,8 @@ export class BpRoom extends DurableObject<WorkerEnvironment> {
       socket,
       "ROOM_JOINED",
       {
+        forceRelay: metadata.forceRelay === true,
+        turnDiagnostic: turnDiagnostic(this.env),
         roomCode: attachment.roomCode,
         sessionId,
         role,
@@ -802,6 +812,16 @@ export class BpRoom extends DurableObject<WorkerEnvironment> {
       // The answerer installs the configuration before any restarted offer can be forwarded.
       this.send(target, "TURN_CREDENTIALS", payload, sender.role === "HOST" ? undefined : message.requestId);
       this.send(hostSocket, "TURN_CREDENTIALS", payload, sender.role === "HOST" ? message.requestId : undefined);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'STALE_SIGNAL') throw error;
+      const code = error instanceof Error && Object.hasOwn(turnErrors, error.message) ? error.message : 'TURN_UNAVAILABLE';
+      const payload = { code, message: turnErrors[code], recoverable: true,
+        roomId: host.roomCode, peerId: player.sessionId, connectionId: player.connectionId,
+        turnDiagnostic: turnDiagnostic(this.env, error) };
+      if (this.findByRole(player.role!) === target && this.requireAttachment(target).connectionId === player.connectionId)
+        this.send(target, 'ERROR', payload, sender.role === 'HOST' ? undefined : message.requestId);
+      if (this.findByRole('HOST') === hostSocket)
+        this.send(hostSocket, 'ERROR', payload, sender.role === 'HOST' ? message.requestId : undefined);
     } finally {
       const current = await this.ctx.storage.get<RoomMetadata>(ROOM_METADATA_KEY);
       if (current?.sessionId === metadata.sessionId && current?.turn?.jti === metadata.turn?.jti)

@@ -4,6 +4,7 @@ import type { JoinedRoomContext } from "../stores/RemoteBpSessionStore";
 import type { ConnectionSnapshot } from "../types/connection";
 import type { PlayerSide } from "../types/bp";
 import { runtimeConfig } from "../config/runtime";
+import { exportRtcDiagnostics } from "../../../shared/remoteBpDiagnostics";
 
 interface JoinPageProps {
   initialRoomId: string;
@@ -154,6 +155,25 @@ export function JoinPage({
             {message ??
               `当前连接方式：${runtimeConfig.transport === "mock" ? "本地演示" : "P2P"}`}
           </div>
+          {connection.state !== "idle" && (
+            <button
+              type="button"
+              onClick={() => {
+                const url = URL.createObjectURL(
+                  new Blob([exportRtcDiagnostics()], {
+                    type: "application/json",
+                  }),
+                );
+                const link = document.createElement("a");
+                link.href = url;
+                link.download = "remote-bp-player-network.json";
+                link.click();
+                window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+              }}
+            >
+              导出网络诊断
+            </button>
+          )}
         </form>
       </section>
     </main>

@@ -93,6 +93,42 @@ function signal(connectionId, negotiationId, rest) {
   return { connectionId, negotiationId, ...rest }
 }
 const description = (type, fragment) => ({ type, sdp: `v=0\r\na=ice-ufrag:${fragment}\r\n` })
+function selectedStats(local = 'relay', remote = 'relay', id = 'selected') {
+  return new Map([
+    ['transport', { type: 'transport', selectedCandidatePairId: id }],
+    [
+      id,
+      {
+        id,
+        type: 'candidate-pair',
+        state: 'succeeded',
+        nominated: true,
+        localCandidateId: 'local',
+        remoteCandidateId: 'remote',
+        bytesSent: 1000,
+        bytesReceived: 2000,
+        currentRoundTripTime: 0.04
+      }
+    ],
+    [
+      'local',
+      {
+        type: 'local-candidate',
+        candidateType: local,
+        protocol: 'udp',
+        relayProtocol: 'udp',
+        url: 'turn:relay.test:3478'
+      }
+    ],
+    ['remote', { type: 'remote-candidate', candidateType: remote, protocol: 'udp' }]
+  ])
+}
+const turnFixture = () => ({
+  expiresAt: now + 14400000,
+  iceServers: [
+    { urls: 'turn:relay.test', username: 'SECRET_USER', credential: 'SECRET_CREDENTIAL' }
+  ]
+})
 
 class Channel extends EventTarget {
   constructor(label = 'xqb-remote-bp') {
@@ -138,6 +174,9 @@ class Peer extends EventTarget {
   }
   setConfiguration(config) {
     this.config = config
+  }
+  getConfiguration() {
+    return this.config
   }
   createDataChannel(label = 'xqb-remote-bp') {
     const channel = new Channel(label)
@@ -278,9 +317,238 @@ async function run(name, test) {
 
 async function main() {
   await run(
+    'room relay policy reaches Web PC, is retained on rejoin, and errors never become P2P',
+    async () => {
+      const client = new WebRtcRemoteBpConnection({ signalingUrl: 'ws://test', iceServers: [] })
+      const connected = client.connect({
+        roomId: 'ABCDEF',
+        side: 'first',
+        clientId: 'policy-client'
+      })
+      const outcome = connected.catch((error) => error)
+      await flush()
+      let ws = Socket.all.at(-1)
+      const provider = {
+        appId: 'test-app',
+        appIdSource: 'env.WTN_APP_ID',
+        apiDomain: 'wtn.volcvideo.com'
+      }
+      ws.message('ROOM_JOINED', {
+        roomCode: 'ABCDEF',
+        role: 'FIRST',
+        sessionId: 'forced-player',
+        forceRelay: true,
+        turnDiagnostic: provider
+      })
+      await flush()
+      let pc = Peer.all.at(-1)
+      assert.equal(pc.config.iceTransportPolicy, 'relay')
+      let ready = ws.sent.find((message) => message.type === 'PEER_READY')
+      assert.equal(ready.payload.forceRelay, true)
+      const identity = {
+        roomId: 'ABCDEF',
+        peerId: 'forced-player',
+        connectionId: ready.payload.connectionId
+      }
+      ws.message('TURN_CREDENTIALS', {
+        ...turnFixture(),
+        ...identity,
+        turnDiagnostic: {
+          ...provider,
+          httpStatus: 200,
+          providerCode: 200,
+          source: 'provider',
+          ttl: 14400
+        }
+      })
+      ws.message(
+        'OFFER',
+        signal(identity.connectionId, 1, {
+          fromRole: 'HOST',
+          targetSessionId: 'forced-player',
+          forceRelay: true,
+          description: description('offer', 'remote-1')
+        })
+      )
+      await flush()
+      pc.getStats = async () => selectedStats()
+      const channel = new Channel()
+      emit(pc, 'datachannel', { channel })
+      pc.network('connected')
+      channel.open()
+      await tick(2000)
+      assert.equal(client.getSnapshot().state, 'connected')
+      assert.equal((await outcome).sessionId, 'forced-player')
+      ws.close()
+      await tick(1000)
+      ws = Socket.all.at(-1)
+      ws.message('ROOM_JOINED', {
+        roomCode: 'ABCDEF',
+        role: 'FIRST',
+        sessionId: 'forced-rejoined',
+        forceRelay: true,
+        turnDiagnostic: provider
+      })
+      await flush()
+      pc = Peer.all.at(-1)
+      ready = ws.sent.find((message) => message.type === 'PEER_READY')
+      assert.equal(pc.config.iceTransportPolicy, 'relay')
+      ws.message('ERROR', {
+        code: 'TURN_PROVIDER_DENIED',
+        message: 'TURN denied',
+        connectionId: ready.payload.connectionId,
+        turnDiagnostic: { ...provider, httpStatus: 403 }
+      })
+      await flush()
+      assert.equal(client.getSnapshot().state, 'failed')
+      assert.equal(pc.config.iceTransportPolicy, 'relay')
+      assert.equal(pc.remoteCalls, 0)
+      await client.disconnect()
+    }
+  )
+  await run(
+    'forced TURN requires the selected pair, rejects direct/unknown paths, and revalidates restarts',
+    async () => {
+      for (const [local, remote, code] of [
+        ['host', 'srflx', 'TURN_PATH_NOT_RELAY'],
+        ['relay', 'host', 'TURN_PATH_NOT_RELAY'],
+        [null, null, 'TURN_PATH_UNVERIFIED'],
+        ['relay', 'relay', null]
+      ]) {
+        const { rtc, pc } = session(true, `proof-${local}-${remote}`, { testOnlyForceRelay: true })
+        rtc.applyTurn(turnFixture())
+        let stats = selectedStats(local, remote)
+        // Collected/nominated relay decoy is never proof if transport selects direct.
+        stats.set('decoy', {
+          id: 'decoy',
+          type: 'candidate-pair',
+          state: 'succeeded',
+          nominated: true,
+          localCandidateId: 'relay-decoy',
+          remoteCandidateId: 'relay-decoy'
+        })
+        stats.set('relay-decoy', { type: 'local-candidate', candidateType: 'relay' })
+        pc.getStats = async () => stats
+        await rtc.start()
+        await rtc.receive(
+          'ANSWER',
+          signal(rtc.connectionId, 1, {
+            description: description('answer', 'remote-1'),
+            forceRelay: true
+          })
+        )
+        pc.network('connected')
+        pc.channel.open()
+        assert.notEqual(rtc.phase, 'connected', 'channel open alone cannot prove relay')
+        await tick(23000)
+        if (code) {
+          assert.equal(rtc.phase, 'failed')
+          assert.equal(rtc.getDiagnostic().errorCode, code)
+        } else {
+          assert.equal(rtc.phase, 'connected')
+          assert.equal(rtc.getDiagnostic().relayVerified, true)
+          stats.get('selected').bytesSent += 50000
+          await tick(1000)
+          assert.equal(rtc.getDiagnostic().trafficSamples.at(-1).sentDelta, 50000)
+          rtc.requestRestart('test')
+          await flush()
+          assert.equal(pc.config.iceTransportPolicy, 'relay')
+          assert.equal(rtc.getDiagnostic().relayVerified, false)
+          stats = selectedStats('relay', 'relay', 'after-restart')
+          await rtc.receive(
+            'ANSWER',
+            signal(rtc.connectionId, 2, {
+              description: description('answer', 'remote-2'),
+              forceRelay: true
+            })
+          )
+          await tick(2000)
+          assert.equal(rtc.phase, 'connected')
+          assert.deepEqual(
+            rtc.getDiagnostic().pairHistory.map((p) => p.id),
+            ['selected', 'after-restart']
+          )
+          rtc.clearTurn('revoked')
+          assert.equal(rtc.phase, 'failed')
+          assert.equal(pc.config.iceTransportPolicy, 'relay')
+        }
+        rtc.close()
+      }
+    }
+  )
+  await run(
+    'answerer installs forced policy before SDP and cannot answer without credentials',
+    async () => {
+      const missing = session(false, 'answer-missing')
+      await missing.rtc.receive(
+        'OFFER',
+        signal('answer-missing', 1, {
+          description: description('offer', 'remote-1'),
+          forceRelay: true
+        })
+      )
+      assert.equal(missing.rtc.phase, 'failed')
+      assert.equal(missing.pc.remoteCalls, 0)
+      assert.equal(missing.pc.config.iceTransportPolicy, 'relay')
+      const ready = session(false, 'answer-ready')
+      ready.rtc.applyTurn(turnFixture())
+      await ready.rtc.receive(
+        'OFFER',
+        signal('answer-ready', 1, {
+          description: description('offer', 'remote-1'),
+          forceRelay: true
+        })
+      )
+      assert.equal(ready.pc.config.iceTransportPolicy, 'relay')
+      assert.equal(ready.sent.find((s) => s.type === 'ANSWER').payload.forceRelay, true)
+      const old = session(true, 'old-client', { testOnlyForceRelay: true })
+      old.rtc.applyTurn(turnFixture())
+      await old.rtc.start()
+      await old.rtc.receive(
+        'ANSWER',
+        signal('old-client', 1, { description: description('answer', 'remote-1') })
+      )
+      assert.equal(old.rtc.getDiagnostic().errorCode, 'TURN_POLICY_UNCONFIRMED')
+    }
+  )
+  await run(
+    'TURN response metadata is allowlisted and equal-expiry credential replacement is installed',
+    async () => {
+      const { rtc, pc } = session(true, 'metadata')
+      const payload = {
+        ...turnFixture(),
+        turnDiagnostic: {
+          appId: 'test-app',
+          appIdSource: 'env.WTN_APP_ID',
+          httpStatus: 200,
+          providerCode: 200,
+          ttl: 14400,
+          source: 'provider',
+          token: 'SECRET_TOKEN',
+          username: 'SECRET_USER'
+        }
+      }
+      rtc.applyTurn(payload)
+      assert.equal(rtc.getDiagnostic().turnRequests.at(-1).appId, 'test-app')
+      rtc.applyTurn({
+        ...payload,
+        iceServers: [{ urls: 'turn:other.test', username: 'u2', credential: 'c2' }]
+      })
+      assert.ok(JSON.stringify(pc.config).includes('other.test'))
+      rtc.turnFailed('TURN_PROVIDER_DENIED', {
+        ...payload.turnDiagnostic,
+        httpStatus: 401,
+        providerCode: 402
+      })
+      assert.equal(rtc.getDiagnostic().turnRequests.at(-1).httpStatus, 401)
+      assert.ok(!JSON.stringify(rtc.getDiagnostic()).includes('SECRET_'))
+    }
+  )
+  await run(
     'successful UDP does not leave a fallback timer that restarts on a brief outage',
     async () => {
       const { rtc, pc } = session(true, 'udp-success', { testOnlyForceRelay: true })
+      pc.getStats = async () => selectedStats()
       rtc.applyTurn({
         expiresAt: 14_400_000,
         iceServers: [
@@ -294,7 +562,10 @@ async function main() {
       await rtc.start()
       await rtc.receive(
         'ANSWER',
-        signal(rtc.connectionId, 1, { description: description('answer', 'remote-1') })
+        signal(rtc.connectionId, 1, {
+          description: description('answer', 'remote-1'),
+          forceRelay: true
+        })
       )
       pc.network('connected')
       pc.channel.open()
@@ -308,6 +579,7 @@ async function main() {
   )
   await run('UDP first, bounded TCP fallback and transient disconnect grace', async () => {
     const { rtc, pc } = session(true, 'udp-first', { testOnlyForceRelay: true })
+    pc.getStats = async () => selectedStats()
     rtc.applyTurn({
       expiresAt: 14_400_000,
       requestedTtl: 14400,
@@ -326,7 +598,10 @@ async function main() {
     await rtc.start()
     await rtc.receive(
       'ANSWER',
-      signal(rtc.connectionId, 1, { description: description('answer', 'remote-1') })
+      signal(rtc.connectionId, 1, {
+        description: description('answer', 'remote-1'),
+        forceRelay: true
+      })
     )
     pc.network('checking', 'connecting')
     await tick(RTC_TIMING.udpPreferenceMs)
@@ -335,7 +610,10 @@ async function main() {
     assert.equal(pc.config.iceTransportPolicy, 'relay')
     await rtc.receive(
       'ANSWER',
-      signal(rtc.connectionId, 2, { description: description('answer', 'remote-2') })
+      signal(rtc.connectionId, 2, {
+        description: description('answer', 'remote-2'),
+        forceRelay: true
+      })
     )
     pc.network('connected')
     pc.channel.open()
@@ -368,10 +646,14 @@ async function main() {
         expiresAt: now + 120_000,
         iceServers: [{ urls: 'turn:relay.test', username: 'u', credential: 'p' }]
       })
+      pc.getStats = async () => selectedStats()
       await rtc.start()
       await rtc.receive(
         'ANSWER',
-        signal(rtc.connectionId, 1, { description: description('answer', 'remote-1') })
+        signal(rtc.connectionId, 1, {
+          description: description('answer', 'remote-1'),
+          forceRelay: true
+        })
       )
       pc.network('connected')
       pc.channel.open()
@@ -850,7 +1132,12 @@ async function main() {
           ['transport', { type: 'transport', selectedCandidatePairId: 'pair' }],
           [
             'pair',
-            { type: 'candidate-pair', localCandidateId: 'local', remoteCandidateId: 'remote' }
+            {
+              type: 'candidate-pair',
+              state: 'succeeded',
+              localCandidateId: 'local',
+              remoteCandidateId: 'remote'
+            }
           ],
           [
             'local',
@@ -899,7 +1186,11 @@ async function main() {
     )
     assert.equal(rtc.relayExpiresAt, null)
     assert.equal(getRtcDiagnostics().find((d) => d.connectionId === 'test-relay').turn, 'expired')
-    assert.throws(() => rtc.applyTurn({ iceServers: [], expiresAt: 0 }), /无效|过期/)
+    assert.equal(
+      rtc.phase,
+      'failed',
+      'expired forced relay must close instead of retaining a direct path'
+    )
   })
   await run(
     'signaling outage can skip an offer generation and late socket errors still reconnect',

@@ -28,6 +28,22 @@ export interface CandidatePairDiagnostic {
   localRelayProtocol: string | null
   remoteRelayProtocol: string | null
   server: string | null
+  remoteServer: string | null
+  remoteProtocol: string | null
+  source: 'transport' | 'nominated'
+  negotiationId: number
+}
+export interface TurnRequestDiagnostic {
+  at: number
+  appId: string | null
+  appIdSource: string | null
+  apiDomain: string | null
+  httpStatus: number | null
+  providerCode: number | null
+  ttl: number | null
+  source: string | null
+  result: 'ok' | 'error'
+  code: string | null
 }
 export interface RtcDiagnostics {
   connectionId: string
@@ -53,6 +69,21 @@ export interface RtcDiagnostics {
   remoteRelayProtocol: string | null
   relay: boolean
   forceRelay: boolean
+  iceTransportPolicy: RTCIceTransportPolicy
+  turnConfigured: boolean
+  turnUsage: 'unknown' | 'direct' | 'relay'
+  relayVerified: boolean
+  turnRequests: TurnRequestDiagnostic[]
+  trafficSamples: Array<{
+    at: number
+    negotiationId: number
+    pairId: string | null
+    rttMs: number | null
+    bytesSent: number | null
+    bytesReceived: number | null
+    sentDelta: number | null
+    receivedDelta: number | null
+  }>
   rttMs: number | null
   selectedPair: CandidatePairDiagnostic | null
   pairHistory: CandidatePairDiagnostic[]
@@ -81,7 +112,12 @@ export interface RtcDiagnostics {
   assetBytesSent: number | null
   assetBytesPerSecond: number | null
   assetRateLimit: number
-  assets: { requested: number; submitted: number; totalBytes: number; queuedBytes: number }
+  assets: {
+    requested: number
+    submitted: number
+    totalBytes: number
+    queuedBytes: number
+  }
   candidates: {
     generated: number
     sent: number
@@ -91,6 +127,8 @@ export interface RtcDiagnostics {
     rejected: number
     localComplete: boolean
     remoteComplete: boolean
+    localRelay: number
+    remoteRelay: number
   }
   milestones: Record<string, number>
   restartCount: number
@@ -101,6 +139,8 @@ export interface RtcDiagnostics {
   turnProtocols: string[]
   turnServers: string[]
   turnApiDomain: string | null
+  turnAppId: string | null
+  turnAppIdSource: string | null
   turnRequestedTtl: number | null
   turnActualTtl: number | null
   turnTtlReason: string | null
@@ -157,6 +197,12 @@ export function createRtcDiagnostics(
     remoteRelayProtocol: null,
     relay: false,
     forceRelay,
+    iceTransportPolicy: forceRelay ? 'relay' : 'all',
+    turnConfigured: false,
+    turnUsage: 'unknown',
+    relayVerified: false,
+    turnRequests: [],
+    trafficSamples: [],
     rttMs: null,
     selectedPair: null,
     pairHistory: [],
@@ -185,7 +231,9 @@ export function createRtcDiagnostics(
       duplicates: 0,
       rejected: 0,
       localComplete: false,
-      remoteComplete: false
+      remoteComplete: false,
+      localRelay: 0,
+      remoteRelay: 0
     },
     milestones: {},
     restartCount: 0,
@@ -196,6 +244,8 @@ export function createRtcDiagnostics(
     turnProtocols: [],
     turnServers: [],
     turnApiDomain: null,
+    turnAppId: null,
+    turnAppIdSource: null,
     turnRequestedTtl: null,
     turnActualTtl: null,
     turnTtlReason: null,
@@ -218,7 +268,7 @@ export function getRtcDiagnostics(roomId?: string | null): RtcDiagnostics[] {
 export function exportRtcDiagnostics(roomId?: string | null): string {
   return JSON.stringify(
     {
-      schemaVersion: 2,
+      schemaVersion: 3,
       exportedAt: new Date().toISOString(),
       note: 'Includes credential-free ICE server endpoints and opaque selected pair IDs, never peer addresses, SDP, tokens or credentials. Submitted assets are not receipt acknowledgements; verified means receiver SHA-256 passed. DataChannel packet loss is unavailable; sendDiscardRatio measures local send discards only.',
       connections: getRtcDiagnostics(roomId)

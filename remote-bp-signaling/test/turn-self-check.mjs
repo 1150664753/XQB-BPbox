@@ -31,6 +31,7 @@ function checkProvider(url, authorization) {
   assert.equal(signature, createHmac('sha256', env.WTN_APP_KEY).update(`${header}.${payload}`).digest('base64url'));
   assert.deepEqual(Object.keys(JSON.parse(Buffer.from(payload, 'base64url'))).sort(), ['appID','exp','version']);
   assert.equal(JSON.parse(Buffer.from(payload, 'base64url')).version, '1.0');
+  assert.equal(JSON.parse(Buffer.from(payload, 'base64url')).appID, decodeURIComponent(url.pathname.slice('/turn/'.length)));
   assert.ok(Math.abs(JSON.parse(Buffer.from(payload, 'base64url')).exp - Date.now()/1000 - 300) < 2, 'API JWT remains 5 minutes, independent of TURN TTL');
 }
 const provider = async (url, options) => { providerCalls++; checkProvider(url, options.headers.Authorization); return Response.json(providerData(14400)); };
@@ -43,8 +44,35 @@ assert.equal(credentials.ttl, 14400);
 assert.ok(Math.abs(credentials.expiresAt - Date.now() - 14400*1000) < 2000);
 assert.equal(credentials.apiDomain, 'wtn.volcvideo.com');
 assert.equal(credentials.iceServers[0].urls.length, 2);
-assert.deepEqual(await issueTurnCredentials(mockEnv, g, 'peer', provider), credentials);
+assert.deepEqual(await issueTurnCredentials(mockEnv, g, 'peer', provider), { ...credentials, turnDiagnostic: { ...credentials.turnDiagnostic, source: 'cache' } });
+assert.equal(credentials.turnDiagnostic.appId, env.WTN_APP_ID);
+assert.equal(credentials.turnDiagnostic.httpStatus, 200);
+assert.equal(credentials.turnDiagnostic.providerCode, 200);
+assert.equal(Object.hasOwn(credentials, 'configDigest'), false);
 assert.equal(providerCalls, 1);
+const changedGrant = grant();
+await issueTurnCredentials(mockEnv, changedGrant, 'same-peer', provider);
+for (const change of [{WTN_APP_ID:'other-app'}, {WTN_API_DOMAIN:'wtn-lf.volcvideo.com'}, {WTN_APP_KEY:'rotated-key'}]) {
+  let fetched = false;
+  const changedEnv = { ...mockEnv, ...change };
+  const result = await issueTurnCredentials(changedEnv, changedGrant, 'same-peer', async (url, init) => {
+    fetched = true;
+    const [header, payload, signature] = init.headers.Authorization.slice(7).split('.');
+    assert.equal(JSON.parse(Buffer.from(payload, 'base64url')).appID, changedEnv.WTN_APP_ID);
+    assert.equal(url.pathname, '/turn/' + changedEnv.WTN_APP_ID);
+    assert.equal(signature, createHmac('sha256', changedEnv.WTN_APP_KEY).update(`${header}.${payload}`).digest('base64url'));
+    return Response.json(providerData(14400));
+  });
+  assert.ok(fetched, 'changed config must bypass persisted cache');
+  assert.equal(result.turnDiagnostic.appId, changedEnv.WTN_APP_ID);
+}
+await assert.rejects(issueTurnCredentials(mockEnv, grant(), 'error-metadata', async () => Response.json({code: 402, message: 'SECRET_PROVIDER_BODY'}, {status: 401})), error => {
+  assert.equal(error.turnDiagnostic.httpStatus, 401);
+  assert.equal(error.turnDiagnostic.providerCode, 402);
+  assert.ok(!JSON.stringify(error).includes('SECRET_'));
+  return true;
+});
+await assert.rejects(issueTurnCredentials(mockEnv, grant(), 'partial-invalid', async () => Response.json({ ...providerData(14400), ice_servers: [...providerData(14400).ice_servers, {urls:'turn:bad.test',username:'',credential:''}] })), /TURN_PROVIDER_INVALID/);
 for (const actualTtl of [3600, 7200, 18000]) {
   const result = await issueTurnCredentials(mockEnv, grant(), 'ttl-test', async () => Response.json(providerData(actualTtl)));
   assert.equal(result.ttl, actualTtl);
@@ -121,14 +149,17 @@ async function connect(query='') {
     }
   };
 }
-async function room() {
-  const host=await connect(); host.send('CREATE_ROOM',{ turnEnabled:true, role:'HOST' });
+async function room(forceRelay = false) {
+  const host=await connect(); host.send('CREATE_ROOM',{ turnEnabled:true, role:'HOST', forceRelay });
   const created=await host.next('ROOM_CREATED');
   const player=await connect(`?roomId=${created.payload.roomCode}`);
   player.send('JOIN_ROOM',{roomCode:created.payload.roomCode,side:'FIRST'});
   const joined=await player.next('ROOM_JOINED'); await host.next('PEER_JOINED');
+  assert.equal(created.payload.forceRelay, forceRelay);
+  assert.equal(joined.payload.forceRelay, forceRelay);
   const connectionId=randomUUID();
-  player.send('PEER_READY',{targetRole:'HOST',connectionId,negotiationId:0}); await host.next('PEER_READY');
+  player.send('PEER_READY',{targetRole:'HOST',connectionId,negotiationId:0,forceRelay});
+  assert.equal((await host.next('PEER_READY')).payload.forceRelay, forceRelay);
   return {host,player,created,joined,request:{targetRole:'FIRST',targetSessionId:joined.payload.sessionId,connectionId}};
 }
 try {
@@ -139,9 +170,10 @@ try {
   assert.ok(Math.abs(login.data.expiresAt-Date.now()-AUTH_SECONDS*1000)<2000);
   assert.equal((await http('status',null,authorization)).status,200);
   assert.equal((await http('status',null,authorization+'x')).status,401);
-  const plain=await room();
+  const plain=await room(true);
   assert.equal(plain.created.payload.turnAuthorizedUntil,null);
   plain.host.send('TURN_REQUEST',plain.request); assert.equal((await plain.host.next('ERROR')).payload.code,'TURN_NOT_AUTHORIZED');
+  assert.equal((await plain.player.next('ERROR')).payload.turnDiagnostic.appId, env.WTN_APP_ID);
   plain.player.send('TURN_AUTHORIZE',{token:authorization,role:'HOST'}); assert.equal((await plain.player.next('ERROR')).payload.code,'HOST_ONLY');
   plain.host.send('TURN_AUTHORIZE',{token:authorization+'x'}); assert.equal((await plain.host.next('ERROR')).payload.code,'TURN_TOKEN_INVALID');
   const expired=await signToken(env.TURN_AUTH_SIGNING_KEY,{...claims,iat:claims.iat-AUTH_SECONDS-10,exp:claims.iat-10});
@@ -164,6 +196,7 @@ try {
   assert.equal((await http('revoke',null,authorization)).status,200);
   await plain.host.next('TURN_STATUS'); await plain.player.next('TURN_STATUS');
   plain.host.send('TURN_REQUEST',plain.request); assert.equal((await plain.host.next('ERROR')).payload.code,'TURN_NOT_AUTHORIZED');
+  await plain.player.next('ERROR');
   assert.equal((await http('status',null,authorization)).status,401);
   assert.equal(calls,1);
   console.log('PASS real Worker/DO room identity, host binding, player self-service, no-cost P2P, forged/expired/unassigned requests, cache and revoke');
@@ -176,6 +209,7 @@ try {
   assert.equal((await http('revoke',null,auth2)).status,200);
   await plain.host.next('TURN_STATUS'); await plain.player.next('TURN_STATUS');
   releaseProvider(); assert.equal((await plain.host.next('ERROR')).payload.code,'TURN_NOT_AUTHORIZED');
+  await plain.player.next('ERROR');
   mode='ok';
   for(let i=0;i<5;i++) assert.equal((await http('authorize',{hostId:randomUUID(),password:'wrong'},null,'198.51.100.2')).status,401);
   assert.equal((await http('authorize',{hostId:randomUUID(),password:env.TURN_ACCESS_PASSWORD},null,'198.51.100.2')).status,429);

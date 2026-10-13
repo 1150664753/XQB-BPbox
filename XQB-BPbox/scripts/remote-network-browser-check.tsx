@@ -315,7 +315,10 @@ async function main() {
   await sleep(50)
   document.querySelector('details')!.open = true
   await sleep(1200)
-  check(document.querySelector('dt')?.textContent === '候选路径', 'diagnostic panel did not render')
+  check(
+    [...document.querySelectorAll('dt')].some((node) => node.textContent === '候选路径'),
+    'diagnostic panel did not render'
+  )
   check(
     document.documentElement.scrollWidth <= innerWidth,
     'diagnostic panel overflowed at narrow width'

@@ -115,6 +115,8 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
   private earlySignals: BufferedRtcSignal[] = [];
   private lastSignalAt = Date.now();
   private roomReady = false;
+  private roomForceRelay = false;
+  private turnProvider: unknown;
   private hostAvailable = true;
   private lifecycle = 0;
   private get dataChannel(): RTCDataChannel | null {
@@ -275,6 +277,8 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
         this.roomReady = true;
         this.hostAvailable = true;
         const sameSession = this.confirmed?.sessionId === sessionId;
+        this.roomForceRelay = message.payload.forceRelay === true;
+        this.turnProvider = message.payload.turnDiagnostic;
         this.confirmed = { roomId, sessionId, assignedSide };
         if (!sameSession || !this.rtc) this.createPeerConnection();
         this.startSignalingHeartbeat();
@@ -303,7 +307,7 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
           try {
             this.rtc.applyTurn(message.payload);
           } catch {
-            this.rtc.turnFailed("TURN_PROVIDER_INVALID");
+            this.rtc.turnFailed("TURN_PROVIDER_INVALID", message.payload.turnDiagnostic);
           }
         }
         return;
@@ -336,7 +340,8 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
           : "信令服务错误";
         const error = new Error(text);
         if (code.startsWith("TURN_")) {
-          this.rtc?.turnFailed(code);
+          if (message.payload.connectionId && message.payload.connectionId !== this.rtc?.connectionId) return;
+          this.rtc?.turnFailed(code, message.payload.turnDiagnostic);
           this.events.emit("error", {
             code,
             message: text,
@@ -422,7 +427,8 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
       peerId: this.confirmed.sessionId,
       roomId: this.confirmed.roomId,
       offerer: false,
-      testOnlyForceRelay: this.options.testOnlyForceRelay,
+      testOnlyForceRelay: Boolean(this.options.testOnlyForceRelay || this.roomForceRelay),
+      turnProvider: this.turnProvider,
       iceServers: this.options.iceServers,
       send: (type, payload) => {
         if (
@@ -512,6 +518,7 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
       targetRole: "HOST",
       connectionId: this.rtc.connectionId,
       negotiationId: 0,
+      forceRelay: this.rtc.getDiagnostic().forceRelay,
     });
   }
 

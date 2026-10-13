@@ -151,6 +151,7 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
   private resumeInFlight = false
   private resumeResolve: (() => void) | null = null
   private turnAuthorizedUntil: number | null = null
+  private turnProvider: unknown
   private unsubscribeTurn: (() => void) | null = null
   private readonly turnRequests = new Map<string, { peer: HostPeerSession; finish: () => void }>()
 
@@ -202,7 +203,11 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
       }, this.options.connectTimeoutMs ?? 10_000)
     })
     console.info('[Remote BP signaling] CREATE_ROOM send')
-    this.sendSignal('CREATE_ROOM', { displayName: 'XQB-BPBox' }, requestId)
+    this.sendSignal(
+      'CREATE_ROOM',
+      { displayName: 'XQB-BPBox', forceRelay: Boolean(this.options.testOnlyForceRelay) },
+      requestId
+    )
     return created
   }
 
@@ -354,6 +359,7 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
   private async handleSignalingMessage(message: SignalingEnvelope): Promise<void> {
     switch (message.type) {
       case 'ROOM_CREATED': {
+        this.turnProvider = message.payload.turnDiagnostic
         const roomCode = message.payload.roomCode
         const createdAt = message.payload.createdAt
         const expiresAt = message.payload.expiresAt
@@ -389,6 +395,9 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
         return
       }
       case 'ROOM_RESUMED': {
+        if (message.payload.forceRelay === true) this.options.testOnlyForceRelay = true
+        this.turnProvider = message.payload.turnDiagnostic
+        for (const peer of this.peers.values()) peer.rtc.setTurnProvider(this.turnProvider)
         const roomCode = message.payload.roomCode
         if (!isString(roomCode, 6, 6) || roomCode !== this.roomId) {
           throw new Error('恢复的房间信息无效')
@@ -471,7 +480,8 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
               side,
               identity.peerId,
               message.payload.connectionId,
-              identity.displayName
+              identity.displayName,
+              message.payload.forceRelay === true
             )
           }
           await this.flushEarlySignals(side)
@@ -492,7 +502,7 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
         this.turnAuthorizedUntil = until > Date.now() ? until : null
         for (const peer of this.peers.values()) {
           if (!this.turnAuthorizedUntil) peer.rtc.clearTurn('房主 TURN 授权已撤销或到期')
-          else if (this.options.testOnlyForceRelay && peer.rtc.phase !== 'signaling') {
+          else if (peer.rtc.getDiagnostic().forceRelay && peer.rtc.phase !== 'signaling') {
             void this.prepareTurn(peer).then(() => peer.rtc.requestRestart('强制 relay 测试'))
           }
         }
@@ -525,7 +535,10 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
           this.emitStatus({ connectionState: 'connected', turnWarning: null })
           if (changed && !request) peer.rtc.requestRestart('选手已获取 TURN 凭证')
         } catch {
-          ;(request?.peer ?? matchedPeer)?.rtc.turnFailed('TURN_PROVIDER_INVALID')
+          ;(request?.peer ?? matchedPeer)?.rtc.turnFailed(
+            'TURN_PROVIDER_INVALID',
+            message.payload.turnDiagnostic
+          )
         } finally {
           request?.finish()
         }
@@ -541,7 +554,7 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
         const error = new Error(`${text} (${code})`)
         const turnRequest = message.requestId ? this.turnRequests.get(message.requestId) : null
         if (turnRequest) {
-          turnRequest.peer.rtc.turnFailed(code)
+          turnRequest.peer.rtc.turnFailed(code, message.payload.turnDiagnostic)
           if (code === 'TURN_NOT_AUTHORIZED' || code === 'TURN_AUTH_EXPIRED')
             turnRequest.peer.rtc.clearTurn('房主 TURN 授权已撤销或到期')
           this.emitStatus({ connectionState: 'connected', turnWarning: text })
@@ -549,6 +562,12 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
           return
         }
         if (code.startsWith('TURN_')) {
+          const peer = [...this.peers.values()].find(
+            (peer) =>
+              peer.rtc.connectionId === message.payload.connectionId &&
+              peer.peerId === message.payload.peerId
+          )
+          peer?.rtc.turnFailed(code, message.payload.turnDiagnostic)
           this.emitStatus({ connectionState: 'connected', turnWarning: text })
           return
         }
@@ -599,7 +618,8 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
     side: 'first' | 'second',
     peerId: string,
     connectionId: string,
-    displayName?: string
+    displayName?: string,
+    playerForceRelay = false
   ): Promise<void> {
     this.removePeer(side, false)
     let rtc: RemoteBpRtcSession | null = null
@@ -608,7 +628,8 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
       peerId,
       roomId: this.roomId!,
       offerer: true,
-      testOnlyForceRelay: this.options.testOnlyForceRelay,
+      testOnlyForceRelay: Boolean(this.options.testOnlyForceRelay || playerForceRelay),
+      turnProvider: this.turnProvider,
       iceServers: this.options.iceServers,
       prepareRestart: async () => {
         const peer = this.peers.get(side)
@@ -660,7 +681,7 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
     this.connectingListeners.forEach((listener) => listener(peer))
     // Do not await a TURN response on the WebSocket inbox chain that must receive it.
     void (async () => {
-      if (this.options.testOnlyForceRelay) {
+      if (rtc?.getDiagnostic().forceRelay) {
         await this.waitForTurnAuthorization()
         await this.prepareTurn(peer)
       }

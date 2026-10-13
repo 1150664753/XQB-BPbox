@@ -4,7 +4,7 @@
 
 ## 你现在需要配置什么
 
-先在火山引擎 WTN 控制台确认应用 `6ac735fb7305ab038c2e3546` 的 AppKey，并联系 WTN 技术支持为该应用开通 TURN。仅创建应用不等于开通 TURN。无需把任何密钥发送到聊天里。
+仓库 `wrangler.jsonc` 的默认 AppID 为 `6ac735fb7305ab038c2e3546`。先通过网络诊断的 `turnAppId` 核对实际 Worker 绑定，再在对应 WTN 应用核对 AppKey 和 TURN 开通状态；不要仅凭仓库默认值替换线上 AppID。仅创建应用不等于开通 TURN。无需把任何密钥发送到聊天里。
 
 Cloudflare Worker **Secrets**（三个都不要写进源码、Vite 环境变量或客户端）：
 
@@ -71,7 +71,7 @@ npm run build:win
 
 Web 使用现有 `XBQ-BPweb/wrangler.jsonc` 的静态资源部署，保留当前 `bp.xqbbp.dpdns.org` 域名映射。安装 electron-builder 输出的新版 Windows 安装包；`npm run build` 仅生成 `out`，不会发布安装包。这里没有执行线上部署，也没有运行带 GitHub 发布动作的 `release:win`。
 
-BPbox 主控窗口按 **Ctrl+Shift+T**，输入密码并验证。成功后授权有效 7 天，正常退出、重启仍保留；创建房间或恢复房主信令后自动绑定授权，也可为已创建房间授权。弹窗不出现在普通 BP 设置页。选手无需密码，加入房间后使用其已验证会话。生产构建的 `iceTransportPolicy` 固定为 `all`。
+BPbox 主控窗口按 **Ctrl+Shift+T**，输入密码并验证。成功后授权有效 7 天，正常退出、重启仍保留；创建房间或恢复房主信令后自动绑定授权，也可为已创建房间授权。弹窗不出现在普通 BP 设置页。选手无需密码，加入房间后使用其已验证会话。默认 `iceTransportPolicy` 为 `all`；创建房间前启用“强制 TURN 测试”后，双方使用 `relay`。
 
 ## 协议与权限边界
 
@@ -102,7 +102,7 @@ BPbox 主控窗口按 **Ctrl+Shift+T**，输入密码并验证。成功后授权
 
 ## 强制 TURN 测试
 
-正式界面中，在创建房间前展开“网络诊断”并勾选“强制 TURN 测试”，完成桌面端授权后再建房。房主从创建 PeerConnection 起使用 `iceTransportPolicy: 'relay'`，等凭证安装后才发 Offer；仅房主启用也能强制经过中继。结束测试后关闭房间并取消勾选。
+正式界面中，在创建房间前展开“网络诊断”并勾选“强制 TURN 测试”，完成桌面端授权后再建房。房间保存策略，Web 端从 ROOM_JOINED 继承；每轮 SDP 也交换策略。房主等凭证安装后才发 Offer，双方在 `getStats()` 确认实际选中 `relay / relay` 后才报告连接成功。无法获得凭证、对端不确认策略、选中直连或无法核实路径时均明确失败。Worker、BPbox、Web 端需一起更新；旧端/旧 Worker 不确认策略会使强制测试失败。结束测试后关闭房间并取消勾选。
 
 必须先完成 Worker Secrets 和 WTN TURN 开通。在两个独立 PowerShell 窗口启动：
 
@@ -124,7 +124,7 @@ npm run dev
 
 成功标准必须同时满足：两端临时凭证为 ready、选中 pair 至少一端为 relay、DataChannel 为 open、BP 状态同步和角色图片传输成功。只收到凭证或只显示“已授权”不算 TURN 连通成功。
 
-Chrome 中先打开 `chrome://webrtc-internals`，再加入房间。在对应 RTCPeerConnection 找到 `transport.selectedCandidatePairId`，定位这个 candidate-pair 的 localCandidateId/remoteCandidateId；检查对应 candidate 的 `candidateType` 是否为 `relay`。确认 pair 为 succeeded/nominated，并检查 `data-channel` 的 `state=open`、messagesSent/messagesReceived 和 bytes 计数增长。普通模式下选中 host/srflx 而没有 relay 是正常的直连优先结果。不要公开包含 SDP、地址或凭证的原始调试转储。
+Chrome 中先打开 `chrome://webrtc-internals`，再加入房间。在对应 RTCPeerConnection 找到 `transport.selectedCandidatePairId`，定位这个 candidate-pair 的 localCandidateId/remoteCandidateId；强制模式检查双方导出中的 localType、remoteType 都是 `relay`、`relayVerified=true`。确认 pair 为 succeeded，并检查 `data-channel` 的 `state=open` 和 bytes 计数增长。普通模式下选中 host/srflx 而没有 relay 是正常的直连优先结果。不要公开包含 SDP、地址或凭证的原始调试转储。完整验收矩阵见 [WTN TURN 审计报告](WTN_TURN_AUDIT.md)。
 
 本地全链路开发可用 `wrangler dev` 与 `.dev.vars`（已加入 gitignore）。桌面开发模式另外设置 `XQB_TURN_AUTH_URL=http://127.0.0.1:8787`，两端信令设置 `ws://127.0.0.1:8787`；只有本机开发例外允许 HTTP，生产固定 HTTPS。旧 `npm start` 的 Node 信令保留 P2P，不提供持久化授权服务，请用 Wrangler 测试新授权功能。
 
