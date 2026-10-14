@@ -11,8 +11,6 @@ export function createRemoteBpConnection(): RemoteBpConnection {
       return new WebRtcRemoteBpConnection({
         signalingUrl: runtimeConfig.signalingUrl,
         iceServers: runtimeConfig.iceServers,
-        testOnlyForceRelay:
-          import.meta.env.VITE_REMOTE_BP_TEST_FORCE_RELAY === "1",
       });
   }
 }

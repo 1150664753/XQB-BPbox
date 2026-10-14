@@ -1,6 +1,8 @@
 # Remote BP 连接层修复
 
-本文记录早期连接层改造；2026-10-11 的后续排查、实际路径统计、TURN 时序、资源通道和缓存修复见 [网络诊断与测试说明](REMOTE_BP_NETWORK_DIAGNOSTICS.md)。当前 TURN 配置以 [TURN_SETUP.md](TURN_SETUP.md) 为准。
+> 历史审计记录。网络监测和强制 TURN 设置已于 2026-10-14 移除；当前连接行为及验收以 [P2P 优先与 5 秒 TURN 兜底](REMOTE_BP_CONNECTION_POLICY.md) 为准。
+
+本文记录早期连接层改造；2026-10-11 的后续排查、实际路径统计、TURN 时序、资源通道和缓存修复见 [网络诊断与测试说明](REMOTE_BP_CONNECTION_POLICY.md)。当前 TURN 配置以 [TURN_SETUP.md](TURN_SETUP.md) 为准。
 
 本次只调整 WebRTC / WebSocket 信令层。BP Action、先后手权限、状态同步、Manifest、资源分片和背压处理继续使用原有业务实现。
 

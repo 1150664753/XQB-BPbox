@@ -93,8 +93,7 @@ async function main() {
   const channel = { readyState: 'open', bufferedAmount: 0, send: (data) => wires.push(data) }
   const rtc = {
     channel,
-    recordControlMessage: (...args) => metrics.push(args),
-    recordActionTiming() {}
+    recordControlMessage: (...args) => metrics.push(args)
   }
   const transport = new WebRtcRemoteHostTransport({ signalingUrl: 'ws://unused', iceServers: [] })
   const peer = { peerId: 'p', side: 'first', rtc, controlUntil: 0 }
@@ -126,7 +125,6 @@ async function main() {
   client.snapshot.state = 'connected'
   client.rtc = {
     channel: { ...channel, send: (raw) => requests.push(JSON.parse(raw)) },
-    recordControlMessage() {},
     recordError() {}
   }
   client.on('bpStateReceived', (value) => received.push(value))

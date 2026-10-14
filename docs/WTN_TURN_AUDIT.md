@@ -1,5 +1,7 @@
 **XQB-BPbox / Web 选手端 / 信令 Worker：WTN TURN 审计报告**
 
+> 历史审计记录。网络监测和强制 TURN 设置已于 2026-10-14 移除；当前连接行为及验收以 [P2P 优先与 5 秒 TURN 兜底](REMOTE_BP_CONNECTION_POLICY.md) 为准。
+
 审计日期：2026-10-13（Asia/Shanghai）。已完成本地代码修复、构建和回归；没有部署 Worker、网页或安装包，没有修改任何 AppID，也没有调用真实 WTN 领取凭证。真实 WTN 中继、跨网性能和控制台用量均为 **待实测**。
 
 | 必须回答的问题 | 结论及证据边界 |

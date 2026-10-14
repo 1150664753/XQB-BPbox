@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import RemoteBpNetworkDiagnostics from './RemoteBpNetworkDiagnostics'
 
 import {
   DEFAULT_REMOTE_SIDE_MAPPING,
@@ -106,6 +105,15 @@ export default function RemoteBpPanel({ host }: { host: RemoteBpHost }): React.J
         <span className={`remote-bp-player-state is-${player.connectionState}`}>
           <i aria-hidden="true" />
           {playerStateLabel[player.connectionState]}
+          {player.connectionState === 'connected'
+            ? ' · ' +
+              ({
+                p2p: 'P2P',
+                'turn-udp': 'TURN UDP',
+                'turn-tcp': 'TURN TCP',
+                'turn-relay': 'TURN（协议未知）'
+              }[host.getConnectionPath(side)] ?? '路径确认中')
+            : ''}
         </span>
         <button
           type="button"
@@ -166,15 +174,9 @@ export default function RemoteBpPanel({ host }: { host: RemoteBpHost }): React.J
         <small className="remote-bp-warning" role="status">
           TURN 请求未成功：{room.turnWarning}
           <br />
-          {room.firstPlayer.connectionState === 'connected' ||
-          room.secondPlayer.connectionState === 'connected'
-            ? '已有选手数据通道连接成功，实际直连或中继路径请查看网络诊断。'
-            : host.getNetworkOptions().forceRelay
-              ? '已启用强制 TURN 测试，需要取得有效中继凭证才能连接。'
-              : '普通模式仍允许直连，请以选手连接状态和网络诊断为准。'}
+          首次连接仍会尝试 P2P；已建立的 TURN 连接不会自动改为直连。
         </small>
       ) : null}
-      {room.transport === 'webrtc' ? <RemoteBpNetworkDiagnostics host={host} room={room} /> : null}
       <div className="bp-card-actions">
         <button
           type="button"

@@ -74,11 +74,11 @@ async function main() {
   const duplicate = await connect(url);
 
   host.send(
-    JSON.stringify({ type: "CREATE_ROOM", requestId: "create", payload: { forceRelay: true } }),
+    JSON.stringify({ type: "CREATE_ROOM", requestId: "create", payload: { connectionMode: "turn" } }),
   );
   const created = await nextMessage(host);
   assert.equal(created.type, "ROOM_CREATED");
-  assert.equal(created.payload.forceRelay, true);
+  assert.equal(created.payload.connectionMode, undefined);
   assert.match(created.payload.roomCode, /^[A-Z2-9]{6}$/);
   assert.match(created.payload.resumeToken, /^[0-9a-f-]{36}$/i);
 
@@ -101,7 +101,7 @@ async function main() {
   const joined = await nextMessage(first);
   const peerJoined = await nextMessage(host);
   assert.equal(joined.payload.role, "FIRST");
-  assert.equal(joined.payload.forceRelay, true);
+  assert.equal(joined.payload.connectionMode, undefined);
   assert.equal(peerJoined.payload.role, "FIRST");
 
   // Readiness and recovery stay in signaling; BP operation messages are untouched.
@@ -114,14 +114,14 @@ async function main() {
           targetRole: "HOST",
           connectionId: "connection-test",
           negotiationId: type === "PEER_READY" ? 0 : 1,
-          forceRelay: true,
+          connectionMode: "turn",
           fromSessionId: "forged",
         },
       }),
     );
     const ready = await readyMessage;
     assert.equal(ready.type, type);
-    assert.equal(ready.payload.forceRelay, true);
+    assert.equal(ready.payload.connectionMode, "turn");
     assert.equal(ready.payload.connectionId, "connection-test");
     assert.equal(ready.payload.fromSessionId, joined.payload.sessionId);
     assert.equal(ready.payload.roomId, created.payload.roomCode);
@@ -253,7 +253,7 @@ async function main() {
   );
   const [roomResumed, resumedPeer] = await resumedMessages;
   assert.equal(roomResumed.type, "ROOM_RESUMED");
-  assert.equal(roomResumed.payload.forceRelay, true);
+  assert.equal(roomResumed.payload.connectionMode, undefined);
   assert.equal(resumedPeer.payload.role, "SECOND");
   assert.equal((await hostReconnected).type, "HOST_RECONNECTED");
 

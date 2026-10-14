@@ -22,14 +22,6 @@ class Connection {
   listeners = new Map()
   actions = []
   requests = 0
-  timings = []
-  stages = []
-  recordActionTiming(id, kind, fields) {
-    this.timings.push({ id, kind, ...fields })
-  }
-  recordActionStage(id, stage) {
-    this.stages.push({ id, stage })
-  }
   getSnapshot() {
     return { state: 'connected', transport: 'turn-relay' }
   }
@@ -105,12 +97,7 @@ async function main() {
       const first = connection.actions[0]
       ack(first, 2)
       assert.equal(connection.actions.length, 1, 'ACK alone must not send with the old revision')
-      assert.equal(connection.stages.length, 0, 'ACK is not an applied authoritative state')
       update({ kind: 'CHARACTER', id: '1' }, 2)
-      assert.deepEqual(connection.stages[0], { id: first.actionId, stage: 'stateApplyMs' })
-      assert.equal(store.getSnapshot().appliedActionId, first.actionId)
-      assert.equal(connection.timings[0].kind, 'SELECT')
-      assert.ok(connection.timings[0].queueMs >= 0)
       assert.equal(connection.actions.length, 2)
       const last = connection.actions[1]
       assert.equal(last.targets[0].id, '3', 'intermediate clicks are coalesced')

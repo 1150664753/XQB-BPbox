@@ -93,8 +93,7 @@ export interface RemoteHostTransportStatus {
 
 export interface RemoteHostTransport {
   readonly kind: 'mock' | 'webrtc'
-  getNetworkOptions?: () => { forceRelay: boolean; assetRateKiBps: number }
-  configureNetwork?: (options: { forceRelay: boolean; assetRateKiBps: number }) => void
+  getConnectionPath?: (side: 'first' | 'second') => string
   start(room: RemoteBpRoomState): Promise<RemoteHostTransportStartResult | void>
   stop(): Promise<void>
   kick(side: RemotePlayerSide): Promise<void>

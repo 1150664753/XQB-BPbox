@@ -1,14 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import type { TurnAuthStatus } from '../../../../shared/turnAuth'
 import '../../styles/remote-bp.css'
-import { getRtcDiagnostics } from '../../../../../../shared/remoteBpRtc'
 
 export default function TurnAuthorizationDialog(): React.JSX.Element | null {
   const dialog = useRef<HTMLDialogElement>(null)
   const [open, setOpen] = useState(false)
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
-  const [connections, setConnections] = useState(getRtcDiagnostics)
   const [status, setStatus] = useState<TurnAuthStatus>({
     authorized: false,
     expiresAt: null,
@@ -31,16 +29,21 @@ export default function TurnAuthorizationDialog(): React.JSX.Element | null {
     if (!open) return
     dialog.current?.showModal()
     void run(() => window.bpAPI.turnAuth.status())
-    const timer = window.setInterval(() => {
-      setConnections(getRtcDiagnostics())
-      setStatus((current) =>
-        current.authorized && (current.expiresAt ?? 0) <= Date.now()
-          ? { ...current, authorized: false, message: '授权已过期，请重新输入密码' }
-          : current
-      )
-    }, 1_000)
-    return () => window.clearInterval(timer)
   }, [open])
+  useEffect(() => {
+    if (!open || !status.authorized || !status.expiresAt) return
+    const timer = window.setTimeout(
+      () => {
+        setStatus((current) =>
+          current.authorized && (current.expiresAt ?? 0) <= Date.now()
+            ? { ...current, authorized: false, message: '授权已过期，请重新输入密码' }
+            : current
+        )
+      },
+      Math.max(0, status.expiresAt - Date.now())
+    )
+    return () => window.clearTimeout(timer)
+  }, [open, status.authorized, status.expiresAt])
   if (!open) return null
   const close = (): void => {
     if (!busy) {
@@ -96,8 +99,6 @@ export default function TurnAuthorizationDialog(): React.JSX.Element | null {
           onChange={(event) => setPassword(event.target.value)}
           placeholder="输入 TURN 授权密码"
         />
-        <p className="turn-auth-hint">
-        </p>
         {status.message && (
           <p role="status" className="turn-auth-message">
             {status.message}
@@ -120,25 +121,6 @@ export default function TurnAuthorizationDialog(): React.JSX.Element | null {
             关闭
           </button>
         </footer>
-        {connections.length > 0 && (
-          <details>
-            <summary>连接诊断</summary>
-            {connections.map((connection, index) => (
-              <p key={connection.connectionId} className="turn-auth-hint">
-                连接 {index + 1}：ICE {connection.iceState} ·{' '}
-                {connection.pair ?? '尚未选中 candidate pair'} · relay{' '}
-                {connection.relay ? '是' : '否'}
-                <br />
-                凭证：{connection.turn}{' '}
-                {connection.expiresAt
-                  ? `· 到期 ${new Date(connection.expiresAt).toLocaleTimeString()}`
-                  : ''}
-                <br />
-                {connection.reason ?? '无错误'}
-              </p>
-            ))}
-          </details>
-        )}
       </form>
     </dialog>
   )

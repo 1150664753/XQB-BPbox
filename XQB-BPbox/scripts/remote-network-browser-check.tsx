@@ -1,12 +1,12 @@
 import React from 'react'
 import { createRoot } from 'react-dom/client'
-import { RemoteBpRtcSession, exportRtcDiagnostics } from '../../shared/remoteBpRtc'
+import { RemoteBpRtcSession } from '../../shared/remoteBpRtc'
 import { WebRtcRemoteHostTransport } from '../src/renderer/src/services/remoteBp/WebRtcRemoteHostTransport'
 import { WebRtcRemoteBpConnection } from '../../XBQ-BPweb/src/services/WebRtcRemoteBpConnection'
 import { IndexedDbAssetCache } from '../../XBQ-BPweb/src/services/assets/IndexedDbAssetCache'
 import { MemoryAssetCache } from '../../XBQ-BPweb/src/services/assets/MemoryAssetCache'
 import { RemoteAssetManager } from '../../XBQ-BPweb/src/services/assets/RemoteAssetManager'
-import RemoteBpNetworkDiagnostics from '../src/renderer/src/components/remoteBp/RemoteBpNetworkDiagnostics'
+import { ConnectionBadge } from '../../XBQ-BPweb/src/components/ConnectionBadge'
 import { SelectionPanel } from '../../XBQ-BPweb/src/components/SelectionPanel'
 
 function check(value: unknown, message: string): asserts value {
@@ -56,6 +56,7 @@ async function main() {
   let host: RemoteBpRtcSession, player: RemoteBpRtcSession
   const client = new WebRtcRemoteBpConnection({ signalingUrl: 'ws://unused', iceServers: [] })
   const arrivals: string[] = []
+  const receipts = new Map<string, string[]>()
   let received = 0,
     actionAt = 0
   client.on('assetReceived', (asset) => {
@@ -122,8 +123,7 @@ async function main() {
   })
   const transport = new WebRtcRemoteHostTransport({
     signalingUrl: 'ws://unused',
-    iceServers: [],
-    assetRateKiBps: 64
+    iceServers: []
   })
   const peer = {
     peerId: 'player',
@@ -144,6 +144,11 @@ async function main() {
       host.assetChannel?.readyState === 'open',
     'real RTC/channel handshake failed'
   )
+  host.assetChannel!.addEventListener('message', (event) => {
+    const receipt = JSON.parse(event.data)
+    if (receipt.type === 'ASSET_RECEIPT_V1')
+      receipts.set(receipt.id, [...(receipts.get(receipt.id) ?? []), receipt.status])
+  })
   ;(client as any).snapshot.state = 'connected'
   await client.requestState()
   await until(
@@ -204,10 +209,6 @@ async function main() {
   })
   await until(() => actionAt > 0, 'control result blocked behind image')
   check(received === 0, 'test did not exercise control during bulk transfer')
-  check(
-    player.getDiagnostic().actionResponseMs !== null,
-    'end-to-end action response was not recorded'
-  )
   // Simulate the client adapter's ready callback for the same PC during an ICE restart.
   ;(client as any).snapshot.state = 'reconnecting'
   ;(client as any).onDataChannelReady()
@@ -217,48 +218,23 @@ async function main() {
     () => received === 1 && host.phase === 'connected',
     'same-PC recovery discarded an active asset'
   )
-  await sleep(1200)
-  const diagnostic = host.getDiagnostic()
-  check(
-    player
-      .getDiagnostic()
-      .transfers.some(
-        (t) =>
-          t.id === 'one' && t.status === 'verified' && t.bytes === blob.size && t.durationMs! > 0
-      ),
-    'receiver completion was not SHA-256 verified and timed'
+  await until(
+    () => receipts.get('one')?.includes('verified') === true,
+    'sender missing receiver hash verification receipt'
   )
-  check(
-    diagnostic.transfers.some(
-      (t) =>
-        t.id === 'one' &&
-        t.status === 'verified' &&
-        t.submittedAt !== null &&
-        t.receivedAt !== null &&
-        t.receiptSource === 'peer'
-    ),
-    'sender did not receive the verified receipt separately from submission'
-  )
-  check(diagnostic.pair && !diagnostic.relay, 'actual selected ICE pair not diagnosed')
-  check(diagnostic.bytesSent! > 0 && diagnostic.assetBytesSent! > 0, 'actual byte counters missing')
-  check(
-    diagnostic.dtlsState === 'connected' && diagnostic.sctpState === 'connected',
-    'transport stages unavailable'
+  check(receipts.get('one')?.includes('received'), 'missing received receipt before verification')
+  await until(
+    () => host.path === 'p2p' && player.path === 'p2p',
+    'selected P2P path not identified'
   )
   checks.push(
-    `real Chromium WebRTC, image integrity, action round trip during bulk (${player.getDiagnostic().actionResponseMs} ms), ICE restart continuation, getStats counters`
+    'real Chromium WebRTC, SHA-256 integrity, control messages during bulk, ICE restart continuation and received/verified receipts'
   )
-  const binaryTransfer = diagnostic.transfers.find((item) => item.id === 'one')!
-  check(
-    binaryTransfer.encoding === 'binary-v1' && binaryTransfer.wireBytes < blob.size * 1.05,
-    'binary transport still has base64 overhead'
-  )
-  checks.push(`binary 300 KiB wire size: ${binaryTransfer.wireBytes} bytes`)
   await Promise.all([transfer('parallel-a'), transfer('parallel-b')])
   await until(
     () =>
       received === 3 &&
-      host.getDiagnostic().transfers.filter((t) => t.status === 'verified').length === 3,
+      [...receipts.values()].filter((statuses) => statuses.includes('verified')).length === 3,
     'concurrent transfers or receipt verification failed'
   )
   checks.push(
@@ -277,7 +253,6 @@ async function main() {
   // Exercise cache lifecycle with production manager and a controlled connection.
   const listeners = new Map<string, Set<(value: any) => void>>()
   const requested: string[][] = []
-  const previews: any[] = []
   const connection = {
     getSnapshot: () => ({ state: 'connected' }),
     on: (name: string, fn: (v: any) => void) => {
@@ -288,8 +263,7 @@ async function main() {
     },
     requestAssets: async (ids: string[]) => {
       requested.push(ids)
-    },
-    recordPreview: (value: any) => previews.push({ ...value })
+    }
   } as any
   const emit = (name: string, value: any) => listeners.get(name)?.forEach((fn) => fn(value))
   const memory = new MemoryAssetCache()
@@ -370,7 +344,6 @@ async function main() {
         pending={false}
         syncingSelection={false}
         onConfirm={() => {}}
-        previewStartedAt={performance.now()}
       />
     )
   show(imageA.assetId, 'Preview A')
@@ -380,8 +353,8 @@ async function main() {
   await until(() => view.textContent!.includes('Preview B'), 'latest preview blocked on image A')
   emit('assetReceived', { descriptor: imageB, data: png })
   await until(
-    () => previews.some((item) => item.assetId === imageB.assetId && item.outcome === 'loaded'),
-    'preview image load metric missing'
+    () => Boolean(view.querySelector('img')?.complete && view.querySelector('img')?.naturalWidth),
+    'preview image did not load'
   )
   const latestUrl = view.querySelector('img')!.src
   emit('assetReceived', { descriptor: imageA, data: png })
@@ -399,48 +372,21 @@ async function main() {
     'cached selection did not render'
   )
   check(requested.length === requestCount, 'repeated preview retransmitted cached image')
-  check(
-    previews.some((item) => item.assetId === imageA.assetId && item.outcome === 'superseded'),
-    'superseded image wait not diagnosed'
-  )
   previewRoot.unmount()
   previewManager.destroy()
   view.remove()
   checks.push(
-    'preview UI commits before images; latest selection survives out-of-order image arrival; cached revisit sends no request; image/UI timings exported'
+    'preview UI commits before images; latest selection survives out-of-order image arrival; cached revisit sends no request'
   )
 
-  const room = {
-    roomId: 'ABCDEF',
-    lifecycle: 'idle',
-    firstPlayer: { peerId: 'player' },
-    secondPlayer: { peerId: null }
-  } as any
-  const mockHost = {
-    getNetworkOptions: () => ({ forceRelay: false, assetRateKiBps: 512 }),
-    configureNetwork: () => {}
-  } as any
   createRoot(document.getElementById('root')!).render(
-    <RemoteBpNetworkDiagnostics host={mockHost} room={room} />
+    <ConnectionBadge connection={{ state: 'connected', transport: player.path, reason: null }} />
   )
-  await sleep(50)
-  document.querySelector('details')!.open = true
-  await sleep(1200)
-  check(
-    [...document.querySelectorAll('dt')].some((node) => node.textContent === '候选路径'),
-    'diagnostic panel did not render'
+  await until(
+    () => document.getElementById('root')!.textContent!.includes('P2P'),
+    'basic path label missing'
   )
-  check(
-    document.documentElement.scrollWidth <= innerWidth,
-    'diagnostic panel overflowed at narrow width'
-  )
-  const exported = exportRtcDiagnostics('ABCDEF')
-  check(!exported.includes('candidate:') && !exported.includes('a=ice-pwd'), 'raw ICE data leaked')
-  ;(window as any).__networkTest = {
-    checks,
-    diagnostics: JSON.parse(exported),
-    controlLatencyMs: Math.round(actionAt - sentAt)
-  }
+  ;(window as any).__networkTest = { checks, controlLatencyMs: Math.round(actionAt - sentAt) }
   // Keep the real connection alive for the main-process screenshot; the test window closes it.
 }
 void main().catch((error) => {

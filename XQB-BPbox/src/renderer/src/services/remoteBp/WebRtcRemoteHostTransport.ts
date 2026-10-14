@@ -3,9 +3,9 @@ import {
   waitForSignalingSocket,
   bufferRtcSignal,
   RTC_TIMING,
+  type RtcConnectionMode,
   type BufferedRtcSignal
 } from '../../../../../../shared/remoteBpRtc'
-import { AssetPacer } from '../../../../../../shared/remoteBpFlowControl'
 import { StateDeltaSender, encodeBinaryAssetChunk } from '../../../../../../shared/remoteBpWire'
 import type {
   RemoteHostIncomingMessage,
@@ -36,10 +36,8 @@ interface HostPeerSession extends RemoteHostPeer {
   assetTransfers: Map<string, RTCDataChannel>
   nextAssetAt: number
   controlUntil: number
-  pacer?: AssetPacer
   capabilities?: Set<string>
   stateDelta?: StateDeltaSender
-  actions?: Map<string, { kind: string; at: number }>
 }
 
 export interface WebRtcRemoteHostTransportOptions {
@@ -50,8 +48,6 @@ export interface WebRtcRemoteHostTransportOptions {
     binding: (url: string) => Promise<string | null>
     onChanged: (callback: () => void) => () => void
   }
-  testOnlyForceRelay?: boolean
-  assetRateKiBps?: number
 }
 
 const MAX_SIGNALING_MESSAGE_BYTES = 64 * 1024
@@ -154,24 +150,16 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
   private resumeInFlight = false
   private resumeResolve: (() => void) | null = null
   private turnAuthorizedUntil: number | null = null
-  private turnProvider: unknown
   private unsubscribeTurn: (() => void) | null = null
-  private readonly turnRequests = new Map<string, { peer: HostPeerSession; finish: () => void }>()
+  private readonly turnRequests = new Map<
+    string,
+    { peer: HostPeerSession; finish: (payload?: Record<string, unknown>) => void }
+  >()
 
   constructor(private readonly options: WebRtcRemoteHostTransportOptions) {}
 
-  getNetworkOptions(): { forceRelay: boolean; assetRateKiBps: number } {
-    return {
-      forceRelay: Boolean(this.options.testOnlyForceRelay),
-      assetRateKiBps: this.options.assetRateKiBps ?? 512
-    }
-  }
-  configureNetwork(options: { forceRelay: boolean; assetRateKiBps: number }): void {
-    if (this.socket) return
-    this.options.testOnlyForceRelay = options.forceRelay
-    this.options.assetRateKiBps = Number.isFinite(options.assetRateKiBps)
-      ? Math.max(16, Math.min(2048, options.assetRateKiBps))
-      : 512
+  getConnectionPath(side: 'first' | 'second'): string {
+    return this.peers.get(side)?.rtc.path ?? 'unknown'
   }
 
   async start(
@@ -206,11 +194,7 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
       }, this.options.connectTimeoutMs ?? 10_000)
     })
     console.info('[Remote BP signaling] CREATE_ROOM send')
-    this.sendSignal(
-      'CREATE_ROOM',
-      { displayName: 'XQB-BPBox', forceRelay: Boolean(this.options.testOnlyForceRelay) },
-      requestId
-    )
+    this.sendSignal('CREATE_ROOM', { displayName: 'XQB-BPBox' }, requestId)
     return created
   }
 
@@ -300,14 +284,6 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
     // Only bulk data waits for drain. Controls retain their own call order and can
     // pass a paused image transfer; already-buffered image data is kept small.
     if (!['ASSET_START', 'ASSET_CHUNK', 'ASSET_COMPLETE'].includes(message.type)) {
-      if (message.type === 'ACTION_RESULT') {
-        const action = peer.actions?.get(message.payload.actionId)
-        if (action)
-          peer.rtc.recordActionTiming(message.payload.actionId, action.kind, {
-            hostProcessingMs: message.payload.hostProcessingMs ?? Date.now() - action.at
-          })
-        peer.actions?.delete(message.payload.actionId)
-      }
       if (message.type === 'ACTION_RESULT' || message.type === 'STATE_UPDATE')
         peer.controlUntil = Date.now() + 75
       try {
@@ -316,28 +292,10 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
         peer.stateDelta = undefined // Next successful state send must establish a new full baseline.
         throw error
       }
-      peer.rtc.recordControlMessage(
-        outgoing.type,
-        new TextEncoder().encode(raw).byteLength,
-        channel.bufferedAmount
-      )
       return
     }
     const previous = this.sendQueues.get(peerId) ?? Promise.resolve()
-    const queuedAt = Date.now()
-    const queued = previous
-      .catch(() => undefined)
-      .then(() => {
-        const queueMs = Date.now() - queuedAt
-        return this.sendNow(peer, message, raw).finally(() => {
-          if (
-            message.type === 'ASSET_START' ||
-            message.type === 'ASSET_CHUNK' ||
-            message.type === 'ASSET_COMPLETE'
-          )
-            peer.rtc.recordTransferWait(message.payload.transferId, 'queue', queueMs)
-        })
-      })
+    const queued = previous.catch(() => undefined).then(() => this.sendNow(peer, message, raw))
     this.sendQueues.set(peerId, queued)
     try {
       await queued
@@ -405,7 +363,6 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
   private async handleSignalingMessage(message: SignalingEnvelope): Promise<void> {
     switch (message.type) {
       case 'ROOM_CREATED': {
-        this.turnProvider = message.payload.turnDiagnostic
         const roomCode = message.payload.roomCode
         const createdAt = message.payload.createdAt
         const expiresAt = message.payload.expiresAt
@@ -441,9 +398,6 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
         return
       }
       case 'ROOM_RESUMED': {
-        if (message.payload.forceRelay === true) this.options.testOnlyForceRelay = true
-        this.turnProvider = message.payload.turnDiagnostic
-        for (const peer of this.peers.values()) peer.rtc.setTurnProvider(this.turnProvider)
         const roomCode = message.payload.roomCode
         if (!isString(roomCode, 6, 6) || roomCode !== this.roomId) {
           throw new Error('恢复的房间信息无效')
@@ -528,7 +482,9 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
               identity.peerId,
               message.payload.connectionId,
               identity.displayName,
-              message.payload.forceRelay === true
+              message.payload.resumeMode === 'p2p' || message.payload.resumeMode === 'turn'
+                ? message.payload.resumeMode
+                : undefined
             )
           }
           await this.flushEarlySignals(side)
@@ -549,9 +505,7 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
         this.turnAuthorizedUntil = until > Date.now() ? until : null
         for (const peer of this.peers.values()) {
           if (!this.turnAuthorizedUntil) peer.rtc.clearTurn('房主 TURN 授权已撤销或到期')
-          else if (peer.rtc.getDiagnostic().forceRelay && peer.rtc.phase !== 'signaling') {
-            void this.prepareTurn(peer).then(() => peer.rtc.requestRestart('强制 relay 测试'))
-          }
+          else peer.rtc.authorizationChanged()
         }
         this.emitStatus({
           connectionState: 'connected',
@@ -563,32 +517,22 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
       }
       case 'TURN_CREDENTIALS': {
         const request = message.requestId ? this.turnRequests.get(message.requestId) : null
-        const matchedPeer = [...this.peers.values()].find(
-          (peer) =>
-            peer.peerId === message.payload.peerId &&
-            peer.rtc.connectionId === message.payload.connectionId
-        )
-        try {
-          const peer = request?.peer ?? matchedPeer
-          if (
-            !peer ||
-            this.peers.get(peer.side) !== peer ||
-            message.payload.roomId !== this.roomId ||
-            message.payload.peerId !== peer.peerId ||
-            message.payload.connectionId !== peer.rtc.connectionId
-          )
-            return
-          const changed = peer.rtc.applyTurn(message.payload)
-          this.emitStatus({ connectionState: 'connected', turnWarning: null })
-          if (changed && !request) peer.rtc.requestRestart('选手已获取 TURN 凭证')
-        } catch {
-          ;(request?.peer ?? matchedPeer)?.rtc.turnFailed(
-            'TURN_PROVIDER_INVALID',
-            message.payload.turnDiagnostic
-          )
-        } finally {
-          request?.finish()
+        if (!request) return // Late response / replaced peer must never change ICE policy.
+        const peer = request.peer
+        if (
+          this.peers.get(peer.side) !== peer ||
+          this.stopping ||
+          message.payload.roomId !== this.roomId ||
+          message.payload.peerId !== peer.peerId ||
+          message.payload.connectionId !== peer.rtc.connectionId ||
+          !this.turnAuthorizedUntil ||
+          this.turnAuthorizedUntil <= Date.now()
+        ) {
+          request.finish()
+          return
         }
+        this.emitStatus({ connectionState: 'connected', turnWarning: null })
+        request.finish(message.payload)
         return
       }
       case 'ERROR': {
@@ -601,7 +545,7 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
         const error = new Error(`${text} (${code})`)
         const turnRequest = message.requestId ? this.turnRequests.get(message.requestId) : null
         if (turnRequest) {
-          turnRequest.peer.rtc.turnFailed(code, message.payload.turnDiagnostic)
+          turnRequest.peer.rtc.turnFailed(code)
           if (code === 'TURN_NOT_AUTHORIZED' || code === 'TURN_AUTH_EXPIRED')
             turnRequest.peer.rtc.clearTurn('房主 TURN 授权已撤销或到期')
           this.emitStatus({ connectionState: 'connected', turnWarning: text })
@@ -614,7 +558,7 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
               peer.rtc.connectionId === message.payload.connectionId &&
               peer.peerId === message.payload.peerId
           )
-          peer?.rtc.turnFailed(code, message.payload.turnDiagnostic)
+          peer?.rtc.turnFailed(code)
           this.emitStatus({ connectionState: 'connected', turnWarning: text })
           return
         }
@@ -666,7 +610,7 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
     peerId: string,
     connectionId: string,
     displayName?: string,
-    playerForceRelay = false
+    resumeMode?: RtcConnectionMode
   ): Promise<void> {
     this.removePeer(side, false, 'peer-connection-replaced')
     let rtc: RemoteBpRtcSession | null = null
@@ -675,12 +619,16 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
       peerId,
       roomId: this.roomId!,
       offerer: true,
-      testOnlyForceRelay: Boolean(this.options.testOnlyForceRelay || playerForceRelay),
-      turnProvider: this.turnProvider,
+      resumeMode,
+      canUseTurn: () => Boolean(this.turnAuthorizedUntil && this.turnAuthorizedUntil > Date.now()),
       iceServers: this.options.iceServers,
-      prepareRestart: async () => {
+      fetchTurn: async () => {
         const peer = this.peers.get(side)
-        if (peer?.rtc === rtc) await this.prepareTurn(peer)
+        return peer?.rtc === rtc ? this.prepareTurn(peer) : null
+      },
+      onPath: () => {
+        if (this.peers.get(side)?.rtc === rtc)
+          this.emitStatus({ connectionState: this.roomReady ? 'connected' : 'reconnecting' })
       },
       send: (type, payload) => {
         if (
@@ -726,35 +674,8 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
     }
     this.peers.set(side, peer)
     this.connectingListeners.forEach((listener) => listener(peer))
-    // Do not await a TURN response on the WebSocket inbox chain that must receive it.
-    void (async () => {
-      if (rtc?.getDiagnostic().forceRelay) {
-        await this.waitForTurnAuthorization()
-        await this.prepareTurn(peer)
-      }
-      if (this.peers.get(side) === peer) await rtc?.start()
-    })()
-  }
-
-  private waitForTurnAuthorization(): Promise<void> {
-    if (this.turnAuthorizedUntil || !this.options.turnAuth) return Promise.resolve()
-    return new Promise((resolve) => {
-      const finish = (): void => {
-        window.clearTimeout(timer)
-        unsubscribe()
-        resolve()
-      }
-      const unsubscribe = this.onStatusChange((status) => {
-        if (
-          status.turnAuthorizedUntil !== undefined ||
-          status.error ||
-          status.turnWarning ||
-          status.connectionState === 'offline'
-        )
-          finish()
-      })
-      const timer = window.setTimeout(finish, 8_000)
-    })
+    // Credential responses must not wait behind this signaling inbox.
+    void rtc.start()
   }
 
   private async bindTurnAuthorization(): Promise<void> {
@@ -773,23 +694,22 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
     }
   }
 
-  private async prepareTurn(peer: HostPeerSession): Promise<void> {
-    if (this.peers.get(peer.side) !== peer || this.stopping || !peer.rtc.needsTurnRefresh) return
+  private async prepareTurn(peer: HostPeerSession): Promise<Record<string, unknown> | null> {
+    if (this.peers.get(peer.side) !== peer || this.stopping) return null
     if (!this.turnAuthorizedUntil || this.turnAuthorizedUntil <= Date.now()) {
       peer.rtc.turnFailed('TURN_NOT_AUTHORIZED')
-      return
+      return null
     }
     if (!this.roomReady || this.socket?.readyState !== WebSocket.OPEN) {
       peer.rtc.turnFailed('TURN_SIGNALING_UNAVAILABLE')
-      return
+      return null
     }
     const requestId = globalThis.crypto.randomUUID()
-    peer.rtc.turnRequested()
-    await new Promise<void>((resolve) => {
-      const finish = (): void => {
+    return new Promise<Record<string, unknown> | null>((resolve) => {
+      const finish = (payload?: Record<string, unknown>): void => {
         window.clearTimeout(timer)
         this.turnRequests.delete(requestId)
-        resolve()
+        resolve(payload ?? null)
       }
       const timer = window.setTimeout(() => {
         peer.rtc.turnFailed('TURN_REQUEST_TIMEOUT')
@@ -827,19 +747,6 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
       switch (message.type) {
         case 'ACTION_REQUEST':
           peer.controlUntil = Date.now() + 150
-          peer.actions ??= new Map()
-          peer.actions.set(message.payload.action.actionId, {
-            kind: message.payload.action.kind,
-            at: Date.now()
-          })
-          if (peer.actions.size > 100) peer.actions.delete(peer.actions.keys().next().value!)
-          peer.rtc.recordActionTiming(
-            message.payload.action.actionId,
-            message.payload.action.kind,
-            {
-              requestBytes: new TextEncoder().encode(data).byteLength
-            }
-          )
           incoming = {
             type: 'ACTION_REQUEST',
             peerId: peer.peerId,
@@ -936,41 +843,19 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
         peer.rtc.assetChannel?.readyState === 'open' ? peer.rtc.assetChannel : peer.rtc.channel
       if (!channel) throw new Error('资源通道尚未打开')
       peer.assetTransfers.set(id, channel)
-      const assets = peer.rtc.getTransferMetrics()
-      peer.rtc.beginTransfer(id, 'send', message.payload.asset.size)
-      peer.rtc.updateTransfer(
-        {
-          requested: assets.requested + 1,
-          totalBytes: assets.totalBytes + message.payload.asset.size
-        },
-        0
-      )
     }
     const channel = peer.assetTransfers.get(id)
     if (!channel) throw new Error('资源传输会话已失效')
     try {
-      const pacer = (peer.pacer ??= new AssetPacer())
-      pacer.sample(
-        Date.now(),
-        this.getNetworkOptions().assetRateKiBps * 1024,
-        peer.rtc.roundTripTimeMs,
-        channel.bufferedAmount,
-        peer.rtc.selectedPairId
-      )
       // Legacy peers share the control stream; allow only one small image frame in flight.
-      await this.waitForWritable(
-        peer,
-        channel,
-        channel === peer.rtc.channel ? 0 : pacer.highWater(peer.rtc.roundTripTimeMs),
-        id
-      )
+      await this.waitForWritable(peer, channel, channel === peer.rtc.channel ? 0 : 128 * 1024)
       if (this.peers.get(peer.side) !== peer || channel.readyState !== 'open')
         throw new Error(
           this.stopping || this.peers.get(peer.side) !== peer
             ? 'ASSET_CANCELLED'
             : 'ASSET_NETWORK_INTERRUPTED'
         )
-      const rate = pacer.rate
+      const rate = 512 * 1024 // Bounded pacing; browser SCTP handles congestion.
       const frame =
         message.type === 'ASSET_CHUNK' &&
         channel === peer.rtc.assetChannel &&
@@ -981,33 +866,12 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
       else channel.send(frame)
       const wireBytes =
         typeof frame === 'string' ? new TextEncoder().encode(frame).byteLength : frame.byteLength
-      peer.rtc.recordTransferEncoding(id, typeof frame === 'string' ? 'base64-json' : 'binary-v1')
       // Carry scheduling credit (at most one 16 KiB frame) across drain waits.
       // Do not add a fresh fixed delay to every tiny START/COMPLETE frame.
       peer.nextAssetAt =
         Math.max(Date.now() - ((16 * 1024) / rate) * 1000, peer.nextAssetAt) +
         (wireBytes / rate) * 1000
-      peer.rtc.recordTransferWireBytes(id, wireBytes)
-      const assets = peer.rtc.getTransferMetrics()
-      const chunkBytes =
-        message.type === 'ASSET_CHUNK'
-          ? Math.floor((message.payload.data.length * 3) / 4) -
-            (message.payload.data.endsWith('==') ? 2 : message.payload.data.endsWith('=') ? 1 : 0)
-          : 0
-      if (chunkBytes) peer.rtc.advanceTransfer(id, chunkBytes)
-      peer.rtc.updateTransfer(
-        {
-          ...(message.type === 'ASSET_CHUNK'
-            ? {
-                queuedBytes: assets.queuedBytes + chunkBytes
-              }
-            : {}),
-          ...(message.type === 'ASSET_COMPLETE' ? { submitted: assets.submitted + 1 } : {})
-        },
-        rate
-      )
       if (message.type === 'ASSET_COMPLETE') {
-        peer.rtc.finishTransfer(id, 'submitted')
         peer.assetTransfers.delete(id)
       }
     } catch (error) {
@@ -1020,7 +884,6 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
             : error instanceof Error && error.message === 'ASSET_SEND_TIMEOUT'
               ? 'ASSET_SEND_TIMEOUT'
               : 'ASSET_SEND_FAILED'
-      peer.rtc.finishTransfer(id, code === 'ASSET_CANCELLED' ? 'cancelled' : 'failed', code)
       if (code !== 'ASSET_CANCELLED')
         peer.rtc.recordError(
           code,
@@ -1033,8 +896,7 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
   private async waitForWritable(
     peer: HostPeerSession,
     channel: RTCDataChannel,
-    highWater: number,
-    transferId: string
+    highWater: number
   ): Promise<void> {
     let progressAt = Date.now(),
       previous = Infinity
@@ -1054,14 +916,8 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
         return
       // BP activity/pacing alone is not a network stall. Only an undrained image buffer times out.
       if (buffered === 0) progressAt = Date.now()
-      if (
-        buffered > highWater &&
-        Date.now() - progressAt >= (peer.pacer?.stallWindow(peer.rtc.roundTripTimeMs) ?? 1500)
-      )
-        peer.pacer?.congested(Date.now())
       if (buffered > 0 && Date.now() - progressAt > DATA_CHANNEL_DRAIN_TIMEOUT_MS)
         throw new Error('ASSET_SEND_TIMEOUT')
-      const waitStarted = Date.now()
       const waitReason =
         buffered > highWater
           ? 'buffer'
@@ -1083,7 +939,6 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
         // Polling remains a fallback for missed threshold events and short control yields.
         const timer = window.setTimeout(finish, delay)
       })
-      peer.rtc.recordTransferWait(transferId, waitReason, Date.now() - waitStarted)
     }
   }
 

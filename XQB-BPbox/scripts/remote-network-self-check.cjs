@@ -60,20 +60,16 @@ if (!process.versions.electron) {
       }
       assert.ok(result, 'browser check timed out')
       assert.ok(!result.error, result.error)
-      assert.match(await win.webContents.executeJavaScript('document.body.innerText'), /候选路径/)
+      assert.match(await win.webContents.executeJavaScript('document.body.innerText'), /P2P/)
       win.webContents.invalidate()
       await new Promise((resolve) => setTimeout(resolve, 300))
       fs.writeFileSync(
-        path.join(directory, 'diagnostics.json'),
-        JSON.stringify(result.diagnostics, null, 2)
-      )
-      fs.writeFileSync(
-        path.join(directory, 'diagnostics.png'),
+        path.join(directory, 'connection.png'),
         (await win.webContents.capturePage()).toPNG()
       )
       result.checks.forEach((check) => console.log(`PASS ${check}`))
       console.log(
-        `PASS diagnostics panel rendering and export; screenshot: ${path.join(directory, 'diagnostics.png')}`
+        `PASS basic connection badge; screenshot: ${path.join(directory, 'connection.png')}`
       )
       win.close()
       app.exit(0)

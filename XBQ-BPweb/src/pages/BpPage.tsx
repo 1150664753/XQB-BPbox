@@ -1,5 +1,4 @@
-import { useLayoutEffect, useState } from "react";
-import { exportRtcDiagnostics } from "../../../shared/remoteBpDiagnostics";
+import { useState } from "react";
 import { CharacterCard } from "../components/CharacterCard";
 import { ConnectionBadge } from "../components/ConnectionBadge";
 import { EnergyFlowBackground } from "../components/EnergyFlowBackground";
@@ -47,10 +46,6 @@ export function BpPage({
   const [path, setPath] = useState("全部命途");
   const [element, setElement] = useState("全部属性");
   const assetSnapshot = useAssetManagerSnapshot(assetManager);
-  useLayoutEffect(() => {
-    if (session.appliedActionId)
-      assetManager.recordActionUi(session.appliedActionId);
-  }, [assetManager, session.appliedActionId]);
   const state = session.bpState;
   const room = session.room;
   if (!state || !room) return null;
@@ -388,7 +383,6 @@ export function BpPage({
 
           <SelectionPanel
             target={selectedItem}
-            previewStartedAt={session.previewStartedAt}
             targetType={selectedTarget?.kind ?? targetType}
             assetManager={assetManager}
             actionLabel={operationLabel(state.currentOperation)}
@@ -428,24 +422,6 @@ export function BpPage({
             资源 {assetSnapshot.readyCount}/{assetSnapshot.totalCount}
           </span>
           <span>版本 {state.revision}</span>
-          <span>{session.connection.latencyMs ?? "—"} 毫秒</span>
-          <button
-            type="button"
-            onClick={() => {
-              const url = URL.createObjectURL(
-                new Blob([exportRtcDiagnostics()], {
-                  type: "application/json",
-                }),
-              );
-              const link = document.createElement("a");
-              link.href = url;
-              link.download = "remote-bp-player-network.json";
-              link.click();
-              window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-            }}
-          >
-            导出网络诊断
-          </button>
         </section>
       </div>
     </main>

@@ -149,17 +149,17 @@ async function connect(query='') {
     }
   };
 }
-async function room(forceRelay = false) {
-  const host=await connect(); host.send('CREATE_ROOM',{ turnEnabled:true, role:'HOST', forceRelay });
+async function room(connectionMode = 'p2p') {
+  const host=await connect(); host.send('CREATE_ROOM',{ turnEnabled:true, role:'HOST' });
   const created=await host.next('ROOM_CREATED');
   const player=await connect(`?roomId=${created.payload.roomCode}`);
   player.send('JOIN_ROOM',{roomCode:created.payload.roomCode,side:'FIRST'});
   const joined=await player.next('ROOM_JOINED'); await host.next('PEER_JOINED');
-  assert.equal(created.payload.forceRelay, forceRelay);
-  assert.equal(joined.payload.forceRelay, forceRelay);
+  assert.equal(created.payload.connectionMode, undefined);
+  assert.equal(joined.payload.connectionMode, undefined);
   const connectionId=randomUUID();
-  player.send('PEER_READY',{targetRole:'HOST',connectionId,negotiationId:0,forceRelay});
-  assert.equal((await host.next('PEER_READY')).payload.forceRelay, forceRelay);
+  player.send('PEER_READY',{targetRole:'HOST',connectionId,negotiationId:0,connectionMode});
+  assert.equal((await host.next('PEER_READY')).payload.connectionMode, connectionMode);
   return {host,player,created,joined,request:{targetRole:'FIRST',targetSessionId:joined.payload.sessionId,connectionId}};
 }
 try {
@@ -170,7 +170,7 @@ try {
   assert.ok(Math.abs(login.data.expiresAt-Date.now()-AUTH_SECONDS*1000)<2000);
   assert.equal((await http('status',null,authorization)).status,200);
   assert.equal((await http('status',null,authorization+'x')).status,401);
-  const plain=await room(true);
+  const plain=await room('turn');
   assert.equal(plain.created.payload.turnAuthorizedUntil,null);
   plain.host.send('TURN_REQUEST',plain.request); assert.equal((await plain.host.next('ERROR')).payload.code,'TURN_NOT_AUTHORIZED');
   assert.equal((await plain.player.next('ERROR')).payload.turnDiagnostic.appId, env.WTN_APP_ID);
@@ -185,6 +185,9 @@ try {
   plain.host.send('TURN_REQUEST',{...plain.request,targetSessionId:'forged'});
   assert.equal((await plain.host.next('ERROR')).payload.code,'STALE_SIGNAL');
   plain.player.send('TURN_REQUEST',{...plain.request,targetRole:'HOST'});
+  assert.equal((await plain.player.next('ERROR')).payload.code,'HOST_ONLY');
+  assert.equal(calls,0);
+  plain.host.send('TURN_REQUEST',plain.request);
   const pc=await plain.player.next('TURN_CREDENTIALS'), hc=await plain.host.next('TURN_CREDENTIALS');
   assert.deepEqual(pc.payload,hc.payload); assert.equal(calls,1);
   assert.equal(JSON.stringify(pc).includes(env.WTN_APP_KEY),false);
@@ -199,7 +202,7 @@ try {
   await plain.player.next('ERROR');
   assert.equal((await http('status',null,authorization)).status,401);
   assert.equal(calls,1);
-  console.log('PASS real Worker/DO room identity, host binding, player self-service, no-cost P2P, forged/expired/unassigned requests, cache and revoke');
+  console.log('PASS real Worker/DO room identity, host binding, host-only credential requests, no-cost P2P, forged/expired/unassigned requests, cache and revoke');
 
   const again=await http('authorize',{hostId,password:env.TURN_ACCESS_PASSWORD});
   const auth2=again.data.token;
@@ -213,8 +216,8 @@ try {
   mode='ok';
   for(let i=0;i<5;i++) assert.equal((await http('authorize',{hostId:randomUUID(),password:'wrong'},null,'198.51.100.2')).status,401);
   assert.equal((await http('authorize',{hostId:randomUUID(),password:env.TURN_ACCESS_PASSWORD},null,'198.51.100.2')).status,429);
-  for(let i=0;i<20;i++) { plain.player.send('TURN_REQUEST',{...plain.request,targetRole:'HOST'}); await plain.player.next('ERROR'); }
-  plain.player.send('TURN_REQUEST',{...plain.request,targetRole:'HOST'}); assert.equal((await plain.player.next('ERROR')).payload.code,'TURN_RATE_LIMITED');
+  for(let i=0;i<20;i++) { plain.host.send('TURN_REQUEST',plain.request); await plain.host.next('ERROR'); }
+  plain.host.send('TURN_REQUEST',plain.request); assert.equal((await plain.host.next('ERROR')).payload.code,'TURN_RATE_LIMITED');
   const retained=await http('authorize',{hostId:randomUUID(),password:env.TURN_ACCESS_PASSWORD},null,'203.0.113.3');
   for(const socket of sockets)socket.close();
   await mf.dispose(); mf=new Miniflare(convertV4MiniflareOptions(options));

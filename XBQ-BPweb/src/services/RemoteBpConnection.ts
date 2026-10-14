@@ -1,9 +1,5 @@
 import type { BpAction, PlayerSide } from "../types/bp";
 import type {
-  ActionTiming,
-  PreviewTiming,
-} from "../../../shared/remoteBpDiagnostics";
-import type {
   ConnectionSnapshot,
   RemoteBpConnectionEvents,
 } from "../types/connection";
@@ -30,13 +26,6 @@ export type Unsubscribe = () => void;
  * React pages only call this semantic BP API.
  */
 export interface RemoteBpConnection {
-  recordActionTiming?(
-    id: string,
-    kind: string,
-    fields: Partial<ActionTiming>,
-  ): void;
-  recordActionStage?(id: string, stage: "stateApplyMs" | "uiCommitMs"): void;
-  recordPreview?(value: PreviewTiming): void;
   connect(options: RemoteBpConnectOptions): Promise<RemoteBpConnectResult>;
   disconnect(): Promise<void>;
   sendAction(action: BpAction): Promise<void>;

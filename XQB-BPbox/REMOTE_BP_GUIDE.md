@@ -24,7 +24,7 @@ XQB-BPbox 的远程 BP 已接入真实信令与 WebRTC DataChannel，同时保�
 - `src/renderer/src/services/remoteBp/WebRtcRemoteHostTransport.ts`：BPbox 信令客户端、每名选手独立的 `RTCPeerConnection` 与 DataChannel。
 - `src/main/remoteBp/RemoteAssetProvider.ts`：角色头像小图/全身立绘及光锥小图的 Manifest、增量 SHA-256 缓存与 assetId 白名单；Host 按 11,520 字节分片发送，支持可回退的独立图片 DataChannel、联合背压与发送节流。选手端使用经 SHA-256 校验的持久缓存。
 
-远程连接区域可展开“网络诊断”，查看实际直连/TURN 路径、协议、RTT、速率、缓冲和最近错误，并导出 JSON 日志。创建房间前可启用“强制 TURN 测试”或调整图片发送上限，参见 [网络诊断与测试说明](../docs/REMOTE_BP_NETWORK_DIAGNOSTICS.md)。
+远程连接优先使用 P2P；控制通道 5 秒未打开且房主已授权时启用 TURN，成功后固定模式。界面只显示基本连接状态和实际 P2P／TURN UDP／TURN TCP 路径，不再提供网络监测、诊断导出或强制 TURN 设置。参见 [连接策略与验证](../docs/REMOTE_BP_CONNECTION_POLICY.md)。
 
 当前远程协议版本为 `1.2.1`。网页的预选只更新 BPbox 高亮和直播待选位灰化预览，只有 `CONFIRM` 才形成正式操作；保护/租借在双方分别确认后才推进。网页提交的队伍或选手名称仅用于界面展示，不改变先手/后手权限映射。
 

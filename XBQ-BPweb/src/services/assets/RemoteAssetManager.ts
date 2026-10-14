@@ -6,7 +6,6 @@ import type {
 } from "../../types/assets";
 import type { RemoteBpConnection } from "../RemoteBpConnection";
 import type { AssetCache } from "./AssetCache";
-import type { PreviewTiming } from "../../../../shared/remoteBpDiagnostics";
 
 export interface AssetManagerSnapshot {
   manifest: AssetManifest | null;
@@ -105,12 +104,6 @@ export class RemoteAssetManager {
 
   getState(assetId: string | null | undefined): AssetLoadState {
     return assetId ? (this.states.get(assetId) ?? "idle") : "missing";
-  }
-  recordActionUi(id: string): void {
-    this.connection.recordActionStage?.(id, "uiCommitMs");
-  }
-  recordPreview(value: PreviewTiming): void {
-    this.connection.recordPreview?.(value);
   }
 
   async request(assetIds: string[]): Promise<void> {

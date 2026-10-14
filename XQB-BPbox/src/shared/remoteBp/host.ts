@@ -158,18 +158,8 @@ export class RemoteBpHost {
     return structuredClone(this.state)
   }
 
-  getNetworkOptions(): { forceRelay: boolean; assetRateKiBps: number } {
-    return (
-      this.dependencies.transport.getNetworkOptions?.() ?? {
-        forceRelay: false,
-        assetRateKiBps: 512
-      }
-    )
-  }
-
-  configureNetwork(options: { forceRelay: boolean; assetRateKiBps: number }): void {
-    if (this.state.lifecycle !== 'idle' && this.state.lifecycle !== 'error') return
-    this.dependencies.transport.configureNetwork?.(options)
+  getConnectionPath(side: 'first' | 'second'): string {
+    return this.dependencies.transport.getConnectionPath?.(side) ?? 'unknown'
   }
 
   async startRoom(options: StartRemoteRoomOptions): Promise<RemoteBpRoomState> {
@@ -310,7 +300,6 @@ export class RemoteBpHost {
       }
     }
 
-    const processingStarted = performance.now()
     const result = await this.dependencies.dispatcher.dispatch(
       action,
       'remote',
@@ -318,7 +307,6 @@ export class RemoteBpHost {
       this.dependencies.getExecutor(),
       this.state.mapping
     )
-    result.hostProcessingMs = Math.max(0, performance.now() - processingStarted)
     if (peer) {
       await this.dependencies.transport.send(peer.peerId, {
         type: 'ACTION_RESULT',

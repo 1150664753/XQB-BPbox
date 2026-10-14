@@ -1,5 +1,7 @@
 # 远程 BP 预选、图片传输与断线诊断优化
 
+> 历史审计记录。网络监测和强制 TURN 设置已于 2026-10-14 移除；当前连接行为及验收以 [P2P 优先与 5 秒 TURN 兜底](docs/REMOTE_BP_CONNECTION_POLICY.md) 为准。
+
 日期：2026-10-14。范围：现有 WebRTC / DataChannel 传输与两端适配器；不改变 TURN AppID `6ac735fb7305ab038c2e3546`、14400 秒凭证、权限与 BP revision/actionId 校验。
 
 ## 实际日志与结论边界

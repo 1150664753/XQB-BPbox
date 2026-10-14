@@ -11,13 +11,17 @@ export type ConnectionState =
   | "kicked"
   | "room-closed";
 
-export type ConnectionTransport = "mock" | "p2p" | "turn-relay" | "unknown";
+export type ConnectionTransport =
+  | "mock"
+  | "p2p"
+  | "turn-relay"
+  | "turn-udp"
+  | "turn-tcp"
+  | "unknown";
 
 export interface ConnectionSnapshot {
   state: ConnectionState;
   transport: ConnectionTransport;
-  latencyMs: number | null;
-  lastPingAt: string | null;
   reason: string | null;
 }
 

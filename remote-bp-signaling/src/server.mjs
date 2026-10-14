@@ -86,9 +86,11 @@ function parseCandidate(value) {
 function relayMetadata(payload) {
   // Metadata is optional only for legacy clients. New peers require it and ignore legacy SDP.
   const metadata = {};
-  if (payload.forceRelay !== undefined) {
-    if (typeof payload.forceRelay !== 'boolean') throw new Error('INVALID_RELAY_METADATA');
-    metadata.forceRelay = payload.forceRelay;
+  for (const key of ['connectionMode', 'resumeMode']) {
+    if (payload[key] !== undefined) {
+      if (payload[key] !== 'p2p' && payload[key] !== 'turn') throw new Error('INVALID_RELAY_METADATA');
+      metadata[key] = payload[key];
+    }
   }
   for (const key of ["connectionId", "targetSessionId"]) {
     if (payload[key] !== undefined) {
@@ -136,8 +138,6 @@ export function parseClientMessage(raw) {
 
   switch (value.type) {
     case "CREATE_ROOM": {
-      if (payload.forceRelay !== undefined && typeof payload.forceRelay !== 'boolean')
-        throw new Error('INVALID_RELAY_METADATA');
       if (payload.turnAccessCode !== undefined && !isString(payload.turnAccessCode, 1, 256))
         throw new Error("INVALID_TURN_CODE");
       if (
@@ -149,7 +149,7 @@ export function parseClientMessage(raw) {
       return {
         type: value.type,
         requestId: value.requestId,
-        payload: { displayName: payload.displayName, turnAccessCode: payload.turnAccessCode, forceRelay: payload.forceRelay === true },
+        payload: { displayName: payload.displayName, turnAccessCode: payload.turnAccessCode },
       };
     }
     case "RESUME_ROOM": {
@@ -418,7 +418,6 @@ export function createSignalingServer(options = {}) {
               joinedAt: now,
             };
             const room = {
-              forceRelay: message.payload.forceRelay === true,
               turn,
               roomCode,
               host: participant,
@@ -444,7 +443,6 @@ export function createSignalingServer(options = {}) {
                 createdAt: new Date(room.createdAt).toISOString(),
                 expiresAt: PERSISTENT_ROOM_EXPIRES_AT,
                 resumeToken: room.resumeToken,
-                forceRelay: room.forceRelay,
                 turnDiagnostic: turnDiagnostic(turnEnvironment),
                 turnAuthorizedUntil: turn?.expiresAt ?? null,
               },
@@ -480,7 +478,6 @@ export function createSignalingServer(options = {}) {
               socket,
               "ROOM_RESUMED",
               {
-                forceRelay: room.forceRelay,
                 turnDiagnostic: turnDiagnostic(turnEnvironment),
                 turnAuthorizedUntil: await turnPermission(turnEnvironment, room.turn) ? room.turn.expiresAt : null,
                 roomCode: room.roomCode,
@@ -531,7 +528,6 @@ export function createSignalingServer(options = {}) {
               socket,
               "ROOM_JOINED",
               {
-                forceRelay: room.forceRelay,
                 turnDiagnostic: turnDiagnostic(turnEnvironment),
                 roomCode: room.roomCode,
                 sessionId: participant.sessionId,

@@ -41,8 +41,6 @@ export class MockRemoteBpConnection implements RemoteBpConnection {
   private snapshot: ConnectionSnapshot = {
     state: "idle",
     transport: "mock",
-    latencyMs: null,
-    lastPingAt: null,
     reason: null,
   };
   private state: RemoteBpState | null = null;
@@ -256,15 +254,9 @@ export class MockRemoteBpConnection implements RemoteBpConnection {
     state: ConnectionSnapshot["state"],
     reason: string | null = null,
   ): void {
-    const latencyMs =
-      state === "connected"
-        ? Math.round((this.minLatencyMs + this.maxLatencyMs) / 2)
-        : null;
     this.snapshot = {
       state,
       transport: "mock",
-      latencyMs,
-      lastPingAt: state === "connected" ? new Date().toISOString() : null,
       reason,
     };
     this.events.emit("connectionStateChanged", this.snapshot);
@@ -508,13 +500,6 @@ export class MockRemoteBpConnection implements RemoteBpConnection {
 
   private emitUpdate(previousRevision: number): void {
     this.events.emit("bpStateUpdated", this.cloneState());
-    if (this.snapshot.state === "connected") {
-      this.snapshot = {
-        ...this.snapshot,
-        lastPingAt: new Date().toISOString(),
-      };
-      this.events.emit("connectionStateChanged", this.snapshot);
-    }
     void previousRevision;
   }
 

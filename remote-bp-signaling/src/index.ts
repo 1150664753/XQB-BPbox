@@ -35,7 +35,6 @@ type SignalingRole = "HOST" | "FIRST" | "SECOND";
 type ConnectionMode = "CREATE" | "JOIN" | "RESUME";
 
 interface RoomMetadata {
-  forceRelay?: boolean;
   turn?: TurnGrant | null;
   roomCode: string;
   sessionId: string;
@@ -148,9 +147,11 @@ function relayMetadata(
 ): Record<string, unknown> {
   // Metadata is optional only for legacy clients. New peers require it and ignore legacy SDP.
   const metadata: Record<string, unknown> = {};
-  if (payload.forceRelay !== undefined) {
-    if (typeof payload.forceRelay !== 'boolean') throw new Error('INVALID_RELAY_METADATA');
-    metadata.forceRelay = payload.forceRelay;
+  for (const key of ['connectionMode', 'resumeMode']) {
+    if (payload[key] !== undefined) {
+      if (payload[key] !== 'p2p' && payload[key] !== 'turn') throw new Error('INVALID_RELAY_METADATA');
+      metadata[key] = payload[key];
+    }
   }
   for (const key of ["connectionId", "targetSessionId"]) {
     if (payload[key] !== undefined) {
@@ -196,8 +197,6 @@ function parseClientMessage(raw: string): SignalingMessage {
   const payload = value.payload;
   switch (value.type) {
     case "CREATE_ROOM":
-      if (payload.forceRelay !== undefined && typeof payload.forceRelay !== 'boolean')
-        throw new Error('INVALID_RELAY_METADATA');
       if (
         payload.displayName !== undefined &&
         !isString(payload.displayName, 1, 64)
@@ -207,7 +206,7 @@ function parseClientMessage(raw: string): SignalingMessage {
       return {
         type: value.type,
         ...(value.requestId ? { requestId: value.requestId } : {}),
-        payload: { displayName: payload.displayName, forceRelay: payload.forceRelay === true },
+        payload: { displayName: payload.displayName },
       };
     case "RESUME_ROOM": {
       const roomCode = normalizeRoomCode(payload.roomCode);
@@ -601,7 +600,6 @@ export class BpRoom extends DurableObject<WorkerEnvironment> {
       expiresAt: null,
     });
     await this.ctx.storage.put<RoomMetadata>(ROOM_METADATA_KEY, {
-      forceRelay: message.payload.forceRelay === true,
       turn,
       roomCode: attachment.roomCode,
       sessionId,
@@ -619,7 +617,6 @@ export class BpRoom extends DurableObject<WorkerEnvironment> {
         createdAt: new Date(now).toISOString(),
         expiresAt: PERSISTENT_ROOM_EXPIRES_AT,
         resumeToken,
-        forceRelay: message.payload.forceRelay === true,
         turnDiagnostic: turnDiagnostic(this.env),
         turnAuthorizedUntil: null,
       },
@@ -668,7 +665,6 @@ export class BpRoom extends DurableObject<WorkerEnvironment> {
       socket,
       "ROOM_RESUMED",
       {
-        forceRelay: metadata.forceRelay === true,
         turnDiagnostic: turnDiagnostic(this.env),
         turnAuthorizedUntil: await turnPermission(this.env, metadata.turn) ? metadata.turn!.expiresAt : null,
         roomCode: metadata.roomCode,
@@ -738,7 +734,6 @@ export class BpRoom extends DurableObject<WorkerEnvironment> {
       socket,
       "ROOM_JOINED",
       {
-        forceRelay: metadata.forceRelay === true,
         turnDiagnostic: turnDiagnostic(this.env),
         roomCode: attachment.roomCode,
         sessionId,
@@ -783,16 +778,16 @@ export class BpRoom extends DurableObject<WorkerEnvironment> {
   private async requestTurn(socket: WebSocket, message: SignalingMessage): Promise<void> {
     const sender = this.requireAttachment(socket);
     if (!sender.role || this.findByRole(sender.role) !== socket) throw new Error("NOT_IN_ROOM");
+    if (sender.role !== "HOST") throw new Error("HOST_ONLY");
     await this.limitTurn();
     const hostSocket = this.findByRole("HOST");
     if (!hostSocket) throw new Error("HOST_UNAVAILABLE");
     const host = this.requireAttachment(hostSocket);
     const metadata = await this.ctx.storage.get<RoomMetadata>(ROOM_METADATA_KEY);
     if (!metadata) throw new Error("ROOM_NOT_FOUND");
-    const target = sender.role === "HOST" ? this.findByRole(message.payload.targetRole as SignalingRole) : socket;
+    const target = this.findByRole(message.payload.targetRole as SignalingRole);
     const player = target ? this.requireAttachment(target) : null;
     if (!target || !player || !PLAYER_ROLES.has(player.role!)) throw new Error("PEER_NOT_CONNECTED");
-    if (sender.role !== "HOST" && message.payload.targetRole !== "HOST") throw new Error("INVALID_RELAY_TARGET");
     if (player.sessionId !== message.payload.targetSessionId || player.connectionId !== message.payload.connectionId)
       throw new Error("STALE_SIGNAL");
     // Persist the provider rate limit even on errors. Never send credentials to replaced sessions.
@@ -809,9 +804,9 @@ export class BpRoom extends DurableObject<WorkerEnvironment> {
         throw new Error("STALE_SIGNAL");
       const payload = { ...credentials, roomId: host.roomCode, peerId: player.sessionId,
         connectionId: player.connectionId };
-      // The answerer installs the configuration before any restarted offer can be forwarded.
-      this.send(target, "TURN_CREDENTIALS", payload, sender.role === "HOST" ? undefined : message.requestId);
-      this.send(hostSocket, "TURN_CREDENTIALS", payload, sender.role === "HOST" ? message.requestId : undefined);
+      // The player stages credentials before the host can send the corresponding TURN offer.
+      this.send(target, "TURN_CREDENTIALS", payload);
+      this.send(hostSocket, "TURN_CREDENTIALS", payload, message.requestId);
     } catch (error) {
       if (error instanceof Error && error.message === 'STALE_SIGNAL') throw error;
       const code = error instanceof Error && Object.hasOwn(turnErrors, error.message) ? error.message : 'TURN_UNAVAILABLE';
@@ -819,9 +814,9 @@ export class BpRoom extends DurableObject<WorkerEnvironment> {
         roomId: host.roomCode, peerId: player.sessionId, connectionId: player.connectionId,
         turnDiagnostic: turnDiagnostic(this.env, error) };
       if (this.findByRole(player.role!) === target && this.requireAttachment(target).connectionId === player.connectionId)
-        this.send(target, 'ERROR', payload, sender.role === 'HOST' ? undefined : message.requestId);
+        this.send(target, 'ERROR', payload);
       if (this.findByRole('HOST') === hostSocket)
-        this.send(hostSocket, 'ERROR', payload, sender.role === 'HOST' ? message.requestId : undefined);
+        this.send(hostSocket, 'ERROR', payload, message.requestId);
     } finally {
       const current = await this.ctx.storage.get<RoomMetadata>(ROOM_METADATA_KEY);
       if (current?.sessionId === metadata.sessionId && current?.turn?.jti === metadata.turn?.jti)
