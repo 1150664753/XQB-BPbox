@@ -307,7 +307,10 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
           try {
             this.rtc.applyTurn(message.payload);
           } catch {
-            this.rtc.turnFailed("TURN_PROVIDER_INVALID", message.payload.turnDiagnostic);
+            this.rtc.turnFailed(
+              "TURN_PROVIDER_INVALID",
+              message.payload.turnDiagnostic,
+            );
           }
         }
         return;
@@ -340,7 +343,11 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
           : "信令服务错误";
         const error = new Error(text);
         if (code.startsWith("TURN_")) {
-          if (message.payload.connectionId && message.payload.connectionId !== this.rtc?.connectionId) return;
+          if (
+            message.payload.connectionId &&
+            message.payload.connectionId !== this.rtc?.connectionId
+          )
+            return;
           this.rtc?.turnFailed(code, message.payload.turnDiagnostic);
           this.events.emit("error", {
             code,
@@ -427,7 +434,9 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
       peerId: this.confirmed.sessionId,
       roomId: this.confirmed.roomId,
       offerer: false,
-      testOnlyForceRelay: Boolean(this.options.testOnlyForceRelay || this.roomForceRelay),
+      testOnlyForceRelay: Boolean(
+        this.options.testOnlyForceRelay || this.roomForceRelay,
+      ),
       turnProvider: this.turnProvider,
       iceServers: this.options.iceServers,
       send: (type, payload) => {
@@ -645,7 +654,13 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
           {
             const epoch = this.assetEpoch;
             void this.incomingAssets
-              .complete(message.payload)
+              .complete(message.payload, () => {
+                if (epoch === this.assetEpoch)
+                  this.rtc?.finishTransfer(
+                    message.payload.transferId,
+                    "received",
+                  );
+              })
               .then((asset) => {
                 if (epoch === this.assetEpoch) {
                   this.rtc?.finishTransfer(
@@ -670,6 +685,7 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
             0,
             Date.now() - Date.parse(message.payload.clientTime),
           );
+          this.rtc?.recordApplicationPing(latencyMs);
           this.snapshot = {
             ...this.snapshot,
             latencyMs,

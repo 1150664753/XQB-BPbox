@@ -166,6 +166,9 @@ export function createMainWindow(): BrowserWindow {
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
+      // This renderer hosts remote BP. Minimizing it must not throttle pacing,
+      // control processing and ICE diagnostics to background timer intervals.
+      backgroundThrottling: false,
       autoplayPolicy: 'no-user-gesture-required'
     }
   })

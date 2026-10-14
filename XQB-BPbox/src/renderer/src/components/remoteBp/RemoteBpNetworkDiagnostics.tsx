@@ -116,6 +116,7 @@ export default function RemoteBpNetworkDiagnostics({
               <header>
                 <strong>{side}</strong>
                 <span>
+                  {item.statsStatus !== 'current' && item.pair ? '上次观测：' : ''}
                   {item.turnUsage === 'relay'
                     ? 'TURN 中继实际被选中'
                     : item.turnUsage === 'direct'
@@ -129,10 +130,24 @@ export default function RemoteBpNetworkDiagnostics({
                 <dd>
                   {item.iceTransportPolicy} ·{' '}
                   {item.forceRelay
-                    ? item.relayVerified
+                    ? item.relayVerified &&
+                      item.localCandidateType === 'relay' &&
+                      item.remoteCandidateType === 'relay'
                       ? '双方 relay 已核实'
                       : '强制中继待核实'
                     : '自动选择路径'}
+                </dd>
+                <dt>路径统计时效</dt>
+                <dd>
+                  {item.statsStatus === 'current'
+                    ? '当前采样'
+                    : item.statsStatus === 'closed'
+                      ? '连接已关闭，以下为最后观测'
+                      : item.statsStatus === 'stale'
+                        ? '采样暂缺，以下为最后观测'
+                        : '尚无路径证据'}
+                  ；上次中继核实{' '}
+                  {item.relayVerifiedAt ? new Date(item.relayVerifiedAt).toLocaleTimeString() : '—'}
                 </dd>
                 <dt>TURN 配置 / 候选</dt>
                 <dd>
@@ -165,6 +180,23 @@ export default function RemoteBpNetworkDiagnostics({
                 <dd>
                   {item.rttMs === null ? '—' : `${item.rttMs} ms`} / {item.restartCount} 次
                 </dd>
+                <dt>选中 TURN 节点</dt>
+                <dd>
+                  {item.selectedPair?.server ?? '浏览器未提供'}；对端{' '}
+                  {item.selectedPair?.remoteServer ?? '需对端导出'}
+                </dd>
+                <dt>TCP 备用配置</dt>
+                <dd>
+                  {item.tcpFallbackEnabled ? '已加入后续协商（不代表正在使用 TCP）' : '尚未启用'}
+                  ；实际协议见上方
+                </dd>
+                <dt>应用心跳 / 调度延迟</dt>
+                <dd>
+                  {item.applicationPingMs === null
+                    ? '请在选手端导出'
+                    : `${item.applicationPingMs} ms`}{' '}
+                  / {item.timerLagMs} ms
+                </dd>
                 <dt>实际发送 / 接收</dt>
                 <dd>
                   {bytes(item.sendBytesPerSecond)}/s · {bytes(item.receiveBytesPerSecond)}/s
@@ -192,9 +224,17 @@ export default function RemoteBpNetworkDiagnostics({
                 </dd>
                 <dt>图片通道</dt>
                 <dd>{item.assetChannelState ?? '兼容模式'}（与控制通道共享 SCTP 带宽）</dd>
-                <dt>图片实测速率</dt>
+                <dt>图片通道发送速率</dt>
                 <dd>
                   {bytes(item.assetBytesPerSecond)}/s；当前上限 {bytes(item.assetRateLimit)}/s
+                </dd>
+                <dt>接收确认</dt>
+                <dd>
+                  {
+                    item.transfers.filter((t) => t.direction === 'send' && t.status === 'verified')
+                      .length
+                  }{' '}
+                  项 SHA-256 校验回执（最近 64 项）；submitted 仅为发送队列提交
                 </dd>
                 <dt>资源提交进度</dt>
                 <dd>
@@ -222,7 +262,8 @@ export default function RemoteBpNetworkDiagnostics({
                   {item.iceServerErrors.length
                     ? item.iceServerErrors
                         .map(
-                          (e) => `${e.server ?? '未知服务器'} · ${e.code} ${e.reason} ×${e.count}`
+                          (e) =>
+                            `${e.server ?? '未知服务器'} · ${e.code} ${e.reason} ×${e.count} · ${e.impact === 'connected-probe-failure' ? '探测失败时连接仍正常' : e.impact === 'connection-unhealthy' ? '连接同时异常' : '收集阶段'}${e.selectedServer ? '（与选中节点同 URL）' : ''}`
                         )
                         .join('；')
                     : '无'}
@@ -233,7 +274,7 @@ export default function RemoteBpNetworkDiagnostics({
                     .slice(-3)
                     .map(
                       (t) =>
-                        `${t.status} · ${bytes(t.bytes)}/${bytes(t.totalBytes)} · ${t.durationMs ?? item.updatedAt - t.startedAt} ms${t.reason ? ` · ${t.reason}` : ''}`
+                        `${t.status} · ${bytes(t.bytes)}/${bytes(t.totalBytes)} · ${t.durationMs ?? item.updatedAt - t.startedAt} ms · 有效载荷 ${bytes(t.payloadBytesPerSecond)}/s · 等待队列/缓冲/控制/限速 ${Math.round(t.waitMs.queue)}/${Math.round(t.waitMs.buffer)}/${Math.round(t.waitMs.control)}/${Math.round(t.waitMs.pacing)} ms${t.reason ? ` · ${t.reason}` : ''}`
                     )
                     .join('；') || '无'}
                 </dd>

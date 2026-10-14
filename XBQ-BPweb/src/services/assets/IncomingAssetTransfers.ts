@@ -162,7 +162,10 @@ export class IncomingAssetTransfers {
     transfer.lastActivityAt = Date.now();
   }
 
-  async complete(payload: AssetCompletePayload): Promise<ReceivedAsset> {
+  async complete(
+    payload: AssetCompletePayload,
+    onReceived?: () => void,
+  ): Promise<ReceivedAsset> {
     const transfer = this.transfers.get(payload.transferId);
     if (!transfer || transfer.descriptor.assetId !== payload.assetId) {
       throw new Error("ASSET_TRANSFER_NOT_FOUND");
@@ -184,6 +187,7 @@ export class IncomingAssetTransfers {
       data.set(chunk, offset);
       offset += chunk.byteLength;
     }
+    onReceived?.();
     const actualHash = await sha256(data);
     if (actualHash !== transfer.descriptor.hash.toLowerCase()) {
       throw new Error("ASSET_HASH_MISMATCH");

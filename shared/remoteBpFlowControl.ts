@@ -5,6 +5,7 @@ export class AssetPacer {
   private baselineRtt: number | null = null
   private lastDecreaseAt = -1000
   private route: string | null = null
+  private congestedSince: number | null = null
 
   sample(
     now: number,
@@ -18,6 +19,7 @@ export class AssetPacer {
       this.baselineRtt = rtt
       this.rate = Math.min(this.rate, 128 * 1024)
       this.lastSampleAt = now
+      this.congestedSince = null
     }
     this.rate = Math.min(this.rate, ceiling)
     if (rtt !== null) this.baselineRtt = Math.min(this.baselineRtt ?? rtt, rtt)
@@ -27,10 +29,25 @@ export class AssetPacer {
       rtt !== null &&
       this.baselineRtt !== null &&
       rtt > this.baselineRtt + Math.max(80, this.baselineRtt * 0.35)
-    if (inflated || buffered > 16 * 1024) this.congested(now)
-    else if (buffered <= 4 * 1024 && now - this.lastDecreaseAt >= 2000)
-      this.rate = Math.min(ceiling, this.rate + 16 * 1024)
+    // bufferedAmount is queued browser data, not packet loss. A few frames queued
+    // for one RTT is normal; only sustained queueing or RTT inflation backs off.
+    if (inflated || buffered > this.highWater(rtt)) {
+      this.congestedSince ??= now
+      if (now - this.congestedSince >= this.stallWindow(rtt)) this.congested(now)
+    } else {
+      this.congestedSince = null
+      if (now - this.lastDecreaseAt >= 2000) this.rate = Math.min(ceiling, this.rate + 16 * 1024)
+    }
     return this.rate
+  }
+
+  highWater(rtt: number | null): number {
+    // One bandwidth-delay product plus a frame; bounded to protect control latency.
+    return Math.min(128 * 1024, Math.max(32 * 1024, this.rate * ((rtt ?? 100) / 1000) + 16 * 1024))
+  }
+
+  stallWindow(rtt: number | null): number {
+    return Math.max(1500, (rtt ?? 250) * 3)
   }
 
   congested(now: number): void {

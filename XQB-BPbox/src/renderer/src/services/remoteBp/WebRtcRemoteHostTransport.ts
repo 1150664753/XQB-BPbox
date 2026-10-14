@@ -51,7 +51,6 @@ export interface WebRtcRemoteHostTransportOptions {
 }
 
 const MAX_SIGNALING_MESSAGE_BYTES = 64 * 1024
-const DATA_CHANNEL_HIGH_WATER_MARK = 16 * 1024
 const DATA_CHANNEL_DRAIN_TIMEOUT_MS = 30_000
 const SIGNALING_HEARTBEAT_INTERVAL_MS = 20_000
 const MAX_RECONNECT_DELAY_MS = 15_000
@@ -291,7 +290,20 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
       return
     }
     const previous = this.sendQueues.get(peerId) ?? Promise.resolve()
-    const queued = previous.catch(() => undefined).then(() => this.sendNow(peer, message, raw))
+    const queuedAt = Date.now()
+    const queued = previous
+      .catch(() => undefined)
+      .then(() => {
+        const queueMs = Date.now() - queuedAt
+        return this.sendNow(peer, message, raw).finally(() => {
+          if (
+            message.type === 'ASSET_START' ||
+            message.type === 'ASSET_CHUNK' ||
+            message.type === 'ASSET_COMPLETE'
+          )
+            peer.rtc.recordTransferWait(message.payload.transferId, 'queue', queueMs)
+        })
+      })
     this.sendQueues.set(peerId, queued)
     try {
       await queued
@@ -896,7 +908,8 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
       await this.waitForWritable(
         peer,
         channel,
-        channel === peer.rtc.channel ? 0 : DATA_CHANNEL_HIGH_WATER_MARK
+        channel === peer.rtc.channel ? 0 : pacer.highWater(peer.rtc.roundTripTimeMs),
+        id
       )
       if (this.peers.get(peer.side) !== peer || channel.readyState !== 'open')
         throw new Error(
@@ -906,7 +919,13 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
         )
       const rate = pacer.rate
       channel.send(raw)
-      peer.nextAssetAt = Date.now() + (new TextEncoder().encode(raw).byteLength / rate) * 1000
+      const wireBytes = new TextEncoder().encode(raw).byteLength
+      // Carry scheduling credit (at most one 16 KiB frame) across drain waits.
+      // Do not add a fresh fixed delay to every tiny START/COMPLETE frame.
+      peer.nextAssetAt =
+        Math.max(Date.now() - ((16 * 1024) / rate) * 1000, peer.nextAssetAt) +
+        (wireBytes / rate) * 1000
+      peer.rtc.recordTransferWireBytes(id, wireBytes)
       const assets = peer.rtc.getTransferMetrics()
       const chunkBytes =
         message.type === 'ASSET_CHUNK'
@@ -952,7 +971,8 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
   private async waitForWritable(
     peer: HostPeerSession,
     channel: RTCDataChannel,
-    highWater: number
+    highWater: number,
+    transferId: string
   ): Promise<void> {
     let progressAt = Date.now(),
       previous = Infinity
@@ -972,9 +992,22 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
         return
       // BP activity/pacing alone is not a network stall. Only an undrained image buffer times out.
       if (buffered === 0) progressAt = Date.now()
-      if (buffered > highWater && Date.now() - progressAt >= 250) peer.pacer?.congested(Date.now())
+      if (
+        buffered > highWater &&
+        Date.now() - progressAt >= (peer.pacer?.stallWindow(peer.rtc.roundTripTimeMs) ?? 1500)
+      )
+        peer.pacer?.congested(Date.now())
       if (buffered > 0 && Date.now() - progressAt > DATA_CHANNEL_DRAIN_TIMEOUT_MS)
         throw new Error('ASSET_SEND_TIMEOUT')
+      const waitStarted = Date.now()
+      const waitReason =
+        buffered > highWater
+          ? 'buffer'
+          : controlBuffered > 0 || Date.now() < peer.controlUntil
+            ? 'control'
+            : 'pacing'
+      const delay =
+        waitReason === 'pacing' ? Math.max(1, Math.min(50, peer.nextAssetAt - Date.now())) : 50
       await new Promise<void>((resolve) => {
         const finish = (): void => {
           window.clearTimeout(timer)
@@ -986,8 +1019,9 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
         channel.addEventListener('bufferedamountlow', finish)
         channel.addEventListener('close', finish)
         // Polling remains a fallback for missed threshold events and short control yields.
-        const timer = window.setTimeout(finish, 25)
+        const timer = window.setTimeout(finish, delay)
       })
+      peer.rtc.recordTransferWait(transferId, waitReason, Date.now() - waitStarted)
     }
   }
 

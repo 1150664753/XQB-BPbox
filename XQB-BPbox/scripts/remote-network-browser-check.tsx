@@ -28,7 +28,7 @@ async function main() {
   const checks: string[] = []
   const cache = new IndexedDbAssetCache()
   await cache.clear()
-  const blob = new Blob([new Uint8Array(192 * 1024).fill(73)], { type: 'image/png' })
+  const blob = new Blob([new Uint8Array(300 * 1024).fill(73)], { type: 'image/png' })
   const descriptor = {
     assetId: 'character:1:avatar',
     type: 'avatar' as const,
@@ -220,8 +220,15 @@ async function main() {
     'receiver completion was not SHA-256 verified and timed'
   )
   check(
-    diagnostic.transfers.some((t) => t.id === 'one' && t.status === 'submitted'),
-    'sender submission was not recorded'
+    diagnostic.transfers.some(
+      (t) =>
+        t.id === 'one' &&
+        t.status === 'verified' &&
+        t.submittedAt !== null &&
+        t.receivedAt !== null &&
+        t.receiptSource === 'peer'
+    ),
+    'sender did not receive the verified receipt separately from submission'
   )
   check(diagnostic.pair && !diagnostic.relay, 'actual selected ICE pair not diagnosed')
   check(diagnostic.bytesSent! > 0 && diagnostic.assetBytesSent! > 0, 'actual byte counters missing')
@@ -232,13 +239,23 @@ async function main() {
   checks.push(
     `real Chromium WebRTC, image integrity, action round trip during bulk (${player.getDiagnostic().actionResponseMs} ms), ICE restart continuation, getStats counters`
   )
+  await Promise.all([transfer('parallel-a'), transfer('parallel-b')])
+  await until(
+    () =>
+      received === 3 &&
+      host.getDiagnostic().transfers.filter((t) => t.status === 'verified').length === 3,
+    'concurrent transfers or receipt verification failed'
+  )
+  checks.push(
+    'two concurrent 300 KiB transfers: receiver integrity and sender received/verified receipts'
+  )
   host.assetChannel!.close()
   await until(
     () => player.assetChannel?.readyState === 'closed',
     'optional asset channel did not close'
   )
   await transfer('legacy')
-  await until(() => received === 2, 'legacy control-channel asset fallback failed')
+  await until(() => received === 4, 'legacy control-channel asset fallback failed')
   check(arrivals.includes('control:ASSET_CHUNK'), 'legacy stream was not used')
   checks.push('closed/unsupported optional asset stream falls back to existing JSON protocol')
 

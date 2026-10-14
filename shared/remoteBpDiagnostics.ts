@@ -13,9 +13,16 @@ export interface AssetTransferDiagnostic {
   updatedAt: number
   totalBytes: number
   bytes: number
-  status: 'transferring' | 'submitted' | 'verified' | 'failed' | 'cancelled'
+  status: 'transferring' | 'submitted' | 'received' | 'verified' | 'failed' | 'cancelled'
   durationMs: number | null
   reason: string | null
+  submittedAt: number | null
+  receivedAt: number | null
+  verifiedAt: number | null
+  wireBytes: number
+  payloadBytesPerSecond: number | null
+  waitMs: { queue: number; buffer: number; control: number; pacing: number }
+  receiptSource: 'local' | 'peer' | null
 }
 export interface CandidatePairDiagnostic {
   at: number
@@ -31,6 +38,7 @@ export interface CandidatePairDiagnostic {
   remoteServer: string | null
   remoteProtocol: string | null
   source: 'transport' | 'nominated'
+  state: string | null
   negotiationId: number
 }
 export interface TurnRequestDiagnostic {
@@ -73,6 +81,12 @@ export interface RtcDiagnostics {
   turnConfigured: boolean
   turnUsage: 'unknown' | 'direct' | 'relay'
   relayVerified: boolean
+  relayVerifiedAt: number | null
+  statsStatus: 'unavailable' | 'current' | 'stale' | 'closed'
+  statsMissingSince: number | null
+  statsUnavailableReason: string | null
+  tcpFallbackEnabled: boolean
+  timerLagMs: number
   turnRequests: TurnRequestDiagnostic[]
   trafficSamples: Array<{
     at: number
@@ -83,6 +97,11 @@ export interface RtcDiagnostics {
     bytesReceived: number | null
     sentDelta: number | null
     receivedDelta: number | null
+    assetRateLimit: number
+    assetBufferedAmount: number
+    controlBufferedAmount: number
+    timerLagMs: number
+    visibility: string | null
   }>
   rttMs: number | null
   selectedPair: CandidatePairDiagnostic | null
@@ -95,12 +114,15 @@ export interface RtcDiagnostics {
     count: number
     firstAt: number
     lastAt: number
+    impact: 'gathering' | 'connection-unhealthy' | 'connected-probe-failure'
+    selectedServer: boolean | null
   }>
   // SCTP/DataChannel has no interoperable packetsLost statistic. Do not substitute RTP or STUN loss.
   packetLossRatio: number | null
   packetLossSource: 'unavailable'
   sendDiscardRatio: number | null
   actionResponseMs: number | null
+  applicationPingMs: number | null
   actionResponses: Array<{ at: number; durationMs: number }>
   transfers: AssetTransferDiagnostic[]
   bytesSent: number | null
@@ -201,6 +223,12 @@ export function createRtcDiagnostics(
     turnConfigured: false,
     turnUsage: 'unknown',
     relayVerified: false,
+    relayVerifiedAt: null,
+    statsStatus: 'unavailable',
+    statsMissingSince: null,
+    statsUnavailableReason: null,
+    tcpFallbackEnabled: false,
+    timerLagMs: 0,
     turnRequests: [],
     trafficSamples: [],
     rttMs: null,
@@ -211,6 +239,7 @@ export function createRtcDiagnostics(
     packetLossSource: 'unavailable',
     sendDiscardRatio: null,
     actionResponseMs: null,
+    applicationPingMs: null,
     actionResponses: [],
     transfers: [],
     bytesSent: null,
@@ -268,9 +297,9 @@ export function getRtcDiagnostics(roomId?: string | null): RtcDiagnostics[] {
 export function exportRtcDiagnostics(roomId?: string | null): string {
   return JSON.stringify(
     {
-      schemaVersion: 3,
+      schemaVersion: 4,
       exportedAt: new Date().toISOString(),
-      note: 'Includes credential-free ICE server endpoints and opaque selected pair IDs, never peer addresses, SDP, tokens or credentials. Submitted assets are not receipt acknowledgements; verified means receiver SHA-256 passed. DataChannel packet loss is unavailable; sendDiscardRatio measures local send discards only.',
+      note: 'Credential-free endpoints only; never peer addresses, SDP, tokens or credentials. relayVerified describes the last observed selected path; statsStatus and relayVerifiedAt identify freshness/closed history. submitted is browser enqueue only; received is complete payload before SHA-256; verified is receiver hash success, receiptSource=peer denotes its acknowledgement. Transfer payload rates exclude base64/protocol overhead; data-channel counters measure browser transmission, not receipt. Missing DataChannel loss is unavailable; sendDiscardRatio is local discards only. Configured TCP fallback is not selected TCP.',
       connections: getRtcDiagnostics(roomId)
     },
     null,

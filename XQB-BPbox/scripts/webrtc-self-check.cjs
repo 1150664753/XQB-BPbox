@@ -412,6 +412,8 @@ async function main() {
       for (const [local, remote, code] of [
         ['host', 'srflx', 'TURN_PATH_NOT_RELAY'],
         ['relay', 'host', 'TURN_PATH_NOT_RELAY'],
+        ['host', null, 'TURN_PATH_NOT_RELAY'],
+        ['relay', null, 'TURN_PATH_UNVERIFIED'],
         [null, null, 'TURN_PATH_UNVERIFIED'],
         ['relay', 'relay', null]
       ]) {
@@ -697,10 +699,194 @@ async function main() {
       for (let at = 1000; at <= 12000; at += 1000) pacer.sample(at, 256 * 1024, 650, 0)
       assert.equal(pacer.rate, 256 * 1024)
       pacer.sample(13000, 256 * 1024, 950, 64 * 1024)
-      assert.ok(pacer.rate < 256 * 1024)
+      assert.equal(pacer.rate, 256 * 1024, 'one delayed sample is not sustained congestion')
       for (let at = 14000; at <= 60000; at += 1000) pacer.sample(at, 256 * 1024, 1200, 64 * 1024)
       assert.equal(pacer.rate, 16 * 1024)
       assert.ok(pacer.sample(61000, 64 * 1024, 650, 0) <= 64 * 1024)
+      const healthy = new AssetPacer()
+      for (let at = 1000; at <= 60000; at += 1000)
+        healthy.sample(at, 256 * 1024, 500, 24 * 1024, 'udp-relay')
+      assert.equal(healthy.rate, 256 * 1024, 'normal high-RTT queue must not collapse to 16 KiB/s')
+    }
+  )
+  await run(
+    'stats gaps do not flap a verified connection; persistent loss still fails forced TURN',
+    async () => {
+      const { rtc, pc, states } = session(true, 'stats-gaps', { testOnlyForceRelay: true })
+      rtc.applyTurn(turnFixture())
+      let reports = selectedStats()
+      pc.getStats = async () => reports
+      await rtc.start()
+      await rtc.receive(
+        'ANSWER',
+        signal(rtc.connectionId, 1, {
+          description: description('answer', 'remote-1'),
+          forceRelay: true
+        })
+      )
+      pc.network('connected')
+      pc.channel.open()
+      await tick(2000)
+      assert.equal(rtc.phase, 'connected')
+      const transitions = states.length
+      reports.get('selected').state = 'in-progress'
+      await tick(1000)
+      assert.equal(
+        rtc.getDiagnostic().statsStatus,
+        'current',
+        'transport selection is authoritative during checks'
+      )
+      reports = new Map()
+      await tick(4000)
+      assert.equal(rtc.phase, 'connected')
+      assert.equal(rtc.getDiagnostic().statsStatus, 'stale')
+      reports = selectedStats()
+      await tick(2000)
+      assert.equal(states.length, transitions, 'no redundant ready callback or STATE_REQUEST')
+      emit(pc, 'icecandidateerror', {
+        url: 'turn:relay.test:3478',
+        errorCode: 701,
+        errorText: 'STUN timeout'
+      })
+      assert.equal(rtc.getDiagnostic().errorCode, null)
+      assert.equal(rtc.getDiagnostic().iceServerErrors.at(-1).impact, 'connected-probe-failure')
+      assert.equal(rtc.getDiagnostic().iceServerErrors.at(-1).selectedServer, true)
+      reports = new Map()
+      await tick(23000)
+      assert.equal(rtc.phase, 'failed')
+      assert.equal(rtc.getDiagnostic().errorCode, 'TURN_PATH_UNVERIFIED')
+      assert.equal(rtc.getDiagnostic().statsStatus, 'closed')
+      assert.equal(
+        rtc.getDiagnostic().relayVerified,
+        true,
+        'close retains timestamped historical proof'
+      )
+    }
+  )
+  await run(
+    '500 ms relay model: two independent bulk senders preserve control priority and bounded pacing',
+    async () => {
+      const transport = new WebRtcRemoteHostTransport({
+        signalingUrl: 'ws://test',
+        iceServers: [],
+        assetRateKiBps: 256
+      })
+      const peers = []
+      for (const side of ['first', 'second']) {
+        const { rtc, pc } = session(true, `slow-${side}`)
+        await rtc.start()
+        await rtc.receive(
+          'ANSWER',
+          signal(rtc.connectionId, 1, { description: description('answer', 'remote-1') })
+        )
+        pc.network('connected')
+        pc.channel.open()
+        const stats = selectedStats()
+        stats.get('selected').currentRoundTripTime = 0.5
+        pc.getStats = async () => stats
+        const assets = new Channel('xqb-remote-bp-assets-v1')
+        emit(pc, 'datachannel', { channel: assets })
+        assets.open()
+        let wireEnd = now
+        assets.maxBuffered = 0
+        assets.send = (raw) => {
+          const bytes = Buffer.byteLength(raw)
+          assets.sent.push(JSON.parse(raw))
+          assets.bufferedAmount += bytes
+          assets.maxBuffered = Math.max(assets.maxBuffered, assets.bufferedAmount)
+          wireEnd = Math.max(wireEnd, now) + (bytes / (128 * 1024)) * 1000
+          window.setTimeout(
+            () => {
+              assets.bufferedAmount -= bytes
+              if (assets.bufferedAmount <= assets.bufferedAmountLowThreshold)
+                emit(assets, 'bufferedamountlow')
+            },
+            wireEnd + 500 - now
+          )
+        }
+        const peer = {
+          side,
+          peerId: side,
+          rtc,
+          assetTransfers: new Map(),
+          nextAssetAt: 0,
+          controlUntil: 0
+        }
+        transport.peers.set(side, peer)
+        peers.push({ ...peer, pc, assets })
+      }
+      await tick(1000)
+      const started = now
+      const image = async (peer, id, size) => {
+        await transport.send(peer.peerId, {
+          type: 'ASSET_START',
+          payload: { transferId: id, asset: { size } }
+        })
+        let total = 0
+        while (total < size) {
+          const bytes = Math.min(11520, size - total)
+          await transport.send(peer.peerId, {
+            type: 'ASSET_CHUNK',
+            payload: { transferId: id, data: Buffer.alloc(bytes).toString('base64') }
+          })
+          total += bytes
+        }
+        await transport.send(peer.peerId, { type: 'ASSET_COMPLETE', payload: { transferId: id } })
+      }
+      const jobs = peers.map((peer) => image(peer, peer.peerId, 300 * 1024))
+      await tick(500)
+      for (const peer of peers) {
+        await transport.send(peer.peerId, {
+          type: 'ACTION_RESULT',
+          payload: { actionId: 'priority' }
+        })
+        await transport.send(peer.peerId, { type: 'PONG', payload: {} })
+        assert.deepEqual(
+          peer.pc.channel.sent.map((m) => m.type),
+          ['ACTION_RESULT', 'PONG']
+        )
+        assert.ok(peer.rtc.getDiagnostic().transfers[0].bytes < 300 * 1024)
+      }
+      await tick(9000)
+      await Promise.all(jobs)
+      for (const peer of peers) {
+        const entry = peer.rtc.getDiagnostic().transfers[0]
+        assert.ok(entry.durationMs < 8000, `300 KiB queued in ${entry.durationMs} ms`)
+        assert.ok(entry.wireBytes > entry.totalBytes, 'JSON/base64 overhead is explicitly measured')
+        assert.ok(peer.rtc.getDiagnostic().assetRateLimit > 16 * 1024)
+        assert.ok(peer.assets.maxBuffered <= 144 * 1024, 'bounded image queue throughout transfer')
+        assert.equal(entry.status, 'submitted', 'send is not receipt')
+        emit(peer.assets, 'message', {
+          data: JSON.stringify({
+            type: 'ASSET_RECEIPT_V1',
+            id: peer.peerId,
+            status: 'verified',
+            bytes: 1
+          })
+        })
+        assert.equal(
+          peer.rtc.getDiagnostic().transfers[0].status,
+          'submitted',
+          'reject wrong-length receipt'
+        )
+        for (const status of ['received', 'verified'])
+          emit(peer.assets, 'message', {
+            data: JSON.stringify({
+              type: 'ASSET_RECEIPT_V1',
+              id: peer.peerId,
+              status,
+              bytes: 300 * 1024
+            })
+          })
+        assert.equal(peer.rtc.getDiagnostic().transfers[0].receiptSource, 'peer')
+      }
+      const tiny = image(peers[0], 'tiny', 3 * 1024)
+      await tick(1000)
+      await tiny
+      assert.ok(peers[0].rtc.getDiagnostic().transfers.at(-1).durationMs < 1000)
+      realInfo(
+        `MODEL two 300 KiB submissions: ${peers.map((p) => p.rtc.getDiagnostic().transfers[0].submittedAt - started).join('/')} ms (synthetic 500 ms RTT, 128 KiB/s per link; not WTN)`
+      )
     }
   )
   await run('receiver idle timeout is distinct and drops partial bytes for retry', async () => {
@@ -894,7 +1080,16 @@ async function main() {
       reports.delete('transport')
       reports.set('pair-2', { ...selected, id: 'pair-2' })
       await tick(1000)
-      assert.equal(rtc.getDiagnostic().pair, null, 'ambiguous nominated pairs must not be guessed')
+      assert.equal(
+        rtc.getDiagnostic().statsStatus,
+        'stale',
+        'ambiguous nominated pairs must not be guessed'
+      )
+      assert.equal(
+        rtc.getDiagnostic().selectedPair.id,
+        'pair',
+        'retain only explicitly stale historical evidence'
+      )
       reports.set('transport', { type: 'transport', selectedCandidatePairId: 'pair-2' })
       await tick(1000)
       assert.deepEqual(

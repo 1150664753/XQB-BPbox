@@ -318,18 +318,31 @@ export class RemoteBpRtcSession {
           reason,
           count: 0,
           firstAt: now,
-          lastAt: now
+          lastAt: now,
+          impact: 'gathering',
+          selectedServer: null
         }
         this.diagnostic.iceServerErrors.push(entry)
         if (this.diagnostic.iceServerErrors.length > 32) this.diagnostic.iceServerErrors.shift()
       }
       entry.count++
       entry.lastAt = now
+      entry.impact =
+        this.pc.connectionState === 'connected' && this.channel?.readyState === 'open'
+          ? 'connected-probe-failure'
+          : this.pc.connectionState === 'failed' || this.pc.iceConnectionState === 'failed'
+            ? 'connection-unhealthy'
+            : 'gathering'
+      entry.selectedServer =
+        this.diagnostic.selectedPair?.server && server
+          ? this.diagnostic.selectedPair.server === server
+          : null
       if (now - (this.iceErrorLoggedAt.get(key) ?? -Infinity) >= 30_000) {
         this.iceErrorLoggedAt.set(key, now)
         if (this.iceErrorLoggedAt.size > 32)
           this.iceErrorLoggedAt.delete(this.iceErrorLoggedAt.keys().next().value!)
-        this.recordError('ICE_SERVER_ERROR', `ICE ${code} · ${reason}`)
+        // Gathering failures (including on another interface of a selected server)
+        // are retained separately. ICE/DTLS state determines connection failure.
         this.log('candidate gathering error', {
           server,
           protocol,
@@ -357,7 +370,13 @@ export class RemoteBpRtcSession {
     })
     if (options.offerer)
       this.installChannel(this.pc.createDataChannel('xqb-remote-bp', { ordered: true }))
-    this.timer = window.setInterval(() => this.reconcile(), 1_000)
+    let previousTick = Date.now()
+    this.timer = window.setInterval(() => {
+      const now = Date.now()
+      this.diagnostic.timerLagMs = Math.max(0, now - previousTick - 1000)
+      previousTick = now
+      this.reconcile()
+    }, 1_000)
     this.transition('signaling', null)
   }
 
@@ -397,7 +416,14 @@ export class RemoteBpRtcSession {
       updatedAt: now,
       status: 'transferring',
       durationMs: null,
-      reason: null
+      reason: null,
+      submittedAt: null,
+      receivedAt: null,
+      verifiedAt: null,
+      wireBytes: 0,
+      payloadBytesPerSecond: null,
+      waitMs: { queue: 0, buffer: 0, control: 0, pacing: 0 },
+      receiptSource: null
     })
     if (this.diagnostic.transfers.length > 64) this.diagnostic.transfers.shift()
   }
@@ -413,18 +439,101 @@ export class RemoteBpRtcSession {
     status: AssetTransferDiagnostic['status'],
     reason: string | null = null
   ): void {
-    const entry = this.diagnostic.transfers.find((t) => t.id === id && t.status === 'transferring')
+    const entry = this.diagnostic.transfers.find(
+      (t) => t.id === id && ['transferring', 'submitted', 'received'].includes(t.status)
+    )
     if (!entry) return
     entry.status = status
     entry.reason = reason && /^[A-Z0-9_]{1,64}$/.test(reason) ? reason : null
     entry.updatedAt = Date.now()
     entry.durationMs = entry.updatedAt - entry.startedAt
+    if (status === 'submitted') entry.submittedAt = entry.updatedAt
+    if (status === 'received') entry.receivedAt = entry.updatedAt
+    if (status === 'verified') entry.verifiedAt = entry.updatedAt
+    if (status === 'received' || status === 'verified') {
+      entry.receiptSource = entry.direction === 'receive' ? 'local' : 'peer'
+      const duration = (entry.receivedAt ?? entry.updatedAt) - entry.startedAt
+      entry.payloadBytesPerSecond = duration > 0 ? (entry.bytes * 1000) / duration : null
+    }
+    if (
+      entry.direction === 'receive' &&
+      ['received', 'verified', 'failed'].includes(status) &&
+      this.assetChannel?.readyState === 'open'
+    ) {
+      // Optional reverse messages on the existing asset stream. Older hosts ignore
+      // them; no control-protocol change or acknowledgement per chunk is needed.
+      try {
+        this.assetChannel.send(
+          JSON.stringify({
+            type: 'ASSET_RECEIPT_V1',
+            id,
+            status,
+            bytes: entry.bytes,
+            reason: entry.reason
+          })
+        )
+      } catch {
+        /* Closing channel: local evidence remains exportable. */
+      }
+    }
     this.log('asset transfer finished', {
       status,
       durationMs: entry.durationMs,
       bytes: entry.bytes,
       code: entry.reason
     })
+  }
+  recordTransferWireBytes(id: string, bytes: number): void {
+    const entry = this.diagnostic.transfers.find((t) => t.id === id)
+    if (entry) entry.wireBytes += bytes
+  }
+  recordTransferWait(
+    id: string,
+    kind: 'queue' | 'buffer' | 'control' | 'pacing',
+    ms: number
+  ): void {
+    const entry = this.diagnostic.transfers.find((t) => t.id === id)
+    if (entry) entry.waitMs[kind] += Math.max(0, ms)
+  }
+  recordApplicationPing(durationMs: number): void {
+    if (Number.isFinite(durationMs) && durationMs >= 0)
+      this.diagnostic.applicationPingMs = Math.round(durationMs)
+  }
+  private receiveAssetReceipt(data: unknown): void {
+    if (typeof data !== 'string' || data.length > 1024) return
+    try {
+      const value = JSON.parse(data)
+      if (
+        !value ||
+        value.type !== 'ASSET_RECEIPT_V1' ||
+        typeof value.id !== 'string' ||
+        value.id.length > 128 ||
+        !['received', 'verified', 'failed'].includes(value.status)
+      )
+        return
+      const entry = this.diagnostic.transfers.find(
+        (t) =>
+          t.id === value.id &&
+          t.direction === 'send' &&
+          ['submitted', 'received'].includes(t.status)
+      )
+      if (
+        !entry ||
+        !Number.isSafeInteger(value.bytes) ||
+        value.bytes < 0 ||
+        value.bytes > entry.totalBytes ||
+        (value.status !== 'failed' && value.bytes !== entry.totalBytes)
+      )
+        return
+      if (value.status === 'received' && entry.status === 'received') return
+      this.finishTransfer(
+        entry.id,
+        value.status,
+        typeof value.reason === 'string' ? value.reason : null
+      )
+    } catch {
+      /* Untrusted optional diagnostics must never reach BP dispatch. */
+    }
   }
   recordActionResponse(durationMs: number): void {
     if (!Number.isFinite(durationMs) || durationMs < 0) return
@@ -477,6 +586,7 @@ export class RemoteBpRtcSession {
     })
     this.relayServers = credentials.iceServers
     this.tcpFallbackAt = preferUdp && hasTcp ? Date.now() + RTC_TIMING.udpPreferenceMs : null
+    this.diagnostic.tcpFallbackEnabled = hasTcp && !preferUdp
     this.relayExpiresAt = credentials.expiresAt
     this.diagnostic.turnConfigured = true
     this.diagnostic.iceTransportPolicy = this.pc.getConfiguration().iceTransportPolicy ?? 'all'
@@ -525,6 +635,7 @@ export class RemoteBpRtcSession {
   private enableTcpFallback(): boolean {
     if (this.tcpFallbackAt === null) return false
     this.tcpFallbackAt = null
+    this.diagnostic.tcpFallbackEnabled = true
     this.pc.setConfiguration({
       iceServers: [...directIceServers(this.options.iceServers), ...this.relayServers],
       iceTransportPolicy: this.options.testOnlyForceRelay ? 'relay' : 'all'
@@ -606,6 +717,7 @@ export class RemoteBpRtcSession {
     this.relayExpiresAt = null
     this.relayServers = []
     this.tcpFallbackAt = null
+    this.diagnostic.tcpFallbackEnabled = false
     this.diagnostic.turn = expired ? 'expired' : 'disabled'
     this.diagnostic.expiresAt = null
     this.diagnostic.turnConfigured = false
@@ -651,7 +763,18 @@ export class RemoteBpRtcSession {
         if (nominated.length === 1) pairId = nominated[0]!
       }
       let selected = pairId ? stats.get(pairId) : undefined
-      if (!selected || selected.type !== 'candidate-pair' || selected.state !== 'succeeded') {
+      // transport identifies the pair actually in use. A new check can briefly
+      // report in-progress on that pair; nomination alone is a weaker fallback.
+      if (
+        !selected ||
+        selected.type !== 'candidate-pair' ||
+        (selected.state !== 'succeeded' &&
+          !(
+            source === 'transport' &&
+            selected.state === 'in-progress' &&
+            this.pc.connectionState === 'connected'
+          ))
+      ) {
         pairId = null
         selected = undefined
       }
@@ -660,6 +783,16 @@ export class RemoteBpRtcSession {
       const allowed = ['host', 'srflx', 'prflx', 'relay']
       const local = enumValue(localReport?.candidateType, allowed)
       const remote = enumValue(remoteReport?.candidateType, allowed)
+      if (!pairId || (!local && !remote)) {
+        this.markStatsUnavailable(
+          !pairId ? 'SELECTED_PAIR_UNAVAILABLE' : 'CANDIDATE_STATS_INCOMPLETE'
+        )
+        return
+      }
+      if (this.diagnostic.statsMissingSince !== null) this.log('selected pair statistics restored')
+      this.diagnostic.statsStatus = 'current'
+      this.diagnostic.statsMissingSince = null
+      this.diagnostic.statsUnavailableReason = null
       const pairType = local && remote ? `${local} / ${remote}` : null
       this.diagnostic.localCandidateType = local
       this.diagnostic.remoteCandidateType = remote
@@ -721,7 +854,8 @@ export class RemoteBpRtcSession {
           ? 'direct'
           : 'unknown'
       this.diagnostic.iceTransportPolicy = this.pc.getConfiguration().iceTransportPolicy ?? 'all'
-      this.diagnostic.relayVerified = local === 'relay' && remote === 'relay'
+      this.diagnostic.relayVerified = this.diagnostic.relay
+      if (this.diagnostic.relayVerified) this.diagnostic.relayVerifiedAt = now
       this.verifiedGeneration =
         this.remoteGeneration === this.generation && this.pc.signalingState === 'stable'
           ? this.generation
@@ -742,7 +876,12 @@ export class RemoteBpRtcSession {
         receivedDelta:
           this.diagnostic.receiveBytesPerSecond === null
             ? null
-            : this.diagnostic.receiveBytesPerSecond * interval
+            : this.diagnostic.receiveBytesPerSecond * interval,
+        assetRateLimit: this.diagnostic.assetRateLimit,
+        assetBufferedAmount: this.assetChannel?.bufferedAmount ?? 0,
+        controlBufferedAmount: this.channel?.bufferedAmount ?? 0,
+        timerLagMs: this.diagnostic.timerLagMs,
+        visibility: typeof document === 'undefined' ? null : document.visibilityState
       })
       if (this.diagnostic.trafficSamples.length > 300) this.diagnostic.trafficSamples.shift()
       if (pairId) {
@@ -760,13 +899,15 @@ export class RemoteBpRtcSession {
           remoteServer: iceServerEndpoint(remoteReport?.url),
           remoteProtocol: enumValue(remoteReport?.protocol, ['udp', 'tcp']),
           source,
+          state: enumValue(selected.state, ['succeeded', 'in-progress']),
           negotiationId: this.generation
         }
+        const previousPair = this.diagnostic.selectedPair
+        this.diagnostic.selectedPair = pair
         if (
-          JSON.stringify({ ...pair, at: 0 }) !==
-          JSON.stringify({ ...this.diagnostic.selectedPair, at: 0 })
+          JSON.stringify({ ...pair, at: 0, state: null }) !==
+          JSON.stringify({ ...previousPair, at: 0, state: null })
         ) {
-          this.diagnostic.selectedPair = pair
           this.diagnostic.pairHistory.push(pair)
           if (this.diagnostic.pairHistory.length > 50) this.diagnostic.pairHistory.shift()
           this.log('selected candidate pair', {
@@ -779,15 +920,23 @@ export class RemoteBpRtcSession {
       this.options.onDiagnostics?.(this.getDiagnostic())
     } catch {
       if (!this.active || generation !== this.generation) return
-      this.diagnostic.relayVerified = false
-      this.diagnostic.turnUsage = 'unknown'
-      this.diagnostic.relay = false
-      this.diagnostic.pair = null
-      this.diagnostic.selectedPair = null
-      this.verifiedGeneration = -1
+      this.markStatsUnavailable('GET_STATS_FAILED')
     } finally {
       this.statsPending = false
     }
+  }
+
+  private markStatsUnavailable(reason: string): void {
+    if (this.diagnostic.statsMissingSince === null)
+      this.log('selected pair statistics unavailable', { code: reason })
+    this.diagnostic.statsMissingSince ??= Date.now()
+    this.diagnostic.statsUnavailableReason = reason
+    this.diagnostic.statsStatus = this.diagnostic.selectedPair ? 'stale' : 'unavailable'
+    this.diagnostic.sendBytesPerSecond = null
+    this.diagnostic.receiveBytesPerSecond = null
+    this.diagnostic.assetBytesPerSecond = null
+    this.sample = null
+    this.options.onDiagnostics?.(this.getDiagnostic())
   }
 
   private log(event: string, details: Record<string, unknown> = {}): void {
@@ -1003,6 +1152,9 @@ export class RemoteBpRtcSession {
     this.verifiedGeneration = -1
     this.relayVerificationStartedAt = null
     this.diagnostic.relayVerified = false
+    this.diagnostic.statsStatus = 'unavailable'
+    this.diagnostic.statsMissingSince = null
+    this.diagnostic.statsUnavailableReason = null
     this.generation = generation
     this.roundStartedAt = Date.now()
     this.iceConnectedAt = null
@@ -1242,8 +1394,9 @@ export class RemoteBpRtcSession {
     this.assetChannel = channel
     channel.bufferedAmountLowThreshold = 16 * 1024
     channel.addEventListener('message', (event) => {
-      if (this.active && this.assetChannel === channel && !this.options.offerer)
-        this.options.onMessage(event.data, 'assets')
+      if (!this.active || this.assetChannel !== channel) return
+      if (this.options.offerer) this.receiveAssetReceipt(event.data)
+      else this.options.onMessage(event.data, 'assets')
     })
     for (const event of ['open', 'close', 'error'])
       channel.addEventListener(event, () => {
@@ -1277,6 +1430,8 @@ export class RemoteBpRtcSession {
       negotiationId: this.generation
     })
     this.diagnostic.iceState = this.pc.iceConnectionState
+    if (this.diagnostic.statsStatus === 'current' && now - this.verifiedAt > 5000)
+      this.markStatsUnavailable('STATS_SAMPLE_TIMEOUT')
     if (now - this.lastStatsAt >= 1_000) {
       this.lastStatsAt = now
       void this.inspectSelectedPair()
@@ -1324,7 +1479,9 @@ export class RemoteBpRtcSession {
     ) {
       if (this.options.testOnlyForceRelay) {
         const observed =
-          this.verifiedGeneration === this.generation && now - this.verifiedAt <= 5_000
+          this.diagnostic.statsStatus === 'current' &&
+          this.verifiedGeneration === this.generation &&
+          now - this.verifiedAt <= 5_000
         if (
           observed &&
           (this.diagnostic.iceTransportPolicy !== 'relay' ||
@@ -1336,11 +1493,18 @@ export class RemoteBpRtcSession {
           this.fail('强制 TURN 校验失败：实际选中路径并非双方 relay', 'TURN_PATH_NOT_RELAY')
           return
         }
-        if (!observed || !this.diagnostic.relayVerified) {
+        if (
+          !observed ||
+          this.diagnostic.localCandidateType !== 'relay' ||
+          this.diagnostic.remoteCandidateType !== 'relay'
+        ) {
           this.relayVerificationStartedAt ??= now
           if (now - this.relayVerificationStartedAt >= RTC_TIMING.dataChannelMs)
             this.fail('强制 TURN 无法从 getStats 确认选中的中继路径', 'TURN_PATH_UNVERIFIED')
-          else this.transition('connecting', '数据通道已打开，正在核实实际 TURN 路径')
+          // A missing statistics sample does not disconnect healthy transport or
+          // re-run the adapters' connected callback (which requests state again).
+          else if (this.phase !== 'connected')
+            this.transition('connecting', '数据通道已打开，正在核实实际 TURN 路径')
           return
         }
         this.relayVerificationStartedAt = null
@@ -1493,7 +1657,8 @@ export class RemoteBpRtcSession {
 
   private dispose(reason: string): void {
     this.active = false
-    this.diagnostic.relayVerified = false
+    // Preserve the last observed path as historical evidence, explicitly closed.
+    this.diagnostic.statsStatus = 'closed'
     for (const entry of this.diagnostic.transfers)
       if (entry.status === 'transferring')
         this.finishTransfer(entry.id, reason === 'ASSET_CANCELLED' ? 'cancelled' : 'failed', reason)
