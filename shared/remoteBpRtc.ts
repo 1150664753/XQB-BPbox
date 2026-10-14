@@ -3,7 +3,9 @@ import {
   createRtcDiagnostics,
   iceServerEndpoint,
   type RtcDiagnostics,
-  type AssetTransferDiagnostic
+  type AssetTransferDiagnostic,
+  type ActionTiming,
+  type PreviewTiming
 } from './remoteBpDiagnostics'
 export { getRtcDiagnostics, exportRtcDiagnostics, type RtcDiagnostics } from './remoteBpDiagnostics'
 export type RtcPhase =
@@ -205,6 +207,7 @@ export class RemoteBpRtcSession {
   private episodeStartedAt: number | null = Date.now()
   private roundStartedAt = Date.now()
   private iceConnectedAt: number | null = null
+  private channelClosingAt: number | null = null
   private disconnectedAt: number | null = null
   private readonly timer: number
   relayExpiresAt: number | null = null
@@ -543,6 +546,63 @@ export class RemoteBpRtcSession {
       durationMs: Math.round(durationMs)
     })
     if (this.diagnostic.actionResponses.length > 100) this.diagnostic.actionResponses.shift()
+  }
+  recordActionTiming(actionId: string, kind: string, fields: Partial<ActionTiming>): void {
+    let entry = this.diagnostic.actionTimings.find((item) => item.actionId === actionId)
+    if (!entry) {
+      entry = { actionId, kind, at: Date.now() }
+      this.diagnostic.actionTimings.push(entry)
+      if (this.diagnostic.actionTimings.length > 100) this.diagnostic.actionTimings.shift()
+    }
+    for (const key of [
+      'queueMs',
+      'sendBufferedBytes',
+      'requestBytes',
+      'hostProcessingMs',
+      'responseMs',
+      'networkAndQueueMs',
+      'stateReturnedMs',
+      'stateApplyMs',
+      'uiCommitMs'
+    ] as const) {
+      const value = fields[key]
+      if (typeof value === 'number' && Number.isFinite(value) && value >= 0)
+        entry[key] = Math.round(value * 10) / 10
+    }
+  }
+  recordPreview(value: PreviewTiming): void {
+    const index = this.diagnostic.previews.findIndex((entry) => entry.id === value.id)
+    if (index >= 0) this.diagnostic.previews[index] = value
+    else this.diagnostic.previews.push(value)
+    if (this.diagnostic.previews.length > 100) this.diagnostic.previews.shift()
+  }
+  recordControlMessage(type: string, bytes: number, bufferedBytes: number): void {
+    this.diagnostic.controlMessages.push({ at: Date.now(), type, bytes, bufferedBytes })
+    if (this.diagnostic.controlMessages.length > 200) this.diagnostic.controlMessages.shift()
+  }
+  recordTransferEncoding(id: string, encoding: 'base64-json' | 'binary-v1'): void {
+    const entry = this.diagnostic.transfers.find((t) => t.id === id)
+    if (entry && (encoding === 'binary-v1' || !entry.encoding)) entry.encoding = encoding
+  }
+  private recordClosure(source: string, event: string, cause: string, error?: RTCError): void {
+    this.diagnostic.closures.push({
+      at: Date.now(),
+      source,
+      event,
+      cause,
+      // Never retain browser error.message: it may contain SDP or endpoint credentials.
+      errorDetail:
+        error?.errorDetail && /^[a-z-]{1,64}$/.test(error.errorDetail) ? error.errorDetail : null,
+      sctpCauseCode: typeof error?.sctpCauseCode === 'number' ? error.sctpCauseCode : null,
+      iceState: this.pc.iceConnectionState,
+      connectionState: this.pc.connectionState,
+      dtlsState: this.pc.sctp?.transport.state ?? null,
+      sctpState: this.pc.sctp?.state ?? null,
+      channelState: this.channel?.readyState ?? null,
+      bufferedBytes: this.channel?.bufferedAmount ?? 0,
+      assetBufferedBytes: this.assetChannel?.bufferedAmount ?? 0
+    })
+    if (this.diagnostic.closures.length > 30) this.diagnostic.closures.shift()
   }
   recordError(code: string, reason: string): void {
     this.diagnostic.errorCode = /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : 'RTC_ERROR'
@@ -1367,8 +1427,19 @@ export class RemoteBpRtcSession {
     channel.bufferedAmountLowThreshold = 16 * 1024
     this.log(`DataChannel ${channel.readyState}`)
     for (const event of ['open', 'closing', 'close', 'error']) {
-      channel.addEventListener(event, () => {
+      channel.addEventListener(event, (rawEvent) => {
         if (!this.active || this.channel !== channel) return
+        if (event !== 'open')
+          this.recordClosure(
+            'control-channel',
+            event,
+            this.pc.iceConnectionState === 'failed'
+              ? 'ice-failure'
+              : event === 'error'
+                ? 'sctp-datachannel-error'
+                : 'remote-or-transport-close',
+            (rawEvent as RTCErrorEvent).error
+          )
         this.log(`DataChannel ${event === 'close' ? 'closed' : event}`, {
           ...(event === 'error' ? { reason: 'DATA_CHANNEL_ERROR' } : {})
         })
@@ -1392,6 +1463,7 @@ export class RemoteBpRtcSession {
 
   private installAssetChannel(channel: RTCDataChannel): void {
     this.assetChannel = channel
+    channel.binaryType = 'arraybuffer'
     channel.bufferedAmountLowThreshold = 16 * 1024
     channel.addEventListener('message', (event) => {
       if (!this.active || this.assetChannel !== channel) return
@@ -1399,8 +1471,15 @@ export class RemoteBpRtcSession {
       else this.options.onMessage(event.data, 'assets')
     })
     for (const event of ['open', 'close', 'error'])
-      channel.addEventListener(event, () => {
+      channel.addEventListener(event, (rawEvent) => {
         if (!this.active || this.assetChannel !== channel) return
+        if (event !== 'open')
+          this.recordClosure(
+            'asset-channel',
+            event,
+            'optional-channel-close',
+            (rawEvent as RTCErrorEvent).error
+          )
         this.log(`asset channel ${event}`)
         if (event === 'close') this.options.onAssetChannelClosed?.()
         this.reconcile()
@@ -1449,8 +1528,21 @@ export class RemoteBpRtcSession {
     if (this.diagnostic.dtlsState === 'connected') this.markMilestone('dtls')
     if (this.diagnostic.sctpState === 'connected') this.markMilestone('sctp')
     if (this.channel?.readyState === 'open') this.markMilestone('channel')
-    if (connection === 'closed' || ice === 'closed' || this.channel?.readyState === 'closed') {
-      this.fail('点对点连接或 DataChannel 已关闭')
+    if (
+      connection === 'closed' ||
+      ice === 'closed' ||
+      this.channel?.readyState === 'closed' ||
+      this.channel?.readyState === 'closing'
+    ) {
+      // A closing SCTP stream cannot be reopened by ICE restart. Preserve its error/close
+      // events instead of reporting another connecting phase or destroying it prematurely.
+      if (this.channel?.readyState === 'closing') {
+        this.channelClosingAt ??= now
+        if (now - this.channelClosingAt >= 10_000)
+          this.fail('DataChannel 关闭过程超时', 'DATA_CHANNEL_CLOSE_TIMEOUT')
+        return
+      }
+      this.fail('点对点连接或 DataChannel 已关闭', 'DATA_CHANNEL_CLOSED')
       return
     }
     if (this.relayExpiresAt !== null && now >= this.relayExpiresAt) {
@@ -1644,13 +1736,15 @@ export class RemoteBpRtcSession {
   private fail(reason: string, code?: string): void {
     if (!this.active) return
     if (this.restartInFlight) this.log('ICE Restart failure', { reason })
+    this.recordClosure('session', 'failure', code ?? 'RTC_FAILURE')
     this.dispose('ASSET_NETWORK_INTERRUPTED')
     if (code) this.recordError(code, reason)
     this.transition('failed', reason)
   }
 
-  close(reason = 'ASSET_CANCELLED'): void {
+  close(reason = 'ASSET_CANCELLED', initiator = 'application-close'): void {
     if (!this.active) return
+    this.recordClosure('application', 'close', initiator)
     this.dispose(reason)
     this.transition('closed', null)
   }

@@ -5,7 +5,7 @@ export const MAX_REMOTE_BP_MESSAGE_BYTES = 512 * 1024
 
 export type ValidatedRemoteClientMessage =
   | { type: 'ACTION_REQUEST'; payload: { action: RemoteBpAction } }
-  | { type: 'STATE_REQUEST'; payload: { lastKnownRevision?: number } }
+  | { type: 'STATE_REQUEST'; payload: { lastKnownRevision?: number; capabilities?: string[] } }
   | { type: 'ASSET_REQUEST'; payload: { assetIds: string[] } }
   | { type: 'PING'; payload: { clientTime: string } }
 
@@ -133,7 +133,14 @@ export function parseRemoteClientMessage(raw: string): ValidatedRemoteClientMess
       }
       return {
         type: 'STATE_REQUEST',
-        payload: revision === undefined ? {} : { lastKnownRevision: revision }
+        payload: {
+          ...(revision === undefined ? {} : { lastKnownRevision: revision }),
+          capabilities: Array.isArray(envelope.payload.capabilities)
+            ? envelope.payload.capabilities.filter(
+                (item): item is string => item === 'state-delta-v1' || item === 'asset-binary-v1'
+              )
+            : []
+        }
       }
     }
     case 'ASSET_REQUEST': {

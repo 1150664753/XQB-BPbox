@@ -1,6 +1,6 @@
 /** Bounded AIMD pacing. A high baseline RTT alone does not imply low bandwidth. */
 export class AssetPacer {
-  rate = 128 * 1024
+  rate = 256 * 1024
   private lastSampleAt = 0
   private baselineRtt: number | null = null
   private lastDecreaseAt = -1000
@@ -17,7 +17,7 @@ export class AssetPacer {
     if (route !== null && route !== this.route) {
       this.route = route
       this.baselineRtt = rtt
-      this.rate = Math.min(this.rate, 128 * 1024)
+      this.rate = Math.min(this.rate, 256 * 1024)
       this.lastSampleAt = now
       this.congestedSince = null
     }
@@ -36,7 +36,10 @@ export class AssetPacer {
       if (now - this.congestedSince >= this.stallWindow(rtt)) this.congested(now)
     } else {
       this.congestedSince = null
-      if (now - this.lastDecreaseAt >= 2000) this.rate = Math.min(ceiling, this.rate + 16 * 1024)
+      // Probe headroom quickly on a stable path; persistent buffer/RTT inflation
+      // still reduces the rate and the browser queue remains capped at 128 KiB.
+      if (now - this.lastDecreaseAt >= 2000)
+        this.rate = Math.min(ceiling, this.rate + Math.max(32 * 1024, this.rate * 0.25))
     }
     return this.rate
   }

@@ -7,6 +7,7 @@ export function iceServerEndpoint(value: unknown): string | null {
     : null
 }
 export interface AssetTransferDiagnostic {
+  encoding?: 'base64-json' | 'binary-v1'
   id: string
   direction: 'send' | 'receive'
   startedAt: number
@@ -23,6 +24,29 @@ export interface AssetTransferDiagnostic {
   payloadBytesPerSecond: number | null
   waitMs: { queue: number; buffer: number; control: number; pacing: number }
   receiptSource: 'local' | 'peer' | null
+}
+export interface ActionTiming {
+  actionId: string
+  kind: string
+  at: number
+  queueMs?: number
+  sendBufferedBytes?: number
+  requestBytes?: number
+  hostProcessingMs?: number
+  responseMs?: number
+  networkAndQueueMs?: number
+  stateReturnedMs?: number
+  stateApplyMs?: number
+  uiCommitMs?: number
+}
+export interface PreviewTiming {
+  id: string
+  assetId: string | null
+  at: number
+  uiMs: number
+  imageLoadMs?: number
+  cached: boolean
+  outcome: 'loading' | 'loaded' | 'failed' | 'superseded' | 'no-image'
 }
 export interface CandidatePairDiagnostic {
   at: number
@@ -124,6 +148,24 @@ export interface RtcDiagnostics {
   actionResponseMs: number | null
   applicationPingMs: number | null
   actionResponses: Array<{ at: number; durationMs: number }>
+  actionTimings: ActionTiming[]
+  previews: PreviewTiming[]
+  controlMessages: Array<{ at: number; type: string; bytes: number; bufferedBytes: number }>
+  closures: Array<{
+    at: number
+    source: string
+    event: string
+    cause: string
+    errorDetail: string | null
+    sctpCauseCode: number | null
+    iceState: string
+    connectionState: string
+    dtlsState: string | null
+    sctpState: string | null
+    channelState: string | null
+    bufferedBytes: number
+    assetBufferedBytes: number
+  }>
   transfers: AssetTransferDiagnostic[]
   bytesSent: number | null
   bytesReceived: number | null
@@ -241,6 +283,10 @@ export function createRtcDiagnostics(
     actionResponseMs: null,
     applicationPingMs: null,
     actionResponses: [],
+    actionTimings: [],
+    previews: [],
+    controlMessages: [],
+    closures: [],
     transfers: [],
     bytesSent: null,
     bytesReceived: null,
@@ -297,9 +343,9 @@ export function getRtcDiagnostics(roomId?: string | null): RtcDiagnostics[] {
 export function exportRtcDiagnostics(roomId?: string | null): string {
   return JSON.stringify(
     {
-      schemaVersion: 4,
+      schemaVersion: 5,
       exportedAt: new Date().toISOString(),
-      note: 'Credential-free endpoints only; never peer addresses, SDP, tokens or credentials. relayVerified describes the last observed selected path; statsStatus and relayVerifiedAt identify freshness/closed history. submitted is browser enqueue only; received is complete payload before SHA-256; verified is receiver hash success, receiptSource=peer denotes its acknowledgement. Transfer payload rates exclude base64/protocol overhead; data-channel counters measure browser transmission, not receipt. Missing DataChannel loss is unavailable; sendDiscardRatio is local discards only. Configured TCP fallback is not selected TCP.',
+      note: 'Credential-free endpoints only; never peer addresses, SDP, tokens or credentials. relayVerified describes the last observed selected path; statsStatus and relayVerifiedAt identify freshness/closed history. submitted is browser enqueue only; received is complete payload before SHA-256; verified is receiver hash success, receiptSource=peer denotes its acknowledgement. Transfer payload rates exclude protocol overhead; data-channel counters measure browser transmission, not receipt. Missing DataChannel loss is unavailable; sendDiscardRatio is local discards only. Configured TCP fallback is not selected TCP. Action response/stateReturned/stateApply/uiCommit durations are cumulative from send, queueMs is before send. networkAndQueueMs subtracts host processing from action response and is NOT a one-way latency or pure network RTT. Preview uiMs/imageLoadMs are cumulative from the click when available, otherwise component commit. UI commit is not a physical screen paint. Closures preserve pre-destroy evidence; remote-or-transport-close does not identify a remote user action.',
       connections: getRtcDiagnostics(roomId)
     },
     null,

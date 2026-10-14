@@ -310,6 +310,7 @@ export class RemoteBpHost {
       }
     }
 
+    const processingStarted = performance.now()
     const result = await this.dependencies.dispatcher.dispatch(
       action,
       'remote',
@@ -317,6 +318,7 @@ export class RemoteBpHost {
       this.dependencies.getExecutor(),
       this.state.mapping
     )
+    result.hostProcessingMs = Math.max(0, performance.now() - processingStarted)
     if (peer) {
       await this.dependencies.transport.send(peer.peerId, {
         type: 'ACTION_RESULT',

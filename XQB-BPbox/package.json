@@ -23,7 +23,7 @@
     "release:win": "npm run build && electron-builder --win --publish always",
     "build:mac": "electron-vite build && electron-builder --mac",
     "build:linux": "electron-vite build && electron-builder --linux",
-    "test:webrtc": "node scripts/webrtc-self-check.cjs",
+    "test:webrtc": "node scripts/webrtc-self-check.cjs && node scripts/remote-bp-wire-self-check.cjs",
     "test:remote-images": "node scripts/remote-image-self-check.cjs",
     "test:remote-network": "node scripts/remote-network-self-check.cjs",
     "test:turn-desktop": "node scripts/turn-desktop-self-check.cjs"

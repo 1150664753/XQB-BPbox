@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useLayoutEffect, useState } from "react";
 import { exportRtcDiagnostics } from "../../../shared/remoteBpDiagnostics";
 import { CharacterCard } from "../components/CharacterCard";
 import { ConnectionBadge } from "../components/ConnectionBadge";
@@ -47,6 +47,10 @@ export function BpPage({
   const [path, setPath] = useState("全部命途");
   const [element, setElement] = useState("全部属性");
   const assetSnapshot = useAssetManagerSnapshot(assetManager);
+  useLayoutEffect(() => {
+    if (session.appliedActionId)
+      assetManager.recordActionUi(session.appliedActionId);
+  }, [assetManager, session.appliedActionId]);
   const state = session.bpState;
   const room = session.room;
   if (!state || !room) return null;
@@ -384,6 +388,7 @@ export function BpPage({
 
           <SelectionPanel
             target={selectedItem}
+            previewStartedAt={session.previewStartedAt}
             targetType={selectedTarget?.kind ?? targetType}
             assetManager={assetManager}
             actionLabel={operationLabel(state.currentOperation)}

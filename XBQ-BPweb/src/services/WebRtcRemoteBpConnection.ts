@@ -28,6 +28,15 @@ import type {
 } from "./RemoteBpConnection";
 import { IncomingAssetTransfers } from "./assets/IncomingAssetTransfers";
 import { TypedEventEmitter } from "./TypedEventEmitter";
+import {
+  REMOTE_BP_CAPABILITIES,
+  StateDeltaReceiver,
+  decodeBinaryAssetChunk,
+} from "../../../shared/remoteBpWire";
+import type {
+  ActionTiming,
+  PreviewTiming,
+} from "../../../shared/remoteBpDiagnostics";
 
 interface SignalingEnvelope {
   type: string;
@@ -138,7 +147,13 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
   private hasEverConnected = false;
   private terminalState: "kicked" | "room-closed" | null = null;
   private intentionalClose = false;
-  private actionStartedAt = new Map<string, number>();
+  private actionStartedAt = new Map<
+    string,
+    { at: number; kind: string; revision?: number; stateRecorded?: boolean }
+  >();
+  private lastStateArrival: { revision: number; at: number } | null = null;
+  private stateDelta = new StateDeltaReceiver();
+  private stateResyncPending = false;
 
   constructor(private readonly options: WebRtcRemoteBpConnectionOptions) {}
 
@@ -216,15 +231,54 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
       throw new Error("操作身份与信令服务器确认的身份不一致");
     }
     const startedAt = performance.now();
+    this.actionStartedAt.set(action.actionId, {
+      at: startedAt,
+      kind: action.kind,
+    });
+    this.rtc?.recordActionTiming(action.actionId, action.kind, {
+      sendBufferedBytes: this.dataChannel?.bufferedAmount ?? 0,
+    });
     this.sendData(CLIENT_MESSAGE_TYPES.ACTION_REQUEST, { action });
-    if (!this.actionStartedAt.has(action.actionId))
-      this.actionStartedAt.set(action.actionId, startedAt);
     while (this.actionStartedAt.size > 100)
       this.actionStartedAt.delete(this.actionStartedAt.keys().next().value!);
   }
 
+  recordActionTiming(
+    id: string,
+    kind: string,
+    fields: Partial<ActionTiming>,
+  ): void {
+    this.rtc?.recordActionTiming(id, kind, fields);
+  }
+  recordActionStage(id: string, stage: "stateApplyMs" | "uiCommitMs"): void {
+    const action = this.actionStartedAt.get(id);
+    if (action)
+      this.rtc?.recordActionTiming(id, action.kind, {
+        [stage]: performance.now() - action.at,
+      });
+  }
+  recordPreview(value: PreviewTiming): void {
+    this.rtc?.recordPreview(value);
+  }
+  private recordStateArrival(revision: number): void {
+    this.lastStateArrival = { revision, at: performance.now() };
+    for (const [id, action] of this.actionStartedAt) {
+      if (
+        action.stateRecorded ||
+        action.revision === undefined ||
+        revision < action.revision
+      )
+        continue;
+      action.stateRecorded = true;
+      this.rtc?.recordActionTiming(id, action.kind, {
+        stateReturnedMs: this.lastStateArrival.at - action.at,
+      });
+    }
+  }
+
   async requestState(lastKnownRevision?: number): Promise<void> {
     this.sendData(CLIENT_MESSAGE_TYPES.STATE_REQUEST, {
+      capabilities: REMOTE_BP_CAPABILITIES,
       ...(lastKnownRevision === undefined ? {} : { lastKnownRevision }),
     });
   }
@@ -426,7 +480,7 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
   }
 
   private createPeerConnection(): void {
-    this.closePeer();
+    this.closePeer("peer-replaced");
     if (!this.confirmed) return;
     let rtc: RemoteBpRtcSession | null = null;
     rtc = new RemoteBpRtcSession({
@@ -461,7 +515,7 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
             this.requested &&
             (!this.roomReady || this.socket?.readyState !== WebSocket.OPEN)
           ) {
-            this.closePeer();
+            this.closePeer("signaling-recovery");
             this.ensureRecoveryDeadline();
             this.setConnectionState(
               "reconnecting",
@@ -566,6 +620,26 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
   }
 
   private handleDataMessage(data: unknown, stream = "control"): void {
+    if (stream === "assets" && data instanceof ArrayBuffer) {
+      try {
+        const chunk = decodeBinaryAssetChunk(data);
+        try {
+          if (this.assetStreamTransfers.get(chunk.transferId) !== chunk.assetId)
+            throw new Error("ASSET_TRANSFER_NOT_FOUND");
+          this.incomingAssets.addBinaryChunk(chunk);
+          this.rtc?.advanceTransfer(chunk.transferId, chunk.bytes.byteLength);
+          this.rtc?.recordTransferWireBytes(chunk.transferId, data.byteLength);
+          this.rtc?.recordTransferEncoding(chunk.transferId, "binary-v1");
+        } catch (error) {
+          this.assetStreamTransfers.delete(chunk.transferId);
+          this.incomingAssets.abort(chunk.transferId);
+          this.emitAssetError(chunk.assetId, error, chunk.transferId);
+        }
+      } catch {
+        this.rtc?.recordError("INVALID_ASSET_BINARY", "资源二进制帧无效");
+      }
+      return;
+    }
     if (typeof data !== "string") {
       this.events.emit("error", {
         code: "BINARY_NOT_ALLOWED",
@@ -575,7 +649,36 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
       return;
     }
     try {
-      const message = parseHostMessage(data);
+      if (
+        new TextEncoder().encode(data).byteLength > MAX_REMOTE_BP_MESSAGE_BYTES
+      )
+        throw new Error("MESSAGE_TOO_LARGE");
+      const wire = JSON.parse(data);
+      let sequence: unknown = wire?.payload?.stateSequence;
+      if (wire?.type === "STATE_DELTA_V1") {
+        if (stream !== "control") throw new Error("UNEXPECTED_ASSET_MESSAGE");
+        if (this.stateResyncPending) return;
+        try {
+          const state = this.stateDelta.expand(wire.payload);
+          sequence = wire.payload.sequence;
+          data = JSON.stringify({
+            ...wire,
+            type: "STATE_UPDATE",
+            payload: { state },
+          });
+        } catch (error) {
+          this.stateResyncPending = true;
+          this.rtc?.recordError(
+            "STATE_DELTA_RESYNC",
+            "增量基线无效，正在请求完整状态",
+          );
+          void this.requestState().catch(() => {
+            this.stateResyncPending = false;
+          });
+          return;
+        }
+      }
+      const message = parseHostMessage(data as string);
       if (
         stream === "assets" &&
         !["ASSET_START", "ASSET_CHUNK", "ASSET_COMPLETE"].includes(message.type)
@@ -584,18 +687,58 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
       switch (message.type) {
         case "INITIAL_STATE":
           this.assertRoom(message.payload.state.roomId);
+          this.stateDelta.commit(message.payload.state, sequence);
+          this.stateResyncPending = false;
+          this.recordStateArrival(message.payload.state.revision);
           this.events.emit("bpStateReceived", message.payload.state);
           break;
         case "STATE_UPDATE":
           this.assertRoom(message.payload.state.roomId);
+          this.stateDelta.commit(message.payload.state, sequence);
+          this.recordStateArrival(message.payload.state.revision);
           this.events.emit("bpStateUpdated", message.payload.state);
           break;
         case "ACTION_RESULT":
           {
             const started = this.actionStartedAt.get(message.payload.actionId);
             if (started !== undefined) {
-              this.rtc?.recordActionResponse(performance.now() - started);
-              this.actionStartedAt.delete(message.payload.actionId);
+              const responseMs = performance.now() - started.at;
+              const hostMs = message.payload.hostProcessingMs;
+              this.rtc?.recordActionResponse(responseMs);
+              this.rtc?.recordActionTiming(
+                message.payload.actionId,
+                started.kind,
+                {
+                  responseMs,
+                  ...(typeof hostMs === "number" &&
+                  Number.isFinite(hostMs) &&
+                  hostMs >= 0
+                    ? {
+                        hostProcessingMs: hostMs,
+                        networkAndQueueMs: Math.max(0, responseMs - hostMs),
+                      }
+                    : {}),
+                },
+              );
+              if (message.payload.accepted) {
+                started.revision = message.payload.resultingRevision;
+                if (
+                  this.lastStateArrival &&
+                  this.lastStateArrival.revision >= started.revision
+                ) {
+                  started.stateRecorded = true;
+                  this.rtc?.recordActionTiming(
+                    message.payload.actionId,
+                    started.kind,
+                    {
+                      stateReturnedMs: Math.max(
+                        0,
+                        this.lastStateArrival.at - started.at,
+                      ),
+                    },
+                  );
+                }
+              }
             }
           }
           this.events.emit("actionResult", message.payload);
@@ -612,6 +755,10 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
           );
           try {
             this.incomingAssets.start(message.payload);
+            this.rtc?.recordTransferWireBytes(
+              message.payload.transferId,
+              new TextEncoder().encode(data as string).byteLength,
+            );
             if (stream === "assets")
               this.assetStreamTransfers.set(
                 message.payload.transferId,
@@ -630,6 +777,14 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
         case "ASSET_CHUNK":
           try {
             this.incomingAssets.addChunk(message.payload);
+            this.rtc?.recordTransferEncoding(
+              message.payload.transferId,
+              "base64-json",
+            );
+            this.rtc?.recordTransferWireBytes(
+              message.payload.transferId,
+              new TextEncoder().encode(data as string).byteLength,
+            );
             this.rtc?.advanceTransfer(
               message.payload.transferId,
               Math.floor((message.payload.data.length * 3) / 4) -
@@ -650,6 +805,10 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
           }
           break;
         case "ASSET_COMPLETE":
+          this.rtc?.recordTransferWireBytes(
+            message.payload.transferId,
+            new TextEncoder().encode(data as string).byteLength,
+          );
           this.assetStreamTransfers.delete(message.payload.transferId);
           {
             const epoch = this.assetEpoch;
@@ -730,6 +889,17 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
       throw new Error("远程 BP 消息超过大小限制");
     }
     this.dataChannel.send(raw);
+    this.rtc?.recordControlMessage(
+      type,
+      new TextEncoder().encode(raw).byteLength,
+      this.dataChannel.bufferedAmount,
+    );
+    if (type === CLIENT_MESSAGE_TYPES.ACTION_REQUEST) {
+      const { action } = payload as ClientPayloadMap["ACTION_REQUEST"];
+      this.rtc?.recordActionTiming(action.actionId, action.kind, {
+        requestBytes: new TextEncoder().encode(raw).byteLength,
+      });
+    }
   }
 
   private emitAssetError(
@@ -958,7 +1128,7 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
     this.signalingHeartbeatTimer = null;
   }
 
-  private closePeer(): void {
+  private closePeer(initiator = "client-cleanup"): void {
     this.assetEpoch += 1;
     this.assetStreamTransfers.clear();
     this.incomingAssets.reset();
@@ -966,8 +1136,12 @@ export class WebRtcRemoteBpConnection implements RemoteBpConnection {
     const rtc = this.rtc;
     this.rtc = null;
     this.actionStartedAt.clear();
+    this.lastStateArrival = null;
+    this.stateDelta = new StateDeltaReceiver();
+    this.stateResyncPending = false;
     rtc?.close(
       this.intentionalClose ? "ASSET_CANCELLED" : "ASSET_NETWORK_INTERRUPTED",
+      this.intentionalClose ? "client-intentional-cleanup" : initiator,
     );
   }
 

@@ -7,6 +7,7 @@ import { IndexedDbAssetCache } from '../../XBQ-BPweb/src/services/assets/Indexed
 import { MemoryAssetCache } from '../../XBQ-BPweb/src/services/assets/MemoryAssetCache'
 import { RemoteAssetManager } from '../../XBQ-BPweb/src/services/assets/RemoteAssetManager'
 import RemoteBpNetworkDiagnostics from '../src/renderer/src/components/remoteBp/RemoteBpNetworkDiagnostics'
+import { SelectionPanel } from '../../XBQ-BPweb/src/components/SelectionPanel'
 
 function check(value: unknown, message: string): asserts value {
   if (!value) throw new Error(message)
@@ -80,6 +81,7 @@ async function main() {
     onState: () => {},
     onMessage: (data) => {
       const message = JSON.parse(String(data))
+      ;(transport as any).handleDataMessage(peer, data)
       if (message.type === 'ACTION_REQUEST') {
         peer.controlUntil = Date.now() + 150
         void transport.send('player', {
@@ -108,7 +110,9 @@ async function main() {
     },
     onState: () => {},
     onMessage: (data, stream) => {
-      arrivals.push(`${stream}:${JSON.parse(String(data)).type}`)
+      arrivals.push(
+        `${stream}:${typeof data === 'string' ? JSON.parse(data).type : 'BINARY_CHUNK'}`
+      )
       ;(client as any).handleDataMessage(data, stream)
     }
   })
@@ -141,6 +145,11 @@ async function main() {
     'real RTC/channel handshake failed'
   )
   ;(client as any).snapshot.state = 'connected'
+  await client.requestState()
+  await until(
+    () => (peer as any).capabilities?.has('asset-binary-v1'),
+    'capability negotiation failed'
+  )
   await transport.send('player', {
     type: 'ASSET_MANIFEST',
     payload: {
@@ -180,7 +189,7 @@ async function main() {
   }
   const sending = transfer('one')
   await until(
-    () => arrivals.includes('assets:ASSET_CHUNK'),
+    () => arrivals.includes('assets:BINARY_CHUNK'),
     'dedicated stream did not receive chunks'
   )
   const sentAt = performance.now()
@@ -239,6 +248,12 @@ async function main() {
   checks.push(
     `real Chromium WebRTC, image integrity, action round trip during bulk (${player.getDiagnostic().actionResponseMs} ms), ICE restart continuation, getStats counters`
   )
+  const binaryTransfer = diagnostic.transfers.find((item) => item.id === 'one')!
+  check(
+    binaryTransfer.encoding === 'binary-v1' && binaryTransfer.wireBytes < blob.size * 1.05,
+    'binary transport still has base64 overhead'
+  )
+  checks.push(`binary 300 KiB wire size: ${binaryTransfer.wireBytes} bytes`)
   await Promise.all([transfer('parallel-a'), transfer('parallel-b')])
   await until(
     () =>
@@ -262,6 +277,7 @@ async function main() {
   // Exercise cache lifecycle with production manager and a controlled connection.
   const listeners = new Map<string, Set<(value: any) => void>>()
   const requested: string[][] = []
+  const previews: any[] = []
   const connection = {
     getSnapshot: () => ({ state: 'connected' }),
     on: (name: string, fn: (v: any) => void) => {
@@ -272,7 +288,8 @@ async function main() {
     },
     requestAssets: async (ids: string[]) => {
       requested.push(ids)
-    }
+    },
+    recordPreview: (value: any) => previews.push({ ...value })
   } as any
   const emit = (name: string, value: any) => listeners.get(name)?.forEach((fn) => fn(value))
   const memory = new MemoryAssetCache()
@@ -280,10 +297,12 @@ async function main() {
   const manager = new RemoteAssetManager(connection, memory)
   const manifest = { revision: 5, generatedAt: new Date().toISOString(), assets: [descriptor] }
   emit('assetManifestReceived', manifest)
+  await Promise.all([manager.request([descriptor.assetId]), manager.request([descriptor.assetId])])
   await until(
     () => manager.getState(descriptor.assetId) === 'ready',
     'manager did not reuse cached asset'
   )
+  check(requested.length === 0, 'UI request raced the cache lookup and downloaded cached content')
   const url = manager.getUrl(descriptor.assetId)
   emit('assetManifestReceived', manifest)
   await sleep(20)
@@ -314,6 +333,81 @@ async function main() {
   manager.destroy()
   checks.push(
     'manifest reuse, Blob URL stability, session revision reset and interrupted transfer retry'
+  )
+
+  // The selected text must commit before either image arrives; old async assets
+  // must never replace the latest selection, and revisiting must use its cached URL.
+  const canvas = document.createElement('canvas')
+  canvas.width = canvas.height = 2
+  canvas.getContext('2d')!.fillRect(0, 0, 2, 2)
+  const png = await new Promise<Blob>((resolve) => canvas.toBlob((value) => resolve(value!)))
+  const imageA = {
+    ...descriptor,
+    assetId: 'preview:a',
+    type: 'portrait' as const,
+    hash: await hash(png),
+    size: png.size
+  }
+  const imageB = { ...imageA, assetId: 'preview:b' }
+  const previewManager = new RemoteAssetManager(connection, new MemoryAssetCache())
+  emit('assetManifestReceived', {
+    revision: 1,
+    generatedAt: new Date().toISOString(),
+    assets: [imageA, imageB]
+  })
+  const view = document.createElement('div')
+  document.body.append(view)
+  const previewRoot = createRoot(view)
+  const show = (id: string, name: string) =>
+    previewRoot.render(
+      <SelectionPanel
+        target={{ id, name, portrait: id, path: 'test' } as any}
+        targetType="CHARACTER"
+        assetManager={previewManager}
+        actionLabel="PICK"
+        canConfirm={true}
+        confirmed={false}
+        pending={false}
+        syncingSelection={false}
+        onConfirm={() => {}}
+        previewStartedAt={performance.now()}
+      />
+    )
+  show(imageA.assetId, 'Preview A')
+  await until(() => view.textContent!.includes('Preview A'), 'text blocked on unloaded image A')
+  check(!view.querySelector('img'), 'test expected missing image placeholder')
+  show(imageB.assetId, 'Preview B')
+  await until(() => view.textContent!.includes('Preview B'), 'latest preview blocked on image A')
+  emit('assetReceived', { descriptor: imageB, data: png })
+  await until(
+    () => previews.some((item) => item.assetId === imageB.assetId && item.outcome === 'loaded'),
+    'preview image load metric missing'
+  )
+  const latestUrl = view.querySelector('img')!.src
+  emit('assetReceived', { descriptor: imageA, data: png })
+  await sleep(40)
+  check(
+    view.querySelector('img')!.src === latestUrl && view.textContent!.includes('Preview B'),
+    'old image overwrote latest selection'
+  )
+  const requestCount = requested.length
+  show(imageA.assetId, 'Preview A')
+  await until(
+    () =>
+      view.textContent!.includes('Preview A') &&
+      view.querySelector('img')?.src === previewManager.getUrl(imageA.assetId),
+    'cached selection did not render'
+  )
+  check(requested.length === requestCount, 'repeated preview retransmitted cached image')
+  check(
+    previews.some((item) => item.assetId === imageA.assetId && item.outcome === 'superseded'),
+    'superseded image wait not diagnosed'
+  )
+  previewRoot.unmount()
+  previewManager.destroy()
+  view.remove()
+  checks.push(
+    'preview UI commits before images; latest selection survives out-of-order image arrival; cached revisit sends no request; image/UI timings exported'
   )
 
   const room = {

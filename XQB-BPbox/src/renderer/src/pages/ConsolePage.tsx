@@ -6418,7 +6418,9 @@ function StartBpPanel({
         selectedLightConeIdRef.current = null
         setSelectedCharacterId(character.id)
         setSelectedLightConeId(null)
-        await publishPreviewTarget(character, actorSide)
+        void publishPreviewTarget(character, actorSide).catch(() =>
+          onMessage('error', '预选已更新，但展示窗口同步失败')
+        )
         return { stateChanged: changed, message: '角色选择已更新' }
       }
 
@@ -6429,7 +6431,9 @@ function StartBpPanel({
       selectedLightConeIdRef.current = lightCone.id
       setSelectedCharacterId(null)
       setSelectedLightConeId(lightCone.id)
-      await publishPreviewTarget(lightCone, actorSide)
+      void publishPreviewTarget(lightCone, actorSide).catch(() =>
+        onMessage('error', '预选已更新，但展示窗口同步失败')
+      )
       return { stateChanged: changed, message: '光锥选择已更新' }
     },
     deselectTarget: async (actorSide) => {
@@ -6454,7 +6458,9 @@ function StartBpPanel({
       selectedLightConeIdRef.current = null
       setSelectedCharacterId(null)
       setSelectedLightConeId(null)
-      await publishPreviewTarget(null, actorSide)
+      void publishPreviewTarget(null, actorSide).catch(() =>
+        onMessage('error', '预选已取消，但展示窗口同步失败')
+      )
       return { stateChanged: changed, message: changed ? '选择已取消' : '当前没有选择' }
     },
     confirmTarget: async (target, actorSide) => {

@@ -6,7 +6,7 @@ const root = path.resolve(__dirname, '../..')
 const output = path.join(root, 'XQB-BPbox/.tmp/webrtc-self-check.cjs')
 buildSync({
   stdin: {
-    contents: `export * from './shared/remoteBpRtc'; export * from './shared/remoteBpFlowControl'; export * from './XBQ-BPweb/src/services/assets/IncomingAssetTransfers'; export * from './XQB-BPbox/src/renderer/src/services/remoteBp/WebRtcRemoteHostTransport'; export * from './XBQ-BPweb/src/services/WebRtcRemoteBpConnection';`,
+    contents: `export * from './shared/remoteBpRtc'; export * from './shared/remoteBpFlowControl'; export * from './shared/remoteBpWire'; export * from './XBQ-BPweb/src/services/assets/IncomingAssetTransfers'; export * from './XQB-BPbox/src/renderer/src/services/remoteBp/WebRtcRemoteHostTransport'; export * from './XBQ-BPweb/src/services/WebRtcRemoteBpConnection';`,
     resolveDir: root,
     loader: 'ts'
   },
@@ -24,7 +24,8 @@ const {
   getRtcDiagnostics,
   RTC_TIMING,
   AssetPacer,
-  IncomingAssetTransfers
+  IncomingAssetTransfers,
+  decodeBinaryAssetChunk
 } = require(output)
 
 let now = 0
@@ -316,6 +317,43 @@ async function run(name, test) {
 }
 
 async function main() {
+  await run(
+    'channel close records pre-destroy SCTP/ICE evidence without a false connecting phase',
+    async () => {
+      const { rtc, pc } = session(true, 'channel-close-evidence')
+      await rtc.start()
+      await rtc.receive(
+        'ANSWER',
+        signal(rtc.connectionId, 1, { description: description('answer', 'remote-1') })
+      )
+      pc.network('connected')
+      pc.channel.open()
+      assert.equal(rtc.phase, 'connected')
+      pc.channel.readyState = 'closing'
+      emit(pc.channel, 'closing')
+      assert.equal(rtc.phase, 'connected', 'closing cannot transition back to connecting')
+      pc.channel.readyState = 'closed'
+      emit(pc.channel, 'error', {
+        error: { errorDetail: 'sctp-failure', sctpCauseCode: 12, message: 'SECRET_SDP_PASSWORD' }
+      })
+      const diagnostic = rtc.getDiagnostic()
+      assert.equal(diagnostic.phase, 'failed')
+      const failure = diagnostic.closures.find((item) => item.event === 'error')
+      assert.equal(failure.iceState, 'connected')
+      assert.equal(failure.connectionState, 'connected')
+      assert.equal(failure.errorDetail, 'sctp-failure')
+      assert.equal(failure.sctpCauseCode, 12)
+      assert.ok(!JSON.stringify(diagnostic).includes('SECRET_'))
+      const voluntary = session(true, 'voluntary-close')
+      voluntary.rtc.close('ASSET_CANCELLED', 'host-room-stop')
+      assert.equal(voluntary.rtc.getDiagnostic().closures.at(-1).cause, 'host-room-stop')
+      const stalled = session(true, 'closing-timeout')
+      stalled.pc.channel.readyState = 'closing'
+      emit(stalled.pc.channel, 'closing')
+      await tick(11000)
+      assert.equal(stalled.rtc.getDiagnostic().errorCode, 'DATA_CHANNEL_CLOSE_TIMEOUT')
+    }
+  )
   await run(
     'room relay policy reaches Web PC, is retained on rejoin, and errors never become P2P',
     async () => {
@@ -790,8 +828,12 @@ async function main() {
         let wireEnd = now
         assets.maxBuffered = 0
         assets.send = (raw) => {
-          const bytes = Buffer.byteLength(raw)
-          assets.sent.push(JSON.parse(raw))
+          const bytes = typeof raw === 'string' ? Buffer.byteLength(raw) : raw.byteLength
+          assets.sent.push(
+            typeof raw === 'string'
+              ? JSON.parse(raw)
+              : { type: 'BINARY_CHUNK', payload: decodeBinaryAssetChunk(raw) }
+          )
           assets.bufferedAmount += bytes
           assets.maxBuffered = Math.max(assets.maxBuffered, assets.bufferedAmount)
           wireEnd = Math.max(wireEnd, now) + (bytes / (128 * 1024)) * 1000
@@ -810,7 +852,8 @@ async function main() {
           rtc,
           assetTransfers: new Map(),
           nextAssetAt: 0,
-          controlUntil: 0
+          controlUntil: 0,
+          capabilities: side === 'first' ? new Set(['asset-binary-v1']) : new Set()
         }
         transport.peers.set(side, peer)
         peers.push({ ...peer, pc, assets })
@@ -827,7 +870,13 @@ async function main() {
           const bytes = Math.min(11520, size - total)
           await transport.send(peer.peerId, {
             type: 'ASSET_CHUNK',
-            payload: { transferId: id, data: Buffer.alloc(bytes).toString('base64') }
+            payload: {
+              transferId: id,
+              assetId: 'asset',
+              index: Math.floor(total / 11520),
+              total: Math.ceil(size / 11520),
+              data: Buffer.alloc(bytes).toString('base64')
+            }
           })
           total += bytes
         }
@@ -852,7 +901,11 @@ async function main() {
       for (const peer of peers) {
         const entry = peer.rtc.getDiagnostic().transfers[0]
         assert.ok(entry.durationMs < 8000, `300 KiB queued in ${entry.durationMs} ms`)
-        assert.ok(entry.wireBytes > entry.totalBytes, 'JSON/base64 overhead is explicitly measured')
+        assert.ok(entry.wireBytes > entry.totalBytes, 'wire overhead is explicitly measured')
+        if (peer.side === 'first') {
+          assert.equal(entry.encoding, 'binary-v1')
+          assert.ok(entry.wireBytes < entry.totalBytes * 1.05)
+        } else assert.equal(entry.encoding, 'base64-json')
         assert.ok(peer.rtc.getDiagnostic().assetRateLimit > 16 * 1024)
         assert.ok(peer.assets.maxBuffered <= 144 * 1024, 'bounded image queue throughout transfer')
         assert.equal(entry.status, 'submitted', 'send is not receipt')
@@ -885,7 +938,7 @@ async function main() {
       await tiny
       assert.ok(peers[0].rtc.getDiagnostic().transfers.at(-1).durationMs < 1000)
       realInfo(
-        `MODEL two 300 KiB submissions: ${peers.map((p) => p.rtc.getDiagnostic().transfers[0].submittedAt - started).join('/')} ms (synthetic 500 ms RTT, 128 KiB/s per link; not WTN)`
+        `MODEL binary/legacy 300 KiB submissions: ${peers.map((p) => p.rtc.getDiagnostic().transfers[0].submittedAt - started).join('/')} ms (synthetic 500 ms RTT, 128 KiB/s per link; not WTN)`
       )
     }
   )

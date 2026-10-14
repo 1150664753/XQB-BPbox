@@ -11,6 +11,11 @@ if (!process.versions.electron) {
     platform: 'browser',
     format: 'iife',
     jsx: 'automatic',
+    // The cross-project UI test must use a single React instance.
+    alias: {
+      react: path.dirname(require.resolve('react/package.json')),
+      'react-dom': path.dirname(require.resolve('react-dom/package.json'))
+    },
     outfile: path.join(directory, 'test.js'),
     logLevel: 'silent'
   })

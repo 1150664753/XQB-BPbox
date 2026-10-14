@@ -38,6 +38,8 @@ export interface RemoteBpSessionSnapshot {
   pendingActionKind: BpAction["kind"] | null;
   /** Local selection intent only; the host still owns bpState and final results. */
   selectionPreview: BpActionTarget | null | undefined;
+  appliedActionId: string | null;
+  previewStartedAt: number | null;
 }
 
 type StoreListener = () => void;
@@ -68,6 +70,8 @@ export class RemoteBpSessionStore {
       pendingActionId: null,
       pendingActionKind: null,
       selectionPreview: undefined,
+      appliedActionId: null,
+      previewStartedAt: null,
     };
     this.unsubscribers = [
       connection.on("connectionStateChanged", (next) => {
@@ -192,6 +196,7 @@ export class RemoteBpSessionStore {
     const isSelected = selected?.kind === kind && selected.id === targetId;
     this.patch({
       selectionPreview: isSelected ? null : { kind, id: targetId },
+      previewStartedAt: performance.now(),
     });
     await this.flushSelection();
   }
@@ -251,6 +256,12 @@ export class RemoteBpSessionStore {
 
   private async submitAction(action: BpAction): Promise<void> {
     if (this.inFlight) return;
+    this.connection.recordActionTiming?.(action.actionId, action.kind, {
+      queueMs:
+        action.kind === "CONFIRM" || this.snapshot.previewStartedAt === null
+          ? 0
+          : Math.max(0, performance.now() - this.snapshot.previewStartedAt),
+    });
     this.inFlight = { action, result: null };
     this.actionTimer = setTimeout(() => {
       if (this.inFlight?.action.actionId !== action.actionId) return;
@@ -294,6 +305,7 @@ export class RemoteBpSessionStore {
   private acceptState(state: RemoteBpState): void {
     if (
       this.snapshot.bpState &&
+      state.sessionId === this.snapshot.bpState.sessionId &&
       state.revision < this.snapshot.bpState.revision
     ) {
       return;
@@ -309,7 +321,9 @@ export class RemoteBpSessionStore {
         previous.status !== state.status);
     this.patch({
       bpState: state,
-      ...(contextChanged ? { selectionPreview: undefined } : {}),
+      ...(contextChanged
+        ? { selectionPreview: undefined, previewStartedAt: null }
+        : {}),
     });
     if (!this.canSelect()) this.patch({ selectionPreview: undefined });
     this.finishAcknowledgedAction();
@@ -346,8 +360,10 @@ export class RemoteBpSessionStore {
       (this.snapshot.bpState?.revision ?? -1) < result.resultingRevision
     )
       return;
+    this.connection.recordActionStage?.(result.actionId, "stateApplyMs");
     this.clearPending(false);
     this.patch({
+      appliedActionId: result.actionId,
       feedback: {
         tone: "success",
         message: result.message,
@@ -405,7 +421,9 @@ export class RemoteBpSessionStore {
     this.patch({
       pendingActionId: null,
       pendingActionKind: null,
-      ...(clearPreview ? { selectionPreview: undefined } : {}),
+      ...(clearPreview
+        ? { selectionPreview: undefined, previewStartedAt: null }
+        : {}),
     });
   }
 

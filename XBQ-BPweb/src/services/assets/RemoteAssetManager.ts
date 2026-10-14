@@ -6,6 +6,7 @@ import type {
 } from "../../types/assets";
 import type { RemoteBpConnection } from "../RemoteBpConnection";
 import type { AssetCache } from "./AssetCache";
+import type { PreviewTiming } from "../../../../shared/remoteBpDiagnostics";
 
 export interface AssetManagerSnapshot {
   manifest: AssetManifest | null;
@@ -23,6 +24,7 @@ export class RemoteAssetManager {
   private readonly installedDescriptors = new Map<string, AssetManifestEntry>();
   private readonly states = new Map<string, AssetLoadState>();
   private readonly pendingRequestIds = new Set<string>();
+  private readonly cacheLookups = new Map<string, Promise<void>>();
   private readonly unsubscribers: Array<() => void>;
   private manifest: AssetManifest | null = null;
   private requestFlushScheduled = false;
@@ -104,6 +106,12 @@ export class RemoteAssetManager {
   getState(assetId: string | null | undefined): AssetLoadState {
     return assetId ? (this.states.get(assetId) ?? "idle") : "missing";
   }
+  recordActionUi(id: string): void {
+    this.connection.recordActionStage?.(id, "uiCommitMs");
+  }
+  recordPreview(value: PreviewTiming): void {
+    this.connection.recordPreview?.(value);
+  }
 
   async request(assetIds: string[]): Promise<void> {
     assetIds.forEach((id) => this.wanted.add(id));
@@ -120,10 +128,11 @@ export class RemoteAssetManager {
     if (missing.length === 0) return;
     missing.forEach((assetId) => {
       this.states.set(assetId, "loading");
-      this.pendingRequestIds.add(assetId);
     });
     this.publish();
-    this.scheduleRequestFlush();
+    // Resolve only wanted assets, once per hash. The old manifest loop scanned
+    // every cached image serially while UI requests could race it onto the wire.
+    await Promise.all(missing.map((id) => this.resolveCachedOrRequest(id)));
   }
 
   destroy(): void {
@@ -139,6 +148,11 @@ export class RemoteAssetManager {
 
   private async applyManifest(manifest: AssetManifest): Promise<void> {
     if (this.manifest && manifest.revision < this.manifest.revision) return;
+    if (
+      this.manifest?.revision === manifest.revision &&
+      JSON.stringify(this.manifest.assets) === JSON.stringify(manifest.assets)
+    )
+      return;
     const applyToken = ++this.manifestApplyToken;
     const previousDescriptors = new Map(
       (this.manifest?.assets ?? [...this.installedDescriptors.values()]).map(
@@ -188,16 +202,6 @@ export class RemoteAssetManager {
         this.urls.has(descriptor.assetId)
       )
         continue;
-      {
-        const cached = await this.cache
-          .get(descriptor.assetId, descriptor.hash)
-          .catch(() => null);
-        if (applyToken !== this.manifestApplyToken || this.destroyed) return;
-        if (cached && this.matchesManifest(cached.descriptor)) {
-          this.installUrl(cached);
-          continue;
-        }
-      }
       const installed = this.installedDescriptors.get(descriptor.assetId);
       if (
         this.states.get(descriptor.assetId) === "ready" &&
@@ -207,7 +211,10 @@ export class RemoteAssetManager {
         continue;
       if (
         !descriptorChanged &&
-        this.states.get(descriptor.assetId) === "loading"
+        this.states.get(descriptor.assetId) === "loading" &&
+        ![...this.cacheLookups.keys()].some((key) =>
+          key.endsWith(`:${descriptor.assetId}:${descriptor.hash}`),
+        )
       )
         continue;
       this.states.set(descriptor.assetId, "idle");
@@ -215,6 +222,43 @@ export class RemoteAssetManager {
 
     this.publish();
     void this.request([...this.wanted]);
+  }
+
+  private async resolveCachedOrRequest(id: string): Promise<void> {
+    const descriptor = this.manifest?.assets.find(
+      (item) => item.assetId === id,
+    );
+    if (!descriptor) return;
+    const key = `${this.manifestApplyToken}:${id}:${descriptor.hash}`;
+    const existing = this.cacheLookups.get(key);
+    if (existing) return existing;
+    const epoch = this.manifestApplyToken;
+    const lookup = (async () => {
+      const cached = await this.cache
+        .get(id, descriptor.hash)
+        .catch(() => null);
+      if (
+        this.destroyed ||
+        epoch !== this.manifestApplyToken ||
+        !this.matchesManifest(descriptor)
+      )
+        return;
+      // A validated network result may have arrived while IndexedDB was reading.
+      if (this.states.get(id) === "ready" && this.urls.has(id)) return;
+      if (cached && this.matchesManifest(cached.descriptor))
+        this.installUrl(cached);
+      else if (this.states.get(id) !== "ready") {
+        this.pendingRequestIds.add(id);
+        this.scheduleRequestFlush();
+      }
+      this.publish();
+    })();
+    this.cacheLookups.set(key, lookup);
+    try {
+      await lookup;
+    } finally {
+      this.cacheLookups.delete(key);
+    }
   }
 
   private async acceptAsset(asset: ReceivedAsset): Promise<void> {
@@ -246,6 +290,7 @@ export class RemoteAssetManager {
 
   private installUrl(asset: ReceivedAsset): void {
     this.installedDescriptors.set(asset.descriptor.assetId, asset.descriptor);
+    this.pendingRequestIds.delete(asset.descriptor.assetId);
     const previousUrl = this.urls.get(asset.descriptor.assetId);
     if (previousUrl) URL.revokeObjectURL(previousUrl);
     this.urls.set(asset.descriptor.assetId, URL.createObjectURL(asset.data));

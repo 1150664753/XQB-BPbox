@@ -6,6 +6,7 @@ import {
   type BufferedRtcSignal
 } from '../../../../../../shared/remoteBpRtc'
 import { AssetPacer } from '../../../../../../shared/remoteBpFlowControl'
+import { StateDeltaSender, encodeBinaryAssetChunk } from '../../../../../../shared/remoteBpWire'
 import type {
   RemoteHostIncomingMessage,
   RemoteHostOutgoingMessage,
@@ -36,6 +37,9 @@ interface HostPeerSession extends RemoteHostPeer {
   nextAssetAt: number
   controlUntil: number
   pacer?: AssetPacer
+  capabilities?: Set<string>
+  stateDelta?: StateDeltaSender
+  actions?: Map<string, { kind: string; at: number }>
 }
 
 export interface WebRtcRemoteHostTransportOptions {
@@ -103,7 +107,7 @@ function parseSignalingMessage(raw: string): SignalingEnvelope {
   }
 }
 
-function encodeHostMessage(message: RemoteHostOutgoingMessage): string {
+function encodeHostMessage(message: { type: string; payload: unknown }): string {
   const raw = JSON.stringify({
     type: message.type,
     protocolVersion: REMOTE_BP_PROTOCOL_VERSION,
@@ -243,7 +247,7 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
         // The signaling socket may have closed between the readyState check and send.
       }
     }
-    for (const side of [...this.peers.keys()]) this.removePeer(side, true)
+    for (const side of [...this.peers.keys()]) this.removePeer(side, true, 'host-room-stop')
     this.socket?.close(1000, 'host stopped')
     this.socket = null
     this.roomId = null
@@ -269,7 +273,7 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
     if (this.roomReady && this.socket?.readyState === WebSocket.OPEN) {
       this.sendSignal('KICK_PEER', { side: sideToRole(side) })
     } else this.pendingKicks.add(side)
-    this.removePeer(side, true)
+    this.removePeer(side, true, 'host-kick')
   }
 
   async send(peerId: string, message: RemoteHostOutgoingMessage): Promise<void> {
@@ -280,13 +284,43 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
         throw new Error(this.stopping || !peer ? 'ASSET_CANCELLED' : 'ASSET_NETWORK_INTERRUPTED')
       return
     }
-    const raw = encodeHostMessage(message)
+    let outgoing: { type: string; payload: unknown } = message
+    if (
+      (message.type === 'INITIAL_STATE' || message.type === 'STATE_UPDATE') &&
+      peer.capabilities?.has('state-delta-v1')
+    ) {
+      const encoded = (peer.stateDelta ??= new StateDeltaSender()).encode(
+        message.type,
+        message.payload.state
+      )
+      if (!encoded) return
+      outgoing = encoded
+    }
+    const raw = encodeHostMessage(outgoing)
     // Only bulk data waits for drain. Controls retain their own call order and can
     // pass a paused image transfer; already-buffered image data is kept small.
     if (!['ASSET_START', 'ASSET_CHUNK', 'ASSET_COMPLETE'].includes(message.type)) {
+      if (message.type === 'ACTION_RESULT') {
+        const action = peer.actions?.get(message.payload.actionId)
+        if (action)
+          peer.rtc.recordActionTiming(message.payload.actionId, action.kind, {
+            hostProcessingMs: message.payload.hostProcessingMs ?? Date.now() - action.at
+          })
+        peer.actions?.delete(message.payload.actionId)
+      }
       if (message.type === 'ACTION_RESULT' || message.type === 'STATE_UPDATE')
         peer.controlUntil = Date.now() + 75
-      channel.send(raw)
+      try {
+        channel.send(raw)
+      } catch (error) {
+        peer.stateDelta = undefined // Next successful state send must establish a new full baseline.
+        throw error
+      }
+      peer.rtc.recordControlMessage(
+        outgoing.type,
+        new TextEncoder().encode(raw).byteLength,
+        channel.bufferedAmount
+      )
       return
     }
     const previous = this.sendQueues.get(peerId) ?? Promise.resolve()
@@ -450,7 +484,8 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
           : undefined
         this.joinedPeers.set(side, { peerId: sessionId, ...(displayName ? { displayName } : {}) })
         const existing = this.peers.get(side)
-        if (existing && existing.peerId !== sessionId) this.removePeer(side, true)
+        if (existing && existing.peerId !== sessionId)
+          this.removePeer(side, true, 'peer-session-replaced')
         await this.flushEarlySignals(side)
         return
       }
@@ -462,7 +497,7 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
         this.earlySignals = this.earlySignals.filter(
           (signal) => signal.payload.fromSessionId !== message.payload.sessionId
         )
-        this.removePeer(side, true)
+        this.removePeer(side, true, 'signaling-peer-left')
         return
       }
       case 'PEER_READY':
@@ -633,7 +668,7 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
     displayName?: string,
     playerForceRelay = false
   ): Promise<void> {
-    this.removePeer(side, false)
+    this.removePeer(side, false, 'peer-connection-replaced')
     let rtc: RemoteBpRtcSession | null = null
     rtc = new RemoteBpRtcSession({
       connectionId,
@@ -792,6 +827,19 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
       switch (message.type) {
         case 'ACTION_REQUEST':
           peer.controlUntil = Date.now() + 150
+          peer.actions ??= new Map()
+          peer.actions.set(message.payload.action.actionId, {
+            kind: message.payload.action.kind,
+            at: Date.now()
+          })
+          if (peer.actions.size > 100) peer.actions.delete(peer.actions.keys().next().value!)
+          peer.rtc.recordActionTiming(
+            message.payload.action.actionId,
+            message.payload.action.kind,
+            {
+              requestBytes: new TextEncoder().encode(data).byteLength
+            }
+          )
           incoming = {
             type: 'ACTION_REQUEST',
             peerId: peer.peerId,
@@ -800,6 +848,7 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
           }
           break
         case 'STATE_REQUEST':
+          peer.capabilities = new Set(message.payload.capabilities ?? [])
           incoming = {
             type: 'STATE_REQUEST',
             peerId: peer.peerId,
@@ -849,14 +898,18 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
     this.reconnectingListeners.forEach((listener) => listener(peer))
   }
 
-  private removePeer(side: 'first' | 'second', notify: boolean): void {
+  private removePeer(
+    side: 'first' | 'second',
+    notify: boolean,
+    initiator = 'host-peer-remove'
+  ): void {
     const peer = this.peers.get(side)
     if (!peer) return
     this.peers.delete(side)
     for (const request of this.turnRequests.values()) if (request.peer === peer) request.finish()
     if (notify) this.announceDisconnectedRemoved(peer)
     this.sendQueues.delete(peer.peerId)
-    peer.rtc.close()
+    peer.rtc.close('ASSET_CANCELLED', initiator)
   }
 
   private announceDisconnectedRemoved(peer: HostPeerSession): void {
@@ -918,8 +971,17 @@ export class WebRtcRemoteHostTransport implements RemoteHostTransport {
             : 'ASSET_NETWORK_INTERRUPTED'
         )
       const rate = pacer.rate
-      channel.send(raw)
-      const wireBytes = new TextEncoder().encode(raw).byteLength
+      const frame =
+        message.type === 'ASSET_CHUNK' &&
+        channel === peer.rtc.assetChannel &&
+        peer.capabilities?.has('asset-binary-v1')
+          ? encodeBinaryAssetChunk(message.payload)
+          : raw
+      if (typeof frame === 'string') channel.send(frame)
+      else channel.send(frame)
+      const wireBytes =
+        typeof frame === 'string' ? new TextEncoder().encode(frame).byteLength : frame.byteLength
+      peer.rtc.recordTransferEncoding(id, typeof frame === 'string' ? 'base64-json' : 'binary-v1')
       // Carry scheduling credit (at most one 16 KiB frame) across drain waits.
       // Do not add a fresh fixed delay to every tiny START/COMPLETE frame.
       peer.nextAssetAt =

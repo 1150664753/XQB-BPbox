@@ -168,6 +168,7 @@ export type BpActionResultCode =
   | 'SESSION_NOT_READY'
 
 export interface RemoteBpActionResult {
+  hostProcessingMs?: number
   actionId: string
   accepted: boolean
   code: BpActionResultCode

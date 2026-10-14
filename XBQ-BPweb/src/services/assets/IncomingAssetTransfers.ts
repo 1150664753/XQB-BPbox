@@ -131,6 +131,12 @@ export class IncomingAssetTransfers {
   }
 
   addChunk(payload: AssetChunkPayload): void {
+    this.addBinaryChunk({ ...payload, bytes: decodeBase64(payload.data) });
+  }
+
+  addBinaryChunk(
+    payload: Omit<AssetChunkPayload, "data"> & { bytes: Uint8Array },
+  ): void {
     const transfer = this.transfers.get(payload.transferId);
     if (!transfer || transfer.descriptor.assetId !== payload.assetId) {
       throw new Error("ASSET_TRANSFER_NOT_FOUND");
@@ -146,7 +152,7 @@ export class IncomingAssetTransfers {
       throw new Error("ASSET_CHUNK_DUPLICATE");
     }
 
-    const chunk = decodeBase64(payload.data);
+    const chunk = payload.bytes;
     const expectedLength =
       payload.index === transfer.totalChunks - 1
         ? transfer.descriptor.size - transfer.chunkSize * payload.index

@@ -36,7 +36,10 @@ export interface ClientPayloadMap {
     lastKnownRevision?: number;
   };
   [CLIENT_MESSAGE_TYPES.ACTION_REQUEST]: { action: BpAction };
-  [CLIENT_MESSAGE_TYPES.STATE_REQUEST]: { lastKnownRevision?: number };
+  [CLIENT_MESSAGE_TYPES.STATE_REQUEST]: {
+    lastKnownRevision?: number;
+    capabilities?: string[];
+  };
   [CLIENT_MESSAGE_TYPES.ASSET_REQUEST]: { assetIds: string[] };
   [CLIENT_MESSAGE_TYPES.PING]: { clientTime: string };
 }

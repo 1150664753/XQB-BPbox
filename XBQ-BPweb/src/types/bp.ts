@@ -185,6 +185,7 @@ export type BpAction =
     });
 
 export interface BpActionResult {
+  hostProcessingMs?: number;
   actionId: string;
   accepted: boolean;
   code:
