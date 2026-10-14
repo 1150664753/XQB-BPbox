@@ -74,3 +74,13 @@ SELECT 请求仅包含目标种类/id、revision、stepIndex、actionId 等小�
 6. 短暂断网后恢复，观察 ICE restart 和完整重建两种情况；确认 relay 策略、能力协商和状态基线恢复，缓存仍可复用，未完成资源可重试。
 
 主要修改位置：`shared/remoteBpWire.ts`、`remoteBpFlowControl.ts`、`remoteBpRtc.ts`、`remoteBpDiagnostics.ts`；BPbox 的 `WebRtcRemoteHostTransport.ts`、`ConsolePage.tsx`、`shared/remoteBp/{host,types,validation}.ts`；网页的 `WebRtcRemoteBpConnection.ts`、`RemoteBpConnection.ts`、`IncomingAssetTransfers.ts`、`RemoteAssetManager.ts`、`RemoteBpSessionStore.ts`、`SelectionPanel.tsx`、`BpPage.tsx` 与消息类型；对应自检脚本和 npm 测试入口。
+
+## 补充修复：BP 结果／语音时间轴缺少预选历史
+
+`ConsolePage.tsx` 的 `publishPreviewTarget` 原来仅在 `bpMode === 'live'` 时写入 `previewRecords`，而新建 BP 默认使用手动回放模式。手动模式下远程 SELECT 可以更新选择和网络状态，但没有保存预选记录，导致 BP 结果及语音时间轴都没有历史候选。已用原代码执行实际 remote executor 回调复现此缺陷。该限制在网络优化前的 `a9601d1` 中已经存在；上次优化的验证遗漏了结果持久化链路。尚未取得用户此次缺失历史的 BP 结果文件，不能据此断言当时一定处于手动模式。
+
+现在将历史记录与展示模式分开：手动、直播模式均记录已接受的 BAN/PICK 预选，展示窗口是否显示实时预选仍由直播模式决定。记录在通知展示窗口前同步写入，不等待图片或 IPC 回执；重复 SELECT 去重、取消/确选结束记录、额外点击阻塞及已结束步骤的限制保留。没有改动网络协议、TURN 配置或正式确选校验。
+
+`test:voice-timeline` 增加 10 个场景（总计 27 个），执行生产代码的 SELECT/DESELECT/CONFIRM、结果构造/JSON 序列化/归一化/重新载入和时间轴候选卡片渲染，覆盖两种模式、连续 A→B→A、重复预选、角色/光锥、未返回及失败的展示 IPC。原代码在手动模式首次 SELECT 的历史断言处失败，修复后全部通过；`test:remote-bp` 和 BPbox 完整构建（含 TypeScript 检查）也通过。
+
+复测时请使用更新后的 BPbox，新建 BP 后在网页依次预选 A、B、A，确选并保存结果；检查结果 JSON 的 `previewRecords` 和对应步骤的语音时间轴候选卡片。手动、直播模式各测一次。已经保存且没有 `previewRecords` 的旧结果无法仅凭最终确选还原真实预选历史；网络诊断 `previews` 与保存的 BP 历史是不同数据。

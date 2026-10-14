@@ -6342,7 +6342,6 @@ function StartBpPanel({
       const currentRuntime = runtimeRef.current
       const step = currentRuntime.currentStep
       const previewSelection =
-        bpMode === 'live' &&
         !liveWaitingExtraClick &&
         target &&
         step &&
@@ -6351,16 +6350,16 @@ function StartBpPanel({
           : null
       const nextRuntime = {
         ...currentRuntime,
-        previewSelection,
-        previewRecords:
-          bpMode === 'live' && step
-            ? recordPreviewSelection(
-                currentRuntime.previewRecords,
-                step,
-                previewSelection,
-                createBpActionId()
-              )
-            : currentRuntime.previewRecords
+        // Playback mode controls the display overlay, not the saved selection history.
+        previewSelection: bpMode === 'live' ? previewSelection : null,
+        previewRecords: step
+          ? recordPreviewSelection(
+              currentRuntime.previewRecords,
+              step,
+              previewSelection,
+              createBpActionId()
+            )
+          : currentRuntime.previewRecords
       }
       runtimeRef.current = nextRuntime
       setRuntime(nextRuntime)

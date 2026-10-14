@@ -40,14 +40,18 @@ function functionsFrom(file, names, globals = {}) {
   const panel = ast.statements.find(
     (node) =>
       ts.isFunctionDeclaration(node) &&
-      ['VoiceTimelinePanel', 'DisplayPage'].includes(node.name?.text)
+      ['VoiceTimelinePanel', 'DisplayPage', 'StartBpPanel'].includes(node.name?.text)
   )
   const callbacks = (panel?.body?.statements ?? []).filter(
     (node) =>
-      ts.isVariableStatement(node) &&
-      node.declarationList.declarations.some((declaration) =>
-        names.includes(declaration.name.getText(ast))
-      )
+      (ts.isVariableStatement(node) &&
+        node.declarationList.declarations.some((declaration) =>
+          names.includes(declaration.name.getText(ast))
+        )) ||
+      (names.includes('remoteExecutorRef') &&
+        ts.isExpressionStatement(node) &&
+        ts.isBinaryExpression(node.expression) &&
+        node.expression.left.getText(ast) === 'remoteExecutorRef.current')
   )
   const code =
     [...declarations, ...callbacks].map((node) => node.getText(ast)).join('\n') +
@@ -591,4 +595,178 @@ check('Complete history stays available when UI shows only two main cards', () =
   for (let i = 39; i >= 0; i--) remaining = core.removeTimelinePoint(remaining, `long-${i}`)
   assert.equal(remaining.length, 0)
 })
-console.log(`Voice timeline self-check passed (${checks} scenarios).`)
+async function checkPreviewPersistence() {
+  const consoleFile = 'src/renderer/src/pages/ConsolePage.tsx'
+  const runtimeFunctions = functionsFrom(consoleFile, ['createRuntime'])
+  for (const mode of ['manual', 'live']) {
+    const runtimeRef = { current: runtimeFunctions.createRuntime(flow) }
+    const notifications = []
+    let releaseDisplay
+    const pendingDisplay = new Promise((resolve) => {
+      releaseDisplay = resolve
+    })
+    let displayPending = true
+    let displayFails = false
+    let waitingExtraClick = false
+    const callbacks = functionsFrom(
+      consoleFile,
+      [
+        'syncRuntime',
+        'commitTarget',
+        'publishPreviewTarget',
+        'remoteExecutorRef',
+        'buildBpResultPayload',
+        'createRuntimeFromResult'
+      ],
+      {
+        useCallback: (callback) => callback,
+        useRef: (current) => ({ current }),
+        crypto: require('node:crypto').webcrypto,
+        bpMode: mode,
+        bpFlow: flow,
+        bpFlowRef: { current: flow },
+        runtimeRef,
+        charactersRef: { current: [selection.target, { ...selection.target, id: 11 }] },
+        lightConesRef: { current: [actions[2].target] },
+        selectedCharacterIdRef: { current: null },
+        selectedLightConeIdRef: { current: null },
+        pairedSelectionRef: { current: { star: null, rail: null } },
+        pairedConfirmationsRef: { current: { star: false, rail: false } },
+        usedCharacterIds: new Set(),
+        usedLightConeIds: new Set(),
+        get liveWaitingExtraClick() {
+          return waitingExtraClick
+        },
+        blockPendingExtraClick: () => waitingExtraClick,
+        setRuntime: () => {},
+        setSelectedCharacterId: () => {},
+        setSelectedLightConeId: () => {},
+        setPairedSelection: () => {},
+        setPairedConfirmations: () => {},
+        onMessage: (...args) => notifications.push(args),
+        window: {
+          bpAPI: {
+            bp: {
+              sendStateToDisplay: () => {
+                if (displayFails) return Promise.reject(new Error('display unavailable'))
+                return displayPending ? pendingDisplay : Promise.resolve()
+              }
+            }
+          }
+        }
+      }
+    )
+    const executor = callbacks.remoteExecutorRef.current
+    const select = async (id) => {
+      let timeout
+      try {
+        return await Promise.race([
+          executor.selectTarget({ kind: 'CHARACTER', id: String(id) }, 'star'),
+          new Promise((_, reject) => {
+            timeout = setTimeout(() => reject(new Error('SELECT blocked on display IPC')), 1000)
+          })
+        ])
+      } finally {
+        clearTimeout(timeout)
+      }
+    }
+    // The actual remote executor must finish while display IPC is still unresolved.
+    await select(10)
+    check(`${mode}: SELECT records history synchronously without awaiting display IPC`, () => {
+      assert.equal(runtimeRef.current.previewRecords?.length, 1)
+      assert.equal(
+        runtimeRef.current.previewSelection?.target.id ?? null,
+        mode === 'live' ? 10 : null
+      )
+      assert.equal(runtimeRef.current.actions.length, 0)
+    })
+    await select(10)
+    await select(11)
+    await executor.deselectTarget('star')
+    await select(10)
+    check(
+      `${mode}: rapid selections, duplicate SELECT and DESELECT preserve ordered history`,
+      () => {
+        assert.deepEqual(
+          plain(runtimeRef.current.previewRecords).map((r) => r.selection.target.id),
+          [10, 11, 10]
+        )
+        assert.ok(runtimeRef.current.previewRecords.slice(0, 2).every((r) => r.duration > 0))
+        assert.equal(runtimeRef.current.previewRecords[2].duration, undefined)
+      }
+    )
+    displayPending = false
+    releaseDisplay()
+    assert.equal(
+      (await executor.confirmTarget({ kind: 'CHARACTER', id: '10' }, 'star')).stateChanged,
+      true
+    )
+    const saved = results.normalizeResult(
+      plain(callbacks.buildBpResultPayload(runtimeRef.current, flow, `${mode} previews`)),
+      mode
+    )
+    check(`${mode}: CONFIRM → JSON save/load → timeline retains preview candidates`, () => {
+      assert.equal(saved.actions.length, 1)
+      assert.equal(saved.actions[0].targetId, 10)
+      assert.equal(saved.previewRecords.length, 3)
+      assert.ok(saved.previewRecords.every((r) => r.duration > 0))
+      assert.deepEqual(
+        core.previewCandidatesForStep(saved.previewRecords, 1).map((r) => r.selection.target.id),
+        [10, 11]
+      )
+      const loaded = callbacks.createRuntimeFromResult(saved, flow).runtime
+      assert.deepEqual(plain(loaded.previewRecords), plain(saved.previewRecords))
+      const cards = functionsFrom(
+        'src/renderer/src/pages/VoiceTimelinePanel.tsx',
+        ['renderPreviewCards'],
+        {
+          React: require('react'),
+          previewRecords: saved.previewRecords,
+          insertPreview: () => {}
+        }
+      ).renderPreviewCards(1)
+      assert.equal(
+        cards.props.children.length,
+        2,
+        'saved previews must render as timeline candidate cards'
+      )
+    })
+    // Test the same path for light cones, and prove a failed display IPC cannot erase history.
+    runtimeRef.current = { ...runtimeRef.current, currentStep: flow.steps[2], stepCursor: 2 }
+    displayFails = true
+    await executor.selectTarget({ kind: 'LIGHT_CONE', id: '3' }, 'star')
+    await Promise.resolve()
+    check(`${mode}: light-cone history survives display IPC failure`, () => {
+      const last = runtimeRef.current.previewRecords.at(-1)
+      assert.equal(last.stepIndex, 3)
+      assert.equal(last.selection.target.name, 'C')
+      assert.ok(notifications.some(([kind]) => kind === 'error'))
+      const result = callbacks.buildBpResultPayload(
+        runtimeRef.current,
+        flow,
+        'save before confirmation'
+      )
+      assert.equal(result.previewRecords.at(-1).selection.target.id, 3)
+      assert.ok(result.previewRecords.at(-1).duration > 0)
+    })
+    displayFails = false
+    const count = runtimeRef.current.previewRecords.length
+    waitingExtraClick = true
+    await callbacks.publishPreviewTarget(selection.target, 'star')
+    waitingExtraClick = false
+    runtimeRef.current = { ...runtimeRef.current, currentStep: null }
+    await callbacks.publishPreviewTarget(selection.target, 'star')
+    check(`${mode}: blocked or completed steps cannot create preview history`, () => {
+      assert.equal(runtimeRef.current.previewRecords.length, count)
+      assert.equal(runtimeRef.current.previewSelection, null)
+    })
+  }
+}
+checkPreviewPersistence()
+  .then(() => {
+    console.log(`Voice timeline self-check passed (${checks} scenarios).`)
+  })
+  .catch((error) => {
+    console.error(error)
+    process.exitCode = 1
+  })
