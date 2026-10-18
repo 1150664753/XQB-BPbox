@@ -1,6 +1,8 @@
 import { app } from 'electron'
 
-import { ensureProjectDirectories } from './assets'
+import { ensureProjectDirectories, getProjectRootPath } from './assets'
+import { recoverTransaction } from './teamSync/localProfile'
+import { registerTeamSyncIpc } from './ipc/teamSync'
 import { registerAssetIpc } from './ipc/assets'
 import { registerBpIpc } from './ipc/bp'
 import { registerCharacterIpc } from './ipc/characters'
@@ -20,6 +22,7 @@ app.setName('XQB-BPBox')
 registerAssetProtocolScheme()
 
 function registerIpcHandlers(): void {
+  registerTeamSyncIpc()
   registerAssetIpc()
   registerCharacterIpc()
   registerLightConeIpc()
@@ -62,6 +65,7 @@ app.whenReady().then(() => {
 
   registerAssetProtocol()
   ensureProjectDirectories()
+  recoverTransaction(getProjectRootPath())
   startProjectFileWatchers()
   registerIpcHandlers()
 

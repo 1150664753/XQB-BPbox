@@ -1,12 +1,15 @@
 {
   "name": "xqb-bpbox",
   "productName": "XQB-BPBox",
-  "version": "1.2.5",
+  "version": "1.2.6",
   "description": "An Electron application with React and TypeScript",
   "main": "./out/main/index.js",
   "author": "example.com",
   "homepage": "https://electron-vite.org",
   "scripts": {
+    "migrate:resource-paths": "node scripts/migrate-resource-paths.cjs",
+    "test:resource-paths": "node scripts/resource-paths-self-check.cjs",
+    "test:team-sync": "node scripts/team-sync-self-check.cjs && node scripts/team-sync-github-check.cjs && node scripts/team-sync-upload-check.cjs && node scripts/team-sync-paths-check.cjs && node scripts/team-sync-initialize-check.cjs && node scripts/team-sync-electron-check.cjs && node scripts/team-sync-renderer-check.cjs",
     "format": "prettier --write .",
     "lint": "eslint --cache .",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",

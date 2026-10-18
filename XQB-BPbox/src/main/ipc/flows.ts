@@ -6,12 +6,17 @@ import {
   readdirSync,
   renameSync,
   statSync,
-  unlinkSync,
-  writeFileSync
+  unlinkSync
 } from 'node:fs'
 import { basename, isAbsolute, join } from 'node:path'
 
-import { getConfigPath, sanitizeFileSegment } from '../assets'
+import {
+  getConfigPath,
+  sanitizeFileSegment,
+  resolveConfigReference,
+  writeResourceDocument,
+  hydrateResourceDocument
+} from '../assets'
 import { notifyProjectFilesChanged } from '../projectFileWatchers'
 import type { FlowConfig, FlowListItem, SavedFileResult } from '../../shared/types'
 
@@ -29,7 +34,9 @@ function normalizeFlowFileName(name: string): string {
 }
 
 function resolveFlowPath(fileName: string): string {
-  return isAbsolute(fileName) ? fileName : join(flowsDir(), normalizeFlowFileName(fileName))
+  return isAbsolute(fileName) || /[\\/]/.test(fileName)
+    ? resolveConfigReference(fileName, 'config/bp')
+    : join(flowsDir(), normalizeFlowFileName(fileName))
 }
 
 function readFlowFile(filePath: string): FlowConfig {
@@ -39,7 +46,7 @@ function readFlowFile(filePath: string): FlowConfig {
     throw new Error('BP 流程 JSON 格式不正确')
   }
 
-  return parsed
+  return hydrateResourceDocument(parsed)
 }
 
 export function registerFlowIpc(): void {
@@ -80,7 +87,7 @@ export function registerFlowIpc(): void {
     ensureFlowsDir()
     const fileName = normalizeFlowFileName(config.name)
     const filePath = join(flowsDir(), fileName)
-    writeFileSync(filePath, `${JSON.stringify(config, null, 2)}\n`, 'utf-8')
+    writeResourceDocument(filePath, config)
     notifyProjectFilesChanged(['flows'])
 
     return {
@@ -153,7 +160,7 @@ export function registerFlowIpc(): void {
     if (oldPath !== nextPath) {
       renameSync(oldPath, nextPath)
     }
-    writeFileSync(nextPath, `${JSON.stringify(renamedFlow, null, 2)}\n`, 'utf-8')
+    writeResourceDocument(nextPath, renamedFlow)
     notifyProjectFilesChanged(['flows'])
 
     return {

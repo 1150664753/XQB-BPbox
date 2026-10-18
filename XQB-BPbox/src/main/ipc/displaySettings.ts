@@ -5,8 +5,7 @@ import {
   readdirSync,
   renameSync,
   statSync,
-  unlinkSync,
-  writeFileSync
+  unlinkSync
 } from 'node:fs'
 import { basename, isAbsolute, join } from 'node:path'
 
@@ -15,7 +14,8 @@ import {
   isExternalFilePath,
   prepareAssetValue,
   sanitizeFileSegment,
-  storedPathToFileUrl
+  storedPathToFileUrl,
+  writeResourceDocument
 } from '../assets'
 import { notifyProjectFilesChanged } from '../projectFileWatchers'
 import { sendToAllWindows } from '../windows'
@@ -966,8 +966,8 @@ function writeSettings(settings: DisplaySettings, fileName?: string): DisplaySet
     }
   }
 
-  writeFileSync(filePath, `${JSON.stringify(storedSettings, null, 2)}\n`, 'utf-8')
-  return normalized
+  const portable = writeResourceDocument(filePath, storedSettings)
+  return withDisplayAsset(portable as DisplaySettings, false)
 }
 
 function listSettings(): DisplaySettingsListItem[] {

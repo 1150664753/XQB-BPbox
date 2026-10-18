@@ -1,16 +1,14 @@
 import { ipcMain, shell } from 'electron'
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  statSync,
-  unlinkSync,
-  writeFileSync
-} from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import { basename, isAbsolute, join } from 'node:path'
 
-import { getResultsPath, sanitizeFileSegment } from '../assets'
+import {
+  getResultsPath,
+  sanitizeFileSegment,
+  resolveConfigReference,
+  writeResourceDocument,
+  hydrateResourceDocument
+} from '../assets'
 import { notifyProjectFilesChanged } from '../projectFileWatchers'
 import {
   createDisplayWindow,
@@ -41,6 +39,14 @@ let latestRuntimeState: BpRuntimeState | null = null
 let latestPreviewState: BpRuntimeState | null = null
 let latestVoiceTimelinePlayback: VoiceTimelinePlayback | null = null
 
+export function getTeamResourceBusyReason(): string | null {
+  if (getDisplayWindowStatus() || getPreviewWindowStatus())
+    return '展示或预览窗口正在使用资源，请关闭窗口后应用'
+  if (latestRuntimeState?.status === 'running') return 'BP 正在进行，请完成或清空本局后应用'
+  if (latestVoiceTimelinePlayback?.playing) return '配音轴正在播放，请停止后应用'
+  return null
+}
+
 function resultsDir(): string {
   return getResultsPath('bp')
 }
@@ -55,7 +61,9 @@ function normalizeResultFileName(name: string): string {
 }
 
 function resolveResultPath(fileName: string): string {
-  return isAbsolute(fileName) ? fileName : join(resultsDir(), normalizeResultFileName(fileName))
+  return isAbsolute(fileName) || /[\\/]/.test(fileName)
+    ? resolveConfigReference(fileName, 'results/bp')
+    : join(resultsDir(), normalizeResultFileName(fileName))
 }
 
 function optionalString(value: unknown): string | null {
@@ -94,7 +102,7 @@ function normalizeResult(result: Partial<BpResult>, fallbackName: string): BpRes
 function readResultFile(filePath: string): BpResult {
   const parsed = JSON.parse(readFileSync(filePath, 'utf-8')) as Partial<BpResult>
   const fallbackName = basename(filePath, '.json')
-  return normalizeResult(parsed, fallbackName)
+  return hydrateResourceDocument(normalizeResult(parsed, fallbackName))
 }
 
 export function registerBpIpc(): void {
@@ -233,7 +241,7 @@ export function registerBpIpc(): void {
         : join(resultsDir(), `${sanitizeFileSegment(name)}-${createdAt.replace(/[:.]/g, '-')}.json`)
       const normalizedResult = normalizeResult({ ...result, name, createdAt }, name)
 
-      writeFileSync(filePath, `${JSON.stringify(normalizedResult, null, 2)}\n`, 'utf-8')
+      writeResourceDocument(filePath, normalizedResult)
       notifyProjectFilesChanged(['bpResults'])
 
       return {
@@ -283,7 +291,7 @@ export function registerBpIpc(): void {
         throw new Error(`已存在同名 BP 结果：${nextFileName}`)
       }
 
-      writeFileSync(nextPath, `${JSON.stringify(renamedResult, null, 2)}\n`, 'utf-8')
+      writeResourceDocument(nextPath, renamedResult)
       if (oldPath !== nextPath) {
         unlinkSync(oldPath)
       }

@@ -13,6 +13,8 @@ files:
   - '!assets/**'
   - '!assets.zip'
   - '!.tmp/**'
+  - '!.team-sync/**'
+  - '!.resource-path-backups/**'
   - '!scripts/**'
 asarUnpack:
   - resources/**

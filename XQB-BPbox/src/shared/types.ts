@@ -174,6 +174,7 @@ export interface LightConePayload {
 }
 
 export interface LightCone extends LightConePayload {
+  sync_id?: string
   id: number
   small_image: string | null
   large_image: string | null
@@ -529,6 +530,8 @@ export interface VoiceTimelineClickPoint {
   targetId?: number | null
   targetName?: string | null
   iconPath?: string | null
+  /** Runtime-only URL, regenerated from iconPath and never persisted. */
+  iconUrl?: string | null
   relatedDelayChangeId?: string | null
   relatedDelayChangeName?: string | null
   label?: string | null

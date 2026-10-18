@@ -1,11 +1,4 @@
-import {
-  copyFileSync,
-  existsSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync
-} from 'node:fs'
+import { copyFileSync, existsSync, readFileSync } from 'node:fs'
 
 import type {
   Character,
@@ -27,7 +20,8 @@ import {
   getConfigPath,
   normalizeStoredPath,
   scanLocalAssets,
-  storedPathExists
+  storedPathExists,
+  writeResourceDocument
 } from '../assets'
 import { listCharacters } from './characters'
 
@@ -541,7 +535,7 @@ function backupFile(filePath: string, label: string): string | null {
   return backupPath
 }
 
-function writeTableRows(rows: CharacterResourceTableRow[]): void {
+function writeTableRows(rows: CharacterResourceTableRow[]): CharacterResourceTableRow[] {
   ensureProjectDirectories()
 
   const normalizedRows = normalizeAndMergeRows(rows)
@@ -551,21 +545,7 @@ function writeTableRows(rows: CharacterResourceTableRow[]): void {
     rows: normalizedRows
   }
   const targetPath = resourceTablePath()
-  const tempPath = `${targetPath}.tmp-${Date.now()}`
-
-  writeFileSync(tempPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf-8')
-
-  try {
-    renameSync(tempPath, targetPath)
-  } catch (error) {
-    if (existsSync(targetPath)) {
-      unlinkSync(targetPath)
-      renameSync(tempPath, targetPath)
-      return
-    }
-
-    throw error
-  }
+  return normalizeAndMergeRows(writeResourceDocument(targetPath, payload).rows)
 }
 
 function parseTableFile(warnings: string[]): CharacterResourceTableRow[] | null {
@@ -683,6 +663,6 @@ export function saveCharacterResourceTable(
     return row
   })
 
-  writeTableRows(normalizedRows)
-  return tableResult(normalizedRows, 'table', [])
+  const saved = writeTableRows(normalizedRows)
+  return tableResult(saved, 'table', [])
 }

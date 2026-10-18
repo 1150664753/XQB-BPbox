@@ -54,6 +54,7 @@ import { createRemoteHostTransport } from '../services/remoteBp/createRemoteHost
 import { resolvedSlotGroupCounts } from '../components/display/slotGroups'
 import UpdateStatusBar from '../components/UpdateStatusBar'
 import VoiceTimelinePanel from './VoiceTimelinePanel'
+import TeamResourcesPanel from './TeamResourcesPanel'
 import {
   normalizeDisplayAudioVolumePercent,
   type DisplayAudioVolumeField
@@ -78,6 +79,7 @@ import {
 } from '../../../shared/remoteBp'
 
 type ConsoleView =
+  | 'teamResources'
   | 'characters'
   | 'lightCones'
   | 'flows'
@@ -106,12 +108,14 @@ const displayStageHeight = 1080
 const roleIcon = new URL('../../../../assets/icons/icon-role.png', import.meta.url).href
 const lightConeIcon = new URL('../../../../assets/icons/icon-lightcone.png', import.meta.url).href
 const flowIcon = new URL('../../../../assets/icons/icon-flow.png', import.meta.url).href
+const teamIcon = new URL('../../../../assets/icons/icon-team.png', import.meta.url).href
 const uiIcon = new URL('../../../../assets/icons/icon-ui.png', import.meta.url).href
 const bpIcon = new URL('../../../../assets/icons/icon-bp.png', import.meta.url).href
 const voiceTimelineIcon = new URL('../../../../assets/icons/icon-timeline.png', import.meta.url)
   .href
 
 const navItems: Array<{ key: ConsoleView; label: string; icon: string }> = [
+  { key: 'teamResources', label: '团队资源', icon: teamIcon },
   { key: 'characters', label: '角色管理', icon: roleIcon },
   { key: 'lightCones', label: '光锥管理', icon: lightConeIcon },
   { key: 'flows', label: 'BP流程配置', icon: flowIcon },
@@ -4077,7 +4081,7 @@ function DisplaySettingsPanel({
     setSettings(nextSettingsWithFallback)
 
     if (nextSettings.triggerFlowFile) {
-      setSelectedDisplayFlowFile(nextSettings.triggerFlowFile)
+      setSelectedDisplayFlowFile(nextSettings.triggerFlowFile.split(/[\\/]/).at(-1) ?? '')
       window.bpAPI.flows
         .load(nextSettings.triggerFlowFile)
         .then((flow) => {
@@ -7431,6 +7435,14 @@ function ConsolePage(): React.JSX.Element {
 
       <aside className="side-panel">
         <div className="product-title">XQB-BPBox</div>
+        {activeView === 'teamResources' ? (
+          <div className="side-note">
+            <strong>团队资源</strong>
+            <span>发布本地修改</span>
+            <span>获取远程更新</span>
+            <span>按 Profile 对象选择同步</span>
+          </div>
+        ) : null}
         {activeView === 'flows' ? (
           <SideFileList
             title={''}
@@ -7514,6 +7526,7 @@ function ConsolePage(): React.JSX.Element {
       </aside>
 
       <main className="workbench">
+        {activeView === 'teamResources' ? <TeamResourcesPanel /> : null}
         {activeView === 'characters' ? (
           <CharacterManager onMessage={report} sidebarHost={characterSidebarHost} />
         ) : null}

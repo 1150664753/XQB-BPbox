@@ -544,6 +544,21 @@ function isLightConeTarget(value: unknown): value is LightCone {
   )
 }
 
+function timelineTargetIconPath(action: BpActionRecord): string | null {
+  const target = action.target ?? action.starTarget ?? action.railTarget
+  if (isLightConeTarget(target)) return target.small_image || target.large_image || null
+  if (isCharacterTarget(target)) return target.avatar_small_image || null
+  const value = action.targetImage
+  if (!value) return null
+  try {
+    return value.startsWith('xqb-asset://local/')
+      ? decodeURIComponent(value.slice('xqb-asset://local/'.length))
+      : value
+  } catch {
+    return null
+  }
+}
+
 function timelineTargetIconUrl(action: BpActionRecord): string | null {
   if (isLightConeTarget(action.target)) {
     return (
@@ -1017,7 +1032,7 @@ function VoiceTimelinePanel({
     }
     const aliases = stepAlias(selectedResult.actions)
     return selectedResult.actions.map((action, index) => {
-      const iconPath = timelineTargetIconUrl(action)
+      const iconPath = timelineTargetIconPath(action)
       return {
         id: `${index + 1}-${action.stepIndex}-${action.action}-${action.targetId}`,
         stepIndex: action.stepIndex,
@@ -1028,7 +1043,7 @@ function VoiceTimelinePanel({
         targetId: action.targetId ?? null,
         targetName: action.targetName ?? '',
         iconPath,
-        iconUrl: iconPath,
+        iconUrl: timelineTargetIconUrl(action),
         note:
           action.action === 'protect' || action.action === 'borrow'
             ? action.targetName
@@ -1434,7 +1449,8 @@ function VoiceTimelinePanel({
       targetType: isLightConeTarget(target) ? 'lightCone' : 'character',
       targetId: target.id,
       targetName: isLightConeTarget(target) ? target.name : target.chinese_name,
-      iconPath: isLightConeTarget(target) ? target.small_image_url : target.avatar_small_image_url,
+      iconPath: isLightConeTarget(target) ? target.small_image : target.avatar_small_image,
+      iconUrl: isLightConeTarget(target) ? target.small_image_url : target.avatar_small_image_url,
       previewRecord: record
     })
   }
@@ -1630,7 +1646,7 @@ function VoiceTimelinePanel({
           <label>
             BP 流程
             <select
-              value={timeline.bpFlowConfigFile}
+              value={fileName(timeline.bpFlowConfigFile)}
               onChange={(event) => {
                 const file = event.target.value
                 const flow = flowList.find((item) => item.fileName === file)
@@ -1652,7 +1668,7 @@ function VoiceTimelinePanel({
           <label>
             BP 结果
             <select
-              value={timeline.bpResultFile}
+              value={fileName(timeline.bpResultFile)}
               onChange={(event) =>
                 pickResult(event.target.value).catch((error: unknown) =>
                   onMessage('error', error instanceof Error ? error.message : String(error))
@@ -1744,9 +1760,9 @@ function VoiceTimelinePanel({
                     setPendingPointDragId(point.id)
                   }}
                 >
-                  {(point.type === 'preview' ? point.iconPath : template?.iconUrl) ? (
+                  {(point.type === 'preview' ? point.iconUrl : template?.iconUrl) ? (
                     <img
-                      src={(point.type === 'preview' ? point.iconPath : template?.iconUrl) ?? ''}
+                      src={(point.type === 'preview' ? point.iconUrl : template?.iconUrl) ?? ''}
                       alt=""
                     />
                   ) : null}

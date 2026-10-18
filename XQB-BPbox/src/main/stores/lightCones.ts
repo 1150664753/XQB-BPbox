@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 
 import type {
   LightCone,
@@ -11,7 +12,8 @@ import {
   getConfigPath,
   prepareAssetValue,
   storedPathExists,
-  storedPathToFileUrl
+  storedPathToFileUrl,
+  writeResourceDocument
 } from '../assets'
 
 type StoredLightCone = Omit<
@@ -54,6 +56,7 @@ function normalizeStoredLightCone(value: unknown, index: number): StoredLightCon
   const id = Math.max(1, Math.floor(Number(raw.id) || index + 1))
 
   return {
+    ...raw,
     id,
     name: stringOrEmpty(raw.name),
     path: stringOrEmpty(raw.path),
@@ -78,7 +81,7 @@ function readLightConeStore(): StoredLightCone[] {
 
 function writeLightConeStore(lightCones: StoredLightCone[]): void {
   ensureProjectDirectories()
-  writeFileSync(lightConeStorePath(), `${JSON.stringify(lightCones, null, 2)}\n`, 'utf-8')
+  writeResourceDocument(lightConeStorePath(), lightCones)
 }
 
 function mapLightCone(lightCone: StoredLightCone): LightCone {
@@ -139,6 +142,7 @@ export function createLightCone(payload: LightConePayload): LightCone {
   const lightCones = readLightConeStore()
   const timestamp = nowIso()
   const lightCone: StoredLightCone = {
+    sync_id: randomUUID(),
     id: nextLightConeId(lightCones),
     name: payload.name.trim(),
     path: payload.path.trim(),

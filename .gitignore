@@ -61,3 +61,6 @@ Thumbs.db
 /XQB-BPbox/**/*.7z
 /XQB-BPbox/**/*.rar
 /XQB-BPbox/**/*.mov
+.team-sync/
+.resource-path-backups/
+assets/team-sync/

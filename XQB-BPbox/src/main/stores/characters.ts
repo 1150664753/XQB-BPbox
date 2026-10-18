@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 
 import type {
   Character,
@@ -15,7 +16,8 @@ import {
   normalizeStoredPath,
   prepareAssetValue,
   storedPathExists,
-  storedPathToFileUrl
+  storedPathToFileUrl,
+  writeResourceDocument
 } from '../assets'
 
 type StoredCharacter = Omit<
@@ -140,7 +142,7 @@ function readCharacterStore(): StoredCharacter[] {
 
 function writeCharacterStore(characters: StoredCharacter[]): void {
   ensureProjectDirectories()
-  writeFileSync(characterStorePath(), `${JSON.stringify(characters, null, 2)}\n`, 'utf-8')
+  writeResourceDocument(characterStorePath(), characters)
 }
 
 function mapCharacter(character: StoredCharacter): Character {
@@ -299,6 +301,7 @@ export function createCharacter(payload: CharacterPayload): Character {
   const timestamp = nowIso()
   const assets = prepareCharacterAssets(payload)
   const character: StoredCharacter = {
+    sync_id: randomUUID(),
     id: nextCharacterId(characters),
     code: stringOrEmpty(payload.code),
     english_name: payload.english_name.trim(),

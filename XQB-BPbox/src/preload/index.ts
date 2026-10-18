@@ -4,6 +4,29 @@ import type { BpAPI } from './types'
 import type { ProjectFileChangeEvent } from '../shared/types'
 
 const bpAPI: BpAPI = {
+  teamSync: {
+    settings: () => ipcRenderer.invoke('team-sync:settings'),
+    configure: (repository) => ipcRenderer.invoke('team-sync:configure', repository),
+    authorize: () => ipcRenderer.invoke('team-sync:authorize'),
+    pollAuthorization: () => ipcRenderer.invoke('team-sync:poll-authorization'),
+    logout: () => ipcRenderer.invoke('team-sync:logout'),
+    inspect: (profileId) => ipcRenderer.invoke('team-sync:inspect', profileId),
+    initialize: (request) => ipcRenderer.invoke('team-sync:initialize', request),
+    preview: (token, id, side, field) =>
+      ipcRenderer.invoke('team-sync:preview', token, id, side, field),
+    sync: (request) => ipcRenderer.invoke('team-sync:sync', request),
+    cancel: (profileId, operationId) =>
+      ipcRenderer.invoke('team-sync:cancel', profileId, operationId),
+    onProgress: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, progress): void => callback(progress)
+      ipcRenderer.on('team-sync:progress', listener)
+      return () => ipcRenderer.removeListener('team-sync:progress', listener)
+    },
+    applyPending: (profileId) => ipcRenderer.invoke('team-sync:apply-pending', profileId),
+    discardPending: (profileId) => ipcRenderer.invoke('team-sync:discard-pending', profileId),
+    importResource: (profileId, token, id, field, target) =>
+      ipcRenderer.invoke('team-sync:import-resource', profileId, token, id, field, target)
+  },
   turnAuth: {
     status: () => ipcRenderer.invoke('turn-auth:status'),
     authorize: (password) => ipcRenderer.invoke('turn-auth:authorize', password),

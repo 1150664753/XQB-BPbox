@@ -29,6 +29,7 @@ import type { UpdateState } from '../shared/updater'
 import type { AssetManifest, AssetManifestEntry, RemoteAssetBinary } from '../shared/remoteBp'
 
 export interface BpAPI {
+  teamSync: import('../shared/teamSync').TeamSyncAPI
   turnAuth: import('../shared/turnAuth').TurnAuthAPI
   updater: {
     getState: () => Promise<UpdateState>

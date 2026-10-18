@@ -1,13 +1,5 @@
 import { ipcMain, shell } from 'electron'
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  statSync,
-  unlinkSync,
-  writeFileSync
-} from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import { basename, isAbsolute, join } from 'node:path'
 
 import {
@@ -15,7 +7,9 @@ import {
   normalizeStoredPath,
   sanitizeFileSegment,
   storedPathExists,
-  storedPathToFileUrl
+  storedPathToFileUrl,
+  writeResourceDocument,
+  hydrateResourceDocument
 } from '../assets'
 import { notifyProjectFilesChanged } from '../projectFileWatchers'
 import { normalizePreviewRecords, withPointSequences } from '../../shared/voiceTimeline'
@@ -162,7 +156,7 @@ function normalizeVoiceTimeline(
 function readVoiceTimelineFile(filePath: string): VoiceTimelineConfig {
   const parsed = JSON.parse(readFileSync(filePath, 'utf-8')) as Partial<VoiceTimelineConfig>
   const fallbackName = basename(filePath, '.json')
-  return normalizeVoiceTimeline(parsed, fallbackName)
+  return hydrateResourceDocument(normalizeVoiceTimeline(parsed, fallbackName))
 }
 
 export function registerVoiceTimelineIpc(): void {
@@ -227,7 +221,7 @@ export function registerVoiceTimelineIpc(): void {
         updatedAt: new Date().toISOString()
       }
 
-      writeFileSync(filePath, `${JSON.stringify(saved, null, 2)}\n`, 'utf-8')
+      writeResourceDocument(filePath, saved)
       notifyProjectFilesChanged(['voiceTimelines'])
 
       return {
@@ -279,7 +273,7 @@ export function registerVoiceTimelineIpc(): void {
         name: trimmedName,
         updatedAt: new Date().toISOString()
       }
-      writeFileSync(nextPath, `${JSON.stringify(renamed, null, 2)}\n`, 'utf-8')
+      writeResourceDocument(nextPath, renamed)
 
       if (oldPath !== nextPath) {
         unlinkSync(oldPath)

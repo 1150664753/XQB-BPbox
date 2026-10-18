@@ -1,6 +1,20 @@
 import { app } from 'electron'
 import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs'
-import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
+import { dirname, extname, isAbsolute, join, resolve } from 'node:path'
+import { readFileSync } from 'node:fs'
+import {
+  decodeResourcePath,
+  importDirectory,
+  isWithin,
+  relativeResourcePath,
+  ResourcePathPlan,
+  resourceUrlFields
+} from './resourcePaths'
+import {
+  backupResourceConfig,
+  pathBackupDirectory,
+  writeResourceJsonAtomic
+} from './resourceMigration'
 
 import type { ImportedAssetResult, LocalAssetFile, LocalAssetKind } from '../shared/types'
 
@@ -10,11 +24,6 @@ export const assetProtocol = 'xqb-asset'
 const imageExtensions = new Set(['.apng', '.avif', '.gif', '.jpg', '.jpeg', '.png', '.webp'])
 const audioExtensions = new Set(['.aac', '.flac', '.m4a', '.mp3', '.ogg', '.wav'])
 const videoExtensions = new Set(['.mkv', '.mov', '.mp4', '.webm'])
-
-function pathIsInside(rootPath: string, targetPath: string): boolean {
-  const nextRelative = relative(rootPath, targetPath)
-  return nextRelative === '' || (!nextRelative.startsWith('..') && !isAbsolute(nextRelative))
-}
 
 export function getProjectRootPath(): string {
   const overrideRoot = process.env.XQB_BP_ROOT?.trim()
@@ -45,9 +54,8 @@ export function getResultsPath(...parts: string[]): string {
   return getProjectPath('results', ...parts)
 }
 
-function getLegacyProjectPath(...parts: string[]): string {
-  const legacyRoot = app.isPackaged ? dirname(app.getPath('exe')) : app.getPath('userData')
-  return join(legacyRoot, ...parts)
+export function getLegacyResourceRoots(): string[] {
+  return [app.isPackaged ? dirname(app.getPath('exe')) : app.getPath('userData')]
 }
 
 export function ensureProjectDirectories(): void {
@@ -87,14 +95,7 @@ export function normalizeStoredPath(value: string): string {
 }
 
 export function toStoredPath(filePath: string): string {
-  const resolvedPath = resolve(filePath)
-  const rootPath = getProjectRootPath()
-
-  if (pathIsInside(rootPath, resolvedPath)) {
-    return normalizeStoredPath(relative(rootPath, resolvedPath))
-  }
-
-  return normalizeStoredPath(resolvedPath)
+  return relativeResourcePath(getProjectRootPath(), filePath)
 }
 
 export function resolveStoredPath(storedPath: string | null | undefined): string | null {
@@ -102,16 +103,20 @@ export function resolveStoredPath(storedPath: string | null | undefined): string
     return null
   }
 
-  if (isAbsolute(storedPath)) {
-    return storedPath
+  let decoded: string
+  try {
+    decoded = decodeResourcePath(storedPath)
+  } catch {
+    return null
   }
-
-  const projectPath = getProjectPath(...storedPath.split(/[\\/]/))
+  if (isAbsolute(decoded)) return decoded // Unresolved legacy references remain usable until imported.
+  const projectPath = resolve(getProjectRootPath(), decoded)
+  if (!isWithin(getProjectRootPath(), projectPath)) return null
   if (existsSync(projectPath)) {
     return projectPath
   }
 
-  const legacyPath = getLegacyProjectPath(...storedPath.split(/[\\/]/))
+  const legacyPath = join(getLegacyResourceRoots()[0], decoded)
   return existsSync(legacyPath) ? legacyPath : projectPath
 }
 
@@ -125,7 +130,16 @@ export function storedPathToFileUrl(storedPath: string | null | undefined): stri
     return null
   }
 
-  return `${assetProtocol}://local/${encodeURIComponent(normalizeStoredPath(storedPath))}`
+  try {
+    const decoded = decodeResourcePath(storedPath)
+    const path =
+      isAbsolute(decoded) && isWithin(getProjectRootPath(), decoded)
+        ? toStoredPath(decoded)
+        : decoded
+    return `${assetProtocol}://local/${encodeURIComponent(path)}`
+  } catch {
+    return null
+  }
 }
 
 export function isExternalFilePath(value: string | null | undefined): boolean {
@@ -133,7 +147,11 @@ export function isExternalFilePath(value: string | null | undefined): boolean {
     return false
   }
 
-  return isAbsolute(value) && existsSync(value)
+  try {
+    return isAbsolute(decodeResourcePath(value)) && storedPathExists(value)
+  } catch {
+    return false
+  }
 }
 
 export function importAssetFile(
@@ -142,17 +160,10 @@ export function importAssetFile(
   ownerName: string,
   assetKey: string
 ): ImportedAssetResult {
-  void category
   void ownerName
-  void assetKey
-
-  if (!existsSync(sourcePath)) {
-    throw new Error(`资源文件不存在：${sourcePath}`)
-  }
-
-  ensureProjectDirectories()
-
-  const storedPath = toStoredPath(sourcePath)
+  const plan = new ResourcePathPlan(getProjectRootPath(), getLegacyResourceRoots())
+  const storedPath = plan.convert(sourcePath, importDirectory(category, assetKey, sourcePath))
+  plan.applyCopies()
   return {
     storedPath,
     url: storedPathToFileUrl(storedPath),
@@ -175,11 +186,58 @@ export function prepareAssetValue(
     return null
   }
 
-  if (isExternalFilePath(value)) {
+  try {
     return importAssetFile(value, category, ownerName, assetKey).storedPath
+  } catch (error) {
+    // Never rewrite an existing missing reference, nor silently persist a newly selected absolute path.
+    if (value === fallback || !/^(?:[a-z]:|[\\/]|file:|xqb-asset:)/i.test(value)) {
+      console.warn('[ResourcePath]', (error as Error).message, value)
+      return value
+    }
+    throw error
   }
+}
 
-  return normalizeStoredPath(value)
+/** All saves use the data root; loading never copies or rewrites a resource. */
+export function writeResourceDocument<T>(filePath: string, value: T): T {
+  const root = getProjectRootPath()
+  relativeResourcePath(root, filePath)
+  const previous = existsSync(filePath) ? JSON.parse(readFileSync(filePath, 'utf8')) : undefined
+  const plan = new ResourcePathPlan(root, getLegacyResourceRoots())
+  const portable = plan.document(value, previous, true)
+  if (previous && JSON.stringify(previous) !== JSON.stringify(portable))
+    backupResourceConfig(root, filePath, pathBackupDirectory(root))
+  plan.applyCopies()
+  writeResourceJsonAtomic(filePath, portable)
+  for (const issue of plan.issues) console.warn('[ResourcePath]', filePath, issue)
+  return portable
+}
+
+export function hydrateResourceDocument<T>(value: T): T {
+  if (Array.isArray(value)) return value.map((item) => hydrateResourceDocument(item)) as T
+  if (!value || typeof value !== 'object') return value
+  const row = Object.fromEntries(
+    Object.entries(value).map(([key, child]) => [
+      key,
+      ['resource_status', 'resourceStatus'].includes(key) ? child : hydrateResourceDocument(child)
+    ])
+  )
+  for (const [field, url] of Object.entries(resourceUrlFields)) {
+    if (!(field in row)) continue
+    row[url] = storedPathToFileUrl(row[field])
+    if (field === 'audioPath') row.audioExists = storedPathExists(row[field])
+    else if (url.endsWith('_url')) row[`${field}_exists`] = storedPathExists(row[field])
+  }
+  if (typeof row.targetImage === 'string') row.targetImage = storedPathToFileUrl(row.targetImage)
+  return row as T
+}
+
+/** Named file selectors still accept legacy bare names; persisted references use root-relative paths. */
+export function resolveConfigReference(value: string, directory: string): string {
+  const path = decodeResourcePath(value)
+  if (isAbsolute(path)) return path
+  const relativePath = path.includes('/') ? path : `${directory}/${path}`
+  return resolve(getProjectRootPath(), relativeResourcePath(getProjectRootPath(), relativePath))
 }
 
 function classifyAssetKind(filePath: string): LocalAssetKind {
