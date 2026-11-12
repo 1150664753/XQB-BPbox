@@ -218,12 +218,13 @@ export interface RemoteRoomPlayerState {
 }
 
 export interface RemoteBpRoomState {
+  invitationLink?: string | null
   turnAuthorizedUntil?: number | null
   turnWarning?: string | null
   lifecycle: RemoteRoomLifecycleState
   roomId: string | null
   createdAt: string | null
-  transport: 'mock' | 'webrtc'
+  transport: 'mock' | 'webrtc' | 'sakura'
   connectionState:
     | 'offline'
     | 'connecting'

@@ -4,6 +4,28 @@ import type { BpAPI } from './types'
 import type { ProjectFileChangeEvent } from '../shared/types'
 
 const bpAPI: BpAPI = {
+  sakura: {
+    settings: () => ipcRenderer.invoke('sakura:settings'),
+    configure: (config) => ipcRenderer.invoke('sakura:configure', config),
+    startService: () => ipcRenderer.invoke('sakura:start-service'),
+    stopService: () => ipcRenderer.invoke('sakura:stop-service'),
+    status: () => ipcRenderer.invoke('sakura:status'),
+    start: () => ipcRenderer.invoke('sakura:start'),
+    stop: () => ipcRenderer.invoke('sakura:stop'),
+    verify: () => ipcRenderer.invoke('sakura:verify'),
+    send: (roomId, peerId, message) => ipcRenderer.invoke('sakura:send', roomId, peerId, message),
+    kick: (roomId, side) => ipcRenderer.invoke('sakura:kick', roomId, side),
+    onEvent: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, value): void => callback(value)
+      ipcRenderer.on('sakura:event', listener)
+      return () => ipcRenderer.removeListener('sakura:event', listener)
+    },
+    onStatus: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, value): void => callback(value)
+      ipcRenderer.on('sakura:status', listener)
+      return () => ipcRenderer.removeListener('sakura:status', listener)
+    }
+  },
   teamSync: {
     settings: () => ipcRenderer.invoke('team-sync:settings'),
     configure: (repository) => ipcRenderer.invoke('team-sync:configure', repository),

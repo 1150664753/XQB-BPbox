@@ -1,13 +1,15 @@
 # XBQ-BPweb
 
-`XBQ-BPweb` 是 XQB-BPBox 的远程 BP 选手网页端。先手和后手通过信令服务器加入房间，随后使用 WebRTC DataChannel 直接向 BPbox 提交 Action，并只以 BPbox 返回的权威 `RemoteBpState` 刷新页面。
+`XBQ-BPweb` 是 XQB-BPBox 的远程 BP 选手网页端。WebRTC 模式通过信令加入房间，再用 DataChannel 传输；樱花模式通过完整邀请链接直接使用 WSS。两种模式都只向房主 BPbox 提交 Action，并以房主返回的权威 `RemoteBpState` 刷新页面。
 
-选手入口：[https://bp.xqbbp.dpdns.org/room](https://bp.xqbbp.dpdns.org/room)。输入房主提供的 6 位房间号即可加入；`https://bp.xqbbp.dpdns.org/room/<房间号>` 可预填房间号。
+选手入口：[https://bp.xqbbp.dpdns.org/room](https://bp.xqbbp.dpdns.org/room)。WebRTC 模式输入房主提供的 6 位房间号即可加入；`https://bp.xqbbp.dpdns.org/room/<房间号>` 可预填房间号。
 
 ## 当前能力
 
+- 支持完整樱花邀请链接，直接通过 WSS 连接房主本地服务；网页保持远端部署。邀请片段读取后从地址栏清除，复用原有席位选择、BP 操作与资源缓存。无樱花邀请的房间继续使用原 WebRTC 模式。配置和协议见[樱花穿透指南](../docs/SAKURA_REMOTE_BP.md)。
+
 - 输入房间码并选择先手或后手，身份由信令服务器确认。
-- `WebRtcRemoteBpConnection` 与 `MockRemoteBpConnection` 共用同一上层接口。
+- `WebRtcRemoteBpConnection`、`SakuraRemoteBpConnection` 与 `MockRemoteBpConnection` 共用同一上层接口。
 - 支持 Action、状态同步、revision/actionId、连接状态和 Ping/Pong；当前源码的连接层支持 Candidate 缓存、就绪握手、有次数上限的 ICE Restart 与信令恢复。
 - 对 BP State、Action Result、Error、Asset Manifest、资源分片和信令消息做运行时结构与大小校验。
 - 通过 WebRTC DataChannel 接收角色头像、全身立绘和光锥小图，并在生成浏览器 URL 前校验大小、MIME 与 SHA-256。

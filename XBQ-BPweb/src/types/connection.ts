@@ -12,6 +12,7 @@ export type ConnectionState =
   | "room-closed";
 
 export type ConnectionTransport =
+  | "sakura"
   | "mock"
   | "p2p"
   | "turn-relay"

@@ -1,4 +1,4 @@
-const { app, safeStorage, BrowserWindow } = require('electron')
+const { app, safeStorage, BrowserWindow, ipcMain } = require('electron')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -75,6 +75,7 @@ app
     })
     global.__XqbTurnTestWindowId = window.webContents.id
     require(path.join(directory, 'ipc.cjs')).registerTurnAuthIpc()
+    ipcMain.handle('sakura:settings', () => ({ mode: 'webrtc', publicUrl: '', localPort: 18787 }))
     await window.loadFile(path.join(directory, 'dialog.html'))
     const poll = async (script) => {
       const until = Date.now() + 5000

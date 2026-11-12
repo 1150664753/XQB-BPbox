@@ -71,6 +71,7 @@ export function JoinPage({
               id="room-id"
               name="roomId"
               value={roomId}
+              readOnly={connection.transport === 'sakura'}
               onChange={(event) =>
                 setRoomId(
                   event.target.value.replace(/[^a-zA-Z0-9]/g, "").slice(0, 12),
@@ -152,7 +153,7 @@ export function JoinPage({
             aria-live="polite"
           >
             {message ??
-              `当前连接方式：${runtimeConfig.transport === "mock" ? "本地演示" : "P2P"}`}
+              `当前连接方式：${connection.transport === 'sakura' ? '樱花穿透' : runtimeConfig.transport === "mock" ? "本地演示" : "P2P"}`}
           </div>
         </form>
       </section>

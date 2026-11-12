@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { networkSettings, useNetworkSettings } from '../../services/remoteBp/networkSettings'
 
 import {
   DEFAULT_REMOTE_SIDE_MAPPING,
@@ -63,6 +64,7 @@ const lifecycleLabel: Record<RemoteBpRoomState['lifecycle'], string> = {
 }
 
 export default function RemoteBpPanel({ host }: { host: RemoteBpHost }): React.JSX.Element {
+  const network = useNetworkSettings()
   const [room, setRoom] = useState<RemoteBpRoomState>(() => host.getRoomState())
   const [copyFeedback, setCopyFeedback] = useState<{
     roomId: string | null
@@ -71,6 +73,7 @@ export default function RemoteBpPanel({ host }: { host: RemoteBpHost }): React.J
   const copyState = copyFeedback.roomId === room.roomId ? copyFeedback.state : 'idle'
 
   useEffect(() => host.subscribe(setRoom), [host])
+  useEffect(() => networkSettings.bind(host), [host])
 
   useEffect(() => {
     if (copyState === 'idle') return
@@ -86,7 +89,9 @@ export default function RemoteBpPanel({ host }: { host: RemoteBpHost }): React.J
     if (!room.roomId) return
 
     try {
-      await writeClipboardText(room.roomId)
+      await writeClipboardText(
+        room.transport === 'sakura' ? (room.invitationLink ?? '') : room.roomId
+      )
       setCopyFeedback({ roomId: room.roomId, state: 'copied' })
     } catch {
       setCopyFeedback({ roomId: room.roomId, state: 'error' })
@@ -94,7 +99,8 @@ export default function RemoteBpPanel({ host }: { host: RemoteBpHost }): React.J
   }
 
   const isActive = room.lifecycle === 'active'
-  const isBusy = room.lifecycle === 'starting' || room.lifecycle === 'stopping'
+  const isBusy =
+    !network.ready || network.busy || room.lifecycle === 'starting' || room.lifecycle === 'stopping'
 
   const playerRow = (side: 'first' | 'second'): React.JSX.Element => {
     const player = side === 'first' ? room.firstPlayer : room.secondPlayer
@@ -109,6 +115,7 @@ export default function RemoteBpPanel({ host }: { host: RemoteBpHost }): React.J
             ? ' · ' +
               ({
                 p2p: 'P2P',
+                sakura: '樱花 WSS',
                 'turn-udp': 'TURN UDP',
                 'turn-tcp': 'TURN TCP',
                 'turn-relay': 'TURN（协议未知）'
@@ -138,6 +145,18 @@ export default function RemoteBpPanel({ host }: { host: RemoteBpHost }): React.J
         </span>
       </header>
 
+      <div className="remote-bp-mode-summary">
+        <span>
+          {room.transport === 'sakura'
+            ? '樱花穿透 · WebSocket'
+            : room.transport === 'mock'
+              ? '本地演示'
+              : 'WebRTC · STUN / TURN'}
+        </span>
+        <small>网络设置：Ctrl + Shift + T</small>
+      </div>
+      {network.error && <small className="remote-bp-error">{network.error}</small>}
+
       <div className="remote-bp-room-code-row">
         <span>房间</span>
         <strong>{room.roomId ?? '未创建'}</strong>
@@ -147,9 +166,16 @@ export default function RemoteBpPanel({ host }: { host: RemoteBpHost }): React.J
               type="button"
               className="remote-bp-copy-button"
               onClick={() => void copyRoomCode()}
-              title={`复制房间码 ${room.roomId}`}
+              title={room.transport === 'sakura' ? '复制完整邀请链接' : `复制房间码 ${room.roomId}`}
+              disabled={room.transport === 'sakura' && !room.invitationLink}
             >
-              {copyState === 'copied' ? '已复制' : copyState === 'error' ? '复制失败' : '复制'}
+              {copyState === 'copied'
+                ? '已复制'
+                : copyState === 'error'
+                  ? '复制失败'
+                  : room.transport === 'sakura'
+                    ? '复制邀请'
+                    : '复制'}
             </button>
           ) : null}
         </div>
@@ -160,7 +186,7 @@ export default function RemoteBpPanel({ host }: { host: RemoteBpHost }): React.J
         <strong>{room.lastPublishedRevision ?? '—'}</strong>
         <span>资源</span>
         <strong>{room.assetCount}</strong>
-        <span>信令</span>
+        <span>{room.transport === 'sakura' ? '公网' : '信令'}</span>
         <strong>{signalingStateLabel[room.connectionState]}</strong>
       </div>
 
@@ -181,20 +207,26 @@ export default function RemoteBpPanel({ host }: { host: RemoteBpHost }): React.J
         <button
           type="button"
           className="primary"
-          disabled={isActive || isBusy}
+          disabled={
+            isActive || isBusy || (room.transport === 'sakura' && !network.settings.publicUrl)
+          }
           onClick={() =>
-            void host.startRoom({
+            void networkSettings.startRoom(host, {
               ...(room.transport === 'mock' ? { roomId: createMockRoomId() } : {}),
               mapping: DEFAULT_REMOTE_SIDE_MAPPING
             })
           }
         >
-          {room.transport === 'mock' ? '开启 Mock 房间' : '创建远程 BP'}
+          {room.transport === 'mock'
+            ? '开启 Mock 房间'
+            : room.transport === 'sakura'
+              ? '启动樱花房间'
+              : '创建远程 BP'}
         </button>
         <button
           type="button"
           className="secondary"
-          disabled={!isActive || isBusy}
+          disabled={(!isActive && room.lifecycle !== 'error') || isBusy}
           onClick={() => void host.stopRoom()}
         >
           关闭房间

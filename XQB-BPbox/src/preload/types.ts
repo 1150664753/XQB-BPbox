@@ -29,6 +29,7 @@ import type { UpdateState } from '../shared/updater'
 import type { AssetManifest, AssetManifestEntry, RemoteAssetBinary } from '../shared/remoteBp'
 
 export interface BpAPI {
+  sakura: import('../shared/sakura').SakuraAPI
   teamSync: import('../shared/teamSync').TeamSyncAPI
   turnAuth: import('../shared/turnAuth').TurnAuthAPI
   updater: {

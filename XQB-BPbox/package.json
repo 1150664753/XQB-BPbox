@@ -1,7 +1,7 @@
 {
   "name": "xqb-bpbox",
   "productName": "XQB-BPBox",
-  "version": "1.2.6",
+  "version": "1.2.7",
   "description": "An Electron application with React and TypeScript",
   "main": "./out/main/index.js",
   "author": "example.com",
@@ -29,12 +29,15 @@
     "test:webrtc": "node scripts/webrtc-self-check.cjs && node scripts/remote-bp-wire-self-check.cjs",
     "test:remote-images": "node scripts/remote-image-self-check.cjs",
     "test:remote-network": "node scripts/remote-network-self-check.cjs",
-    "test:turn-desktop": "node scripts/turn-desktop-self-check.cjs"
+    "test:turn-desktop": "node scripts/turn-desktop-self-check.cjs",
+    "test:sakura": "node scripts/sakura-self-check.cjs && node scripts/sakura-electron-check.cjs",
+    "test:sakura-packaged": "node scripts/sakura-packaged-check.cjs"
   },
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^4.0.0",
-    "electron-updater": "^6.3.9"
+    "electron-updater": "^6.3.9",
+    "ws": "^8.22.2"
   },
   "devDependencies": {
     "@electron-toolkit/eslint-config-prettier": "^3.0.0",
@@ -43,6 +46,7 @@
     "@types/node": "^22.19.1",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
+    "@types/ws": "^8.18.2",
     "@vitejs/plugin-react": "^5.1.1",
     "electron": "^39.2.6",
     "electron-builder": "^26.0.12",

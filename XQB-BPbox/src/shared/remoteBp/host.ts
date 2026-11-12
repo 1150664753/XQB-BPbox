@@ -61,6 +61,7 @@ export class RemoteBpHost {
   private readonly unsubscribers: Array<() => void>
   private readonly assetTransferQueues = new Map<string, Promise<void>>()
   private readonly requestedAssets = new Map<string, Set<string>>()
+  private readonly pendingRemoteActions = new Set<Promise<RemoteBpActionResult>>()
   private assetManifestRefresh: Promise<AssetManifest | null> | null = null
   private lastAssetManifestRevision: number | null = null
   private state: RemoteBpRoomState
@@ -83,12 +84,17 @@ export class RemoteBpHost {
     this.unsubscribers = [
       dependencies.transport.onMessage((message) => {
         switch (message.type) {
-          case 'ACTION_REQUEST':
-            void this.handleRemoteAction(message.action, {
+          case 'ACTION_REQUEST': {
+            const pending = this.handleRemoteAction(message.action, {
               peerId: message.peerId,
               side: message.side
             })
+            this.pendingRemoteActions.add(pending)
+            void pending
+              .catch(() => undefined)
+              .finally(() => this.pendingRemoteActions.delete(pending))
             break
+          }
           case 'STATE_REQUEST':
             void this.sendStateToPeer(message.peerId)
             break
@@ -116,6 +122,7 @@ export class RemoteBpHost {
         void this.broadcastState('STATE_UPDATE')
       }),
       dependencies.transport.onPeerReconnecting((peer) => {
+        this.requestedAssets.delete(peer.peerId)
         this.updatePeer(peer, 'reconnecting')
         void this.broadcastState('STATE_UPDATE')
       }),
@@ -126,6 +133,7 @@ export class RemoteBpHost {
       }),
       dependencies.transport.onStatusChange((status) => {
         this.patch({
+          ...(status.invitationLink !== undefined ? { invitationLink: status.invitationLink } : {}),
           connectionState: status.connectionState,
           ...(status.turnAuthorizedUntil !== undefined
             ? { turnAuthorizedUntil: status.turnAuthorizedUntil }
@@ -162,6 +170,18 @@ export class RemoteBpHost {
     return this.dependencies.transport.getConnectionPath?.(side) ?? 'unknown'
   }
 
+  async setTransportMode(mode: 'webrtc' | 'sakura'): Promise<void> {
+    if (this.state.lifecycle !== 'idle') throw new Error('请先关闭当前远程房间再切换连接模式')
+    if (!this.dependencies.transport.selectMode) throw new Error('当前传输不支持切换')
+    this.dependencies.transport.selectMode(mode)
+    this.patch({
+      transport: this.dependencies.transport.kind,
+      invitationLink: null,
+      turnAuthorizedUntil: null,
+      turnWarning: null
+    })
+  }
+
   async startRoom(options: StartRemoteRoomOptions): Promise<RemoteBpRoomState> {
     if (this.state.lifecycle !== 'idle' && this.state.lifecycle !== 'error') {
       return this.getRoomState()
@@ -191,6 +211,8 @@ export class RemoteBpHost {
       if (!roomId) throw new Error('Transport 未返回房间码')
       this.patch({
         lifecycle: 'active',
+        error: started?.error ?? null,
+        invitationLink: started?.invitationLink ?? null,
         turnAuthorizedUntil: started?.turnAuthorizedUntil ?? null,
         roomId,
         createdAt: started?.createdAt ?? createdAt,
@@ -218,6 +240,8 @@ export class RemoteBpHost {
   async stopRoom(): Promise<RemoteBpRoomState> {
     if (this.state.lifecycle === 'idle') return this.getRoomState()
     this.patch({ lifecycle: 'stopping' })
+    // Drain already accepted operations before another transport can start an authority session.
+    await Promise.allSettled([...this.pendingRemoteActions])
     try {
       await this.dependencies.transport.broadcast({
         type: 'ROOM_CLOSED',
@@ -235,6 +259,7 @@ export class RemoteBpHost {
       ...this.state,
       lifecycle: 'idle',
       roomId: null,
+      invitationLink: null,
       createdAt: null,
       connectionState: 'offline',
       firstPlayer: emptyPlayer('first'),

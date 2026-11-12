@@ -37,6 +37,8 @@ XQB-BPBox 是一款为《星穹杯》开发，面向《崩坏：星穹铁道》�
 
 ## 远程 BP 选手入口
 
+远程 BP 现支持手动选择 WebRTC（STUN/TURN）或樱花穿透（WebSocket）。通过 Ctrl + Shift + T 打开统一网络设置。樱花客户端由房主在外部运行；配置、完整邀请链接与验证范围见 [樱花穿透使用指南](./docs/SAKURA_REMOTE_BP.md)。
+
 选手访问：[https://bp.xqbbp.dpdns.org/room](https://bp.xqbbp.dpdns.org/room)。
 
 房主先在 BPbox 的“开始BP”→“远程 BP”中创建房间，将 6 位房间号发给选手。选手在网页中填写房间号和队伍或选手名称，选择先手／后手后加入。也可以分享预填房间号的链接，例如 [ABCDEF 房间入口](https://bp.xqbbp.dpdns.org/room/ABCDEF)（示例房间号，需替换为实际房间号）。

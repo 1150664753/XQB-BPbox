@@ -77,6 +77,8 @@ export interface RemoteHostPeer {
 }
 
 export interface RemoteHostTransportStartResult {
+  error?: string | null
+  invitationLink?: string
   roomId: string
   createdAt?: string
   expiresAt?: string
@@ -85,6 +87,7 @@ export interface RemoteHostTransportStartResult {
 }
 
 export interface RemoteHostTransportStatus {
+  invitationLink?: string | null
   connectionState: RemoteBpRoomState['connectionState']
   error?: string | null
   turnWarning?: string | null
@@ -92,7 +95,8 @@ export interface RemoteHostTransportStatus {
 }
 
 export interface RemoteHostTransport {
-  readonly kind: 'mock' | 'webrtc'
+  readonly kind: 'mock' | 'webrtc' | 'sakura'
+  selectMode?: (mode: 'webrtc' | 'sakura') => void
   getConnectionPath?: (side: 'first' | 'second') => string
   start(room: RemoteBpRoomState): Promise<RemoteHostTransportStartResult | void>
   stop(): Promise<void>

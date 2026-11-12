@@ -24,6 +24,7 @@ export function ConnectionBadge({
         ? " · " +
           {
             mock: "演示",
+            sakura: "樱花穿透",
             p2p: "P2P",
             "turn-udp": "TURN UDP",
             "turn-tcp": "TURN TCP",

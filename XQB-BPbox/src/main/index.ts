@@ -11,6 +11,7 @@ import { registerFlowIpc } from './ipc/flows'
 import { registerLightConeIpc } from './ipc/lightCones'
 import { registerRemoteBpIpc } from './ipc/remoteBp'
 import { registerTurnAuthIpc } from './ipc/turnAuth'
+import { registerSakuraIpc } from './ipc/sakura'
 import { registerVoiceTimelineIpc } from './ipc/voiceTimelines'
 import { startProjectFileWatchers } from './projectFileWatchers'
 import { registerAssetProtocol, registerAssetProtocolScheme } from './protocols'
@@ -32,6 +33,7 @@ function registerIpcHandlers(): void {
   registerBpIpc()
   registerRemoteBpIpc()
   registerTurnAuthIpc()
+  registerSakuraIpc()
   registerUpdaterIpc()
 }
 
